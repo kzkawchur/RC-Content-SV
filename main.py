@@ -45,10 +45,10 @@ userbot = Client("userbot_helper", api_id=API_ID, api_hash=API_HASH, session_str
 async def start(client, message):
     await message.reply_text(
         f"স্বাগতম **{message.from_user.first_name}**!\n\n"
-        "আমি রেস্ট্রিক্টেড ভিডিও ডাউনলোড করতে পারি।\n"
+        "আমি রেস্ট্রিক্টেড ভিডিও, ছবি ও তথ্য ডাউনলোড করতে পারি।\n"
         "**কীভাবে ব্যবহার করবেন:**\n"
-        "১. আমাকে ভিডিওর লিংকটি পাঠান।\n"
-        "২. যদি চ্যানেলটি প্রাইভেট হয়, তবে আপনার আইডিটি জয়েন থাকতে হবে।"
+        "১. আমাকে ম্যাসেজ লিংকটি পাঠান।\n"
+        "২. যদি চ্যানেল বা গ্রুপটি প্রাইভেট হয়, তবে আপনার আইডিটি জয়েন থাকতে হবে।"
     )
 
 @bot.on_message(filters.text & filters.private)
