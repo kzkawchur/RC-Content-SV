@@ -100,7 +100,7 @@ async def auto_status():
         except Exception as e:
             print(f"Auto status error: {e}")
         
-        await asyncio.sleep(300) # Wait for 300 seconds (5 minutes)
+        await asyncio.sleep(600) # Wait for 600 seconds (10 minutes)
 
 # --- Helper: Force Subscribe Checker ---
 async def check_fsub(client, message):
@@ -128,7 +128,7 @@ async def start(client, message):
 
     await message.reply_text(
         f"Welcome **{message.from_user.first_name}**! 👋\n\n"
-        "I can download restricted content from any Telegram channel (Video, Photo, Audio, Document, or Text).\n\n"
+        "I can download restricted content from any Telegram channel & group (Video, Photo, Audio, Document, or Text).\n\n"
         "**How to use:**\n"
         "Just send me the link of the restricted message.\n\n"
         "**Commands:**\n"
