@@ -101,7 +101,7 @@ async def handle_link(client, message):
     status_msg = await message.reply_text("⏳ **Processing...**")
 
     # --- Terabox Logic ---
-    if "terabox.com" in link or "teraboxapp.com" in link:
+    if "terabox.com" in link or "teraboxapp.com" in link or "1024tera.com" in link or "terasharelink.com" in link:
         try:
             api_url = f"https://terabox-dl.qtcloud.workers.dev/api/get-info?shorturl={link.split('/')[-1]}"
             response = requests.get(api_url).json()
@@ -117,9 +117,8 @@ async def handle_link(client, message):
             if file_size > TERA_LIMIT:
                 return await status_msg.edit(f"❌ **Terabox Limit Exceeded!**\nMax limit is 450MB. Your file is {humanbytes(file_size)}.")
 
-            await status_msg.edit(f"📥 **Downloading Terabox File:**\n`{file_name}`")
+            await status_msg.edit(f"📥 **Downloading Terabox File:**\n`{file_name}`\n_Please wait, this might take a while..._")
             
-            # Simple download
             file_path = f"downloads/{file_name}"
             if not os.path.exists("downloads"): os.makedirs("downloads")
             
@@ -153,7 +152,7 @@ async def handle_link(client, message):
             if target_msg.media:
                 media = target_msg.document or target_msg.video or target_msg.audio or target_msg.photo
                 if getattr(media, 'file_size', 0) > TG_LIMIT:
-                    return await status_msg.edit("❌ TG File too large (>1GB).")
+                    return await status_msg.edit(f"❌ **TG Limit Exceeded!**\nYour file is {humanbytes(getattr(media, 'file_size', 0))}. Max limit is 1GB.")
 
                 start_time = time.time()
                 file_path = await userbot.download_media(target_msg, progress=progress_bar, progress_args=("📥 **Downloading...**", status_msg, start_time))
@@ -169,10 +168,13 @@ async def handle_link(client, message):
             await status_msg.edit(f"❌ **Error:** {str(e)}")
         return
 
-    await status_msg.edit("❌ Unsupported Link!")
+    await status_msg.edit("❌ Unsupported Link! Please send a valid Telegram or Terabox link.")
 
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
+    if not await check_fsub(client, message):
+        btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
+        return await message.reply_text("❌ Join our channel first!", reply_markup=InlineKeyboardMarkup(btn))
     await message.reply_text(f"Welcome **{message.from_user.first_name}**! 👋\n\nI can save Restricted Content (1GB) and Terabox Videos (450MB). Send me a link!")
 
 async def main_runner():
