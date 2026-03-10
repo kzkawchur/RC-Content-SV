@@ -75,6 +75,31 @@ async def start(client, message):
         "2. If it's a private channel, make sure my underlying account is a member there."
     )
 
+# --- Help Command ---
+@bot.on_message(filters.command("help") & filters.private)
+async def help_cmd(client, message):
+    help_text = (
+        "❓ **How to use this bot:**\n\n"
+        "1️⃣ Join our required channel first.\n"
+        "2️⃣ Go to any Restricted Channel/Group.\n"
+        "3️⃣ Copy the link of the Video or File.\n"
+        "4️⃣ Paste the link here and wait for the upload.\n\n"
+        "⚠️ **Note:** For private channels, I can only help if my Admin is already a member there."
+    )
+    await message.reply_text(help_text)
+
+# --- About Command ---
+@bot.on_message(filters.command("about") & filters.private)
+async def about_cmd(client, message):
+    about_text = (
+        "🤖 **Bot Name:** Restricted Content Saver\n"
+        "🚀 **Version:** 2.0 (High Speed)\n"
+        "🛠 **Framework:** Pyrogram\n"
+        "📡 **Server:** Render (Cloud)\n\n"
+        "Specialized in saving restricted media from Telegram."
+    )
+    await message.reply_text(about_text)
+
 # --- Link Processing (All Media Types) ---
 @bot.on_message(filters.text & filters.private)
 async def handle_link(client, message):
