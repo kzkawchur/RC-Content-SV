@@ -3,14 +3,22 @@ import asyncio
 import sys
 import time
 import math
-import requests
+import subprocess
+
+# --- Auto install requests if missing ---
+try:
+    import requests
+except ImportError:
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests"])
+    import requests
+
 from flask import Flask
 import threading
 from pyrogram import Client, filters, idle
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError, UserNotParticipant
 
-# --- 1. Web Server for Render ---
+# --- Web Server ---
 app = Flask(__name__)
 @app.route('/')
 def health_check(): return "✅ Bot is running perfectly!", 200
@@ -19,25 +27,23 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 threading.Thread(target=run_web_server, daemon=True).start()
 
-# --- 2. Async Loop Handling ---
+# --- Async Setup ---
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEvent_loop_policy())
 else:
     try: loop = asyncio.get_event_loop()
     except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        loop = asyncio.new_event_loop(); asyncio.set_event_loop(loop)
 
-# --- 3. Configuration ---
+# --- Configuration ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
-
 FORCE_SUB_CHANNEL = os.environ.get("FORCE_SUB_CHANNEL", "") 
 CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "")       
-TG_LIMIT = 1 * 1024 * 1024 * 1024 # 1GB for Telegram
-TERA_LIMIT = 450 * 1024 * 1024   # 450MB for Terabox
+TG_LIMIT = 1 * 1024 * 1024 * 1024
+TERA_LIMIT = 450 * 1024 * 1024
 
 bot = Client("my_saver_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 userbot = Client("userbot_helper", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
@@ -62,63 +68,54 @@ async def progress_bar(current, total, ud_type, message, start_time):
         try: await message.edit(text=tmp)
         except: pass
 
-async def auto_status():
-    last_msg = None
-    while True:
-        try:
-            if FORCE_SUB_CHANNEL:
-                if last_msg:
-                    try: await last_msg.delete()
-                    except: pass
-                status_text = (
-                    "✨ **「 BOT STATUS UPDATE 」** ✨\n\n"
-                    "⚡ **Status:** Active & Stable\n"
-                    "📥 **TG Limit:** 1.0 GB\n"
-                    "📦 **Terabox Limit:** 450 MB\n"
-                    f"⏰ **Check:** `{time.strftime('%H:%M:%S')} (UTC)`\n\n"
-                    "💎 _Bot is ready to serve!_"
-                )
-                last_msg = await bot.send_message(f"@{FORCE_SUB_CHANNEL}", status_text)
-        except: pass
-        await asyncio.sleep(600)
-
 async def check_fsub(client, message):
     if not FORCE_SUB_CHANNEL: return True
     try:
         await client.get_chat_member(FORCE_SUB_CHANNEL, message.from_user.id)
         return True
-    except UserNotParticipant: return False
-    except: return True
+    except: return False
 
-# --- Main Logic ---
-@bot.on_message(filters.text & filters.private)
-async def handle_link(client, message):
+# --- COMMANDS (Fix for /start, /help, /about) ---
+@bot.on_message(filters.command(["start", "help", "about"]) & filters.private)
+async def commands(client, message):
     if not await check_fsub(client, message):
         btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
         return await message.reply_text("❌ Join our channel first!", reply_markup=InlineKeyboardMarkup(btn))
     
+    cmd = message.command[0]
+    if cmd == "start":
+        await message.reply_text(f"Welcome **{message.from_user.first_name}**! 👋\nSend me a Telegram Restricted Link or Terabox Link.")
+    elif cmd == "help":
+        await message.reply_text("❓ **How to use:**\n1. Join channel.\n2. Send original Terabox link (not short links).\n3. Or send Telegram restricted link.")
+    elif cmd == "about":
+        await message.reply_text("🤖 **Restricted & Terabox Saver Bot**\nVersion: 3.0 (Stable)")
+
+# --- LINK HANDLER ---
+@bot.on_message(filters.text & filters.private & ~filters.command(["start", "help", "about"]))
+async def handle_link(client, message):
+    if not await check_fsub(client, message): return
+    
     link = message.text.strip()
     status_msg = await message.reply_text("⏳ **Processing...**")
 
-    # --- Terabox Logic ---
-    if "terabox.com" in link or "teraboxapp.com" in link or "1024tera.com" in link or "terasharelink.com" in link:
+    # Terabox Support
+    tera_domains = ["terabox.com", "teraboxapp.com", "1024tera.com", "terasharelink.com", "terabox.app"]
+    if any(domain in link for domain in tera_domains):
         try:
-            api_url = f"https://terabox-dl.qtcloud.workers.dev/api/get-info?shorturl={link.split('/')[-1]}"
+            shorturl = link.split('/')[-1].split('?')[0]
+            api_url = f"https://terabox-dl.qtcloud.workers.dev/api/get-info?shorturl={shorturl}"
             response = requests.get(api_url).json()
             
             if not response.get("list"):
-                return await status_msg.edit("❌ **Error:** Invalid Terabox link or file not found.")
+                return await status_msg.edit("❌ **Invalid Link!** Please send the original Terabox link, not a short link.")
             
             file_info = response["list"][0]
-            file_name = file_info["filename"]
-            dl_link = file_info["download_link"]["url"]
-            file_size = int(file_info["size"])
+            file_name, dl_link, file_size = file_info["filename"], file_info["download_link"]["url"], int(file_info["size"])
 
             if file_size > TERA_LIMIT:
-                return await status_msg.edit(f"❌ **Terabox Limit Exceeded!**\nMax limit is 450MB. Your file is {humanbytes(file_size)}.")
+                return await status_msg.edit(f"❌ Limit Exceeded: {humanbytes(file_size)}")
 
-            await status_msg.edit(f"📥 **Downloading Terabox File:**\n`{file_name}`\n_Please wait, this might take a while..._")
-            
+            await status_msg.edit(f"📥 **Downloading:** `{file_name}`")
             file_path = f"downloads/{file_name}"
             if not os.path.exists("downloads"): os.makedirs("downloads")
             
@@ -126,64 +123,47 @@ async def handle_link(client, message):
                 with open(file_path, 'wb') as f:
                     for chunk in r.iter_content(chunk_size=8192): f.write(chunk)
 
-            await status_msg.edit("📤 **Uploading to Telegram...**")
+            await status_msg.edit("📤 **Uploading...**")
             await client.send_document(message.chat.id, document=file_path, caption=f"**File:** `{file_name}`\n\n{CUSTOM_CAPTION}")
             os.remove(file_path)
             await status_msg.delete()
         except Exception as e:
-            await status_msg.edit(f"❌ **Terabox Error:** {str(e)}")
+            await status_msg.edit(f"❌ Error: {str(e)}")
         return
 
-    # --- Telegram Restricted Logic ---
+    # Telegram Link Support
     if "t.me/" in link:
         try:
             if "t.me/c/" in link:
                 parts = link.split("/")
-                chat_id = int("-100" + parts[parts.index("c") + 1])
-                msg_id = int(parts[-1].split("?")[0])
+                chat_id, msg_id = int("-100" + parts[parts.index("c") + 1]), int(parts[-1].split("?")[0])
             else:
                 parts = link.split("/")
-                chat_id = parts[-2]
-                msg_id = int(parts[-1].split("?")[0])
+                chat_id, msg_id = parts[-2], int(parts[-1].split("?")[0])
 
             if not userbot.is_connected: await userbot.start()
             target_msg = await userbot.get_messages(chat_id, msg_id)
             
             if target_msg.media:
                 media = target_msg.document or target_msg.video or target_msg.audio or target_msg.photo
-                if getattr(media, 'file_size', 0) > TG_LIMIT:
-                    return await status_msg.edit(f"❌ **TG Limit Exceeded!**\nYour file is {humanbytes(getattr(media, 'file_size', 0))}. Max limit is 1GB.")
-
-                start_time = time.time()
-                file_path = await userbot.download_media(target_msg, progress=progress_bar, progress_args=("📥 **Downloading...**", status_msg, start_time))
+                if getattr(media, 'file_size', 0) > TG_LIMIT: return await status_msg.edit("❌ Over 1GB!")
                 
                 start_time = time.time()
-                await client.send_document(message.chat.id, document=file_path, caption=f"{target_msg.caption or ''}\n\n{CUSTOM_CAPTION}", progress=progress_bar, progress_args=("📤 **Uploading...**", status_msg, start_time))
+                file_path = await userbot.download_media(target_msg, progress=progress_bar, progress_args=("📥 Downloading...", status_msg, start_time))
+                await client.send_document(message.chat.id, document=file_path, caption=f"{target_msg.caption or ''}\n\n{CUSTOM_CAPTION}")
                 if os.path.exists(file_path): os.remove(file_path)
                 await status_msg.delete()
-            elif target_msg.text:
+            else:
                 await client.send_message(message.chat.id, f"{target_msg.text}\n\n{CUSTOM_CAPTION}")
                 await status_msg.delete()
-        except Exception as e:
-            await status_msg.edit(f"❌ **Error:** {str(e)}")
+        except Exception as e: await status_msg.edit(f"❌ Error: {str(e)}")
         return
 
-    await status_msg.edit("❌ Unsupported Link! Please send a valid Telegram or Terabox link.")
-
-@bot.on_message(filters.command("start") & filters.private)
-async def start(client, message):
-    if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
-        return await message.reply_text("❌ Join our channel first!", reply_markup=InlineKeyboardMarkup(btn))
-    await message.reply_text(f"Welcome **{message.from_user.first_name}**! 👋\n\nI can save Restricted Content (1GB) and Terabox Videos (450MB). Send me a link!")
+    await status_msg.edit("❌ Unsupported Link! Please send original Terabox or TG link.")
 
 async def main_runner():
-    await userbot.start()
-    await bot.start()
-    asyncio.create_task(auto_status())
-    print("✅ Bot is online: TG + Terabox (450MB Limit)")
-    await idle()
+    await userbot.start(); await bot.start()
+    print("✅ Bot is online!"); await idle()
 
 if __name__ == "__main__":
-    try: loop.run_until_complete(main_runner())
-    except KeyboardInterrupt: pass
+    loop.run_until_complete(main_runner())
