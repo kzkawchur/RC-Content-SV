@@ -1,129 +1,153 @@
 import os
 import asyncio
 import sys
+import time
+import math
 from flask import Flask
 import threading
 from pyrogram import Client, filters
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, RPCError, UserNotParticipant
+from motor.motor_asyncio import AsyncIOMotorClient
 
-# --- 1. Web Server for Render & UptimeRobot ---
+# --- 1. Web Server for UptimeRobot ---
 app = Flask(__name__)
-
 @app.route('/')
-def health_check():
-    return "✅ Bot is running perfectly!", 200
-
+def health_check(): return "✅ Pro Bot is Running!", 200
 def run_web_server():
-    # Render binds to port 8080 by default
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
-
-# Running Flask in a separate thread
 threading.Thread(target=run_web_server, daemon=True).start()
 
-# --- 2. Async Loop Handling ---
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEvent_loop_policy())
-else:
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-# --- 3. Configuration (From Environment Variables) ---
+# --- 2. Configuration ---
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 STRING_SESSION = os.environ.get("STRING_SESSION", "")
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))
+MONGO_URL = os.environ.get("MONGO_URL", "") # MongoDB Connection String
+FORCE_SUB_CHANNEL = os.environ.get("FORCE_SUB_CHANNEL", "")
+CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "")
 
-# Extra Features
-FORCE_SUB_CHANNEL = os.environ.get("FORCE_SUB_CHANNEL", "") # Example: MyChannel (without @)
-CUSTOM_CAPTION = os.environ.get("CUSTOM_CAPTION", "")       # Example: 🚀 Join @MyChannel
+# --- 3. Database Setup ---
+db_client = AsyncIOMotorClient(MONGO_URL)
+db = db_client.content_saver_bot
+users_col = db.users
 
-# Clients Setup
+# --- 4. Clients Setup ---
 bot = Client("my_saver_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 userbot = Client("userbot_helper", api_id=API_ID, api_hash=API_HASH, session_string=STRING_SESSION)
 
-# --- Helper: Force Subscribe Checker ---
+# --- 5. Progress Bar Utility ---
+async def progress_bar(current, total, ud_type, message, start_time):
+    now = time.time()
+    diff = now - start_time
+    if round(diff % 4.00) == 0 or current == total:
+        percentage = current * 100 / total
+        speed = current / diff
+        elapsed_time = round(diff) * 1000
+        time_to_completion = round((total - current) / speed) * 1000
+        estimated_total_time = elapsed_time + time_to_completion
+
+        elapsed_time = TimeFormatter(milliseconds=elapsed_time)
+        estimated_total_time = TimeFormatter(milliseconds=estimated_total_time)
+
+        progress = "[{0}{1}] \n**Progress**: {2}%\n".format(
+            ''.join(["▰" for i in range(math.floor(percentage / 5))]),
+            ''.join(["▱" for i in range(20 - math.floor(percentage / 5))]),
+            round(percentage, 2))
+
+        tmp = progress + "**Status**: {0}\n**Done**: {1} / {2}\n**Speed**: {3}/s\n**ETA**: {4}\n".format(
+            ud_type,
+            humanbytes(current),
+            humanbytes(total),
+            humanbytes(speed),
+            estimated_total_time if estimated_total_time != '' else "0 s"
+        )
+        try:
+            await message.edit(text=tmp)
+        except:
+            pass
+
+def humanbytes(size):
+    if not size: return ""
+    power = 2**10
+    n = 0
+    Dic_powerN = {0: ' ', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
+    while size > power:
+        size /= power
+        n += 1
+    return str(round(size, 2)) + " " + Dic_powerN[n] + 'B'
+
+def TimeFormatter(milliseconds: int) -> str:
+    seconds, milliseconds = divmod(int(milliseconds), 1000)
+    minutes, seconds = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    days, hours = divmod(hours, 24)
+    tmp = ((str(days) + "d, ") if days else "") + \
+        ((str(hours) + "h, ") if hours else "") + \
+        ((str(minutes) + "m, ") if minutes else "") + \
+        ((str(seconds) + "s, ") if seconds else "")
+    return tmp[:-2]
+
+# --- 6. Helper: Force Subscribe ---
 async def check_fsub(client, message):
-    if not FORCE_SUB_CHANNEL:  
-        return True
+    if not FORCE_SUB_CHANNEL: return True
     try:
         await client.get_chat_member(FORCE_SUB_CHANNEL, message.from_user.id)
         return True
-    except UserNotParticipant:
-        return False
-    except Exception:
-        return True
+    except UserNotParticipant: return False
+    except: return True
 
-# --- Command: /start ---
+# --- 7. Admin Commands ---
+@bot.on_message(filters.command("stats") & filters.user(ADMIN_ID))
+async def stats(client, message):
+    count = await users_col.count_documents({})
+    await message.reply_text(f"📊 **Total Users:** {count}")
+
+@bot.on_message(filters.command("broadcast") & filters.user(ADMIN_ID))
+async def broadcast(client, message):
+    if not message.reply_to_message:
+        return await message.reply_text("Reply to a message to broadcast.")
+    
+    msg = await message.reply_text("📢 Broadcasting started...")
+    users = users_col.find({})
+    done = 0
+    failed = 0
+    async for user in users:
+        try:
+            await message.reply_to_message.copy(user['user_id'])
+            done += 1
+        except:
+            failed += 1
+    await msg.edit(f"✅ **Broadcast Completed!**\n\nSuccess: {done}\nFailed: {failed}")
+
+# --- 8. User Commands ---
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
+    # Add user to DB
+    user_id = message.from_user.id
+    if not await users_col.find_one({"user_id": user_id}):
+        await users_col.insert_one({"user_id": user_id})
+
     if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 Join Our Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
-        return await message.reply_text(
-            f"Hello **{message.from_user.first_name}**!\n\n"
-            "❌ **Access Denied!** You must join our updates channel to use this bot.\n\n"
-            "Join using the button below and send `/start` again.",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
+        btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
+        return await message.reply_text("❌ Join our channel to use the bot!", reply_markup=InlineKeyboardMarkup(btn))
+    
+    await message.reply_text(f"Hello **{message.from_user.first_name}**! Send me any restricted link.")
 
-    await message.reply_text(
-        f"Welcome **{message.from_user.first_name}**! 👋\n\n"
-        "I can download restricted content from any Telegram channel (Video, Photo, Audio, Document, or Text).\n\n"
-        "**How to use:**\n"
-        "Just send me the link of the restricted message.\n\n"
-        "**Commands:**\n"
-        "/help - See usage guide\n"
-        "/about - Bot information"
-    )
-
-# --- Command: /help ---
-@bot.on_message(filters.command("help") & filters.private)
-async def help_cmd(client, message):
-    help_text = (
-        "❓ **How to use this bot:**\n\n"
-        "1️⃣ Ensure you have joined our required channel.\n"
-        "2️⃣ Go to any Restricted Channel/Group.\n"
-        "3️⃣ Copy the link of the post you want to save.\n"
-        "4️⃣ Paste the link here and wait for the upload.\n\n"
-        "⚠️ **Note:** For private channels, I can only help if my Admin is already a member of that channel."
-    )
-    await message.reply_text(help_text)
-
-# --- Command: /about ---
-@bot.on_message(filters.command("about") & filters.private)
-async def about_cmd(client, message):
-    about_text = (
-        "🤖 **Bot:** Restricted Content Saver\n"
-        "🚀 **Version:** 2.5 (English Edition)\n"
-        "🛠 **Platform:** Pyrogram\n"
-        "📡 **Server:** Render Cloud\n\n"
-        "Designed to help you save media that is restricted from forwarding."
-    )
-    await message.reply_text(about_text)
-
-# --- Main Logic: Link Processing ---
+# --- 9. Main Processing Logic ---
 @bot.on_message(filters.text & filters.private)
 async def handle_link(client, message):
-    # Check F-Sub again before processing
     if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 Join Our Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
-        return await message.reply_text(
-            "❌ Please join our channel first to unlock the bot features!",
-            reply_markup=InlineKeyboardMarkup(btn)
-        )
+        return await message.reply_text("❌ Join channel first!")
 
     link = message.text.strip()
-    if not "t.me/" in link:
-        return await message.reply_text("❌ This is not a valid Telegram link.")
-
-    status_msg = await message.reply_text("⏳ **Processing your link... Please wait.**")
-
+    if "t.me/" not in link: return
+    
+    status_msg = await message.reply_text("⏳ Processing...")
+    
     try:
-        # Parsing the link
         if "t.me/c/" in link:
             parts = link.split("/")
             chat_id = int("-100" + parts[parts.index("c") + 1])
@@ -133,59 +157,39 @@ async def handle_link(client, message):
             chat_id = parts[-2]
             msg_id = int(parts[-1].split("?")[0])
 
-        # Start Userbot if not connected
-        if not userbot.is_connected:
-            await userbot.start()
+        if not userbot.is_connected: await userbot.start()
 
-        # Get the message via Userbot
         target_msg = await userbot.get_messages(chat_id, msg_id)
         
-        # Handle Text-Only Messages
-        if target_msg.text and not target_msg.media:
-            final_text = f"{target_msg.text}\n\n{CUSTOM_CAPTION}" if CUSTOM_CAPTION else target_msg.text
-            await client.send_message(message.chat.id, text=final_text)
-            await status_msg.delete()
-            return
-
-        # Handle All Media Types
         if target_msg.media:
-            await status_msg.edit("📥 **Downloading content...** (Restricted Mode)")
-            file_path = await userbot.download_media(target_msg)
+            start_time = time.time()
+            file_path = await userbot.download_media(
+                target_msg, 
+                progress=progress_bar, 
+                progress_args=("📥 **Downloading...**", status_msg, start_time)
+            )
             
-            await status_msg.edit("📤 **Download complete! Uploading to you...**")
+            await status_msg.edit("📤 **Uploading... Please wait.**")
+            start_time = time.time()
             
-            # Caption Logic
-            original_caption = target_msg.caption if target_msg.caption else ""
-            final_caption = f"{original_caption}\n\n{CUSTOM_CAPTION}" if CUSTOM_CAPTION else original_caption
-
-            # Send media based on type
-            try:
-                if target_msg.photo:
-                    await client.send_photo(message.chat.id, photo=file_path, caption=final_caption)
-                elif target_msg.video:
-                    await client.send_video(message.chat.id, video=file_path, caption=final_caption)
-                elif target_msg.audio:
-                    await client.send_audio(message.chat.id, audio=file_path, caption=final_caption)
-                elif target_msg.voice:
-                    await client.send_voice(message.chat.id, voice=file_path, caption=final_caption)
-                elif target_msg.animation:
-                    await client.send_animation(message.chat.id, animation=file_path, caption=final_caption)
-                else:
-                     await client.send_document(message.chat.id, document=file_path, caption=final_caption)
-            finally:
-                # Cleanup: Delete file from server after upload
-                if file_path and os.path.exists(file_path):
-                    os.remove(file_path)
+            # Caption
+            cap = f"{target_msg.caption if target_msg.caption else ''}\n\n{CUSTOM_CAPTION}"
             
+            if target_msg.photo:
+                await client.send_photo(message.chat.id, photo=file_path, caption=cap)
+            elif target_msg.video:
+                await client.send_video(message.chat.id, video=file_path, caption=cap, progress=progress_bar, progress_args=("📤 **Uploading...**", status_msg, start_time))
+            else:
+                await client.send_document(message.chat.id, document=file_path, caption=cap, progress=progress_bar, progress_args=("📤 **Uploading...**", status_msg, start_time))
+            
+            if os.path.exists(file_path): os.remove(file_path)
             await status_msg.delete()
-        else:
-            await status_msg.edit("❌ No content found in this link.")
-
-    except FloodWait as e:
-        await status_msg.edit(f"⚠️ **Telegram Limit!** Please wait {e.value} seconds.")
+        elif target_msg.text:
+            await client.send_message(message.chat.id, text=f"{target_msg.text}\n\n{CUSTOM_CAPTION}")
+            await status_msg.delete()
+            
     except Exception as e:
-        await status_msg.edit(f"❌ **Error:** {str(e)}\n\n*Make sure my admin ID is a member of that channel.*")
+        await status_msg.edit(f"❌ **Error:** {str(e)}")
 
-# Start the Bot
-print("✅ Bot is successfully active and running!")
+print("✅ Pro Bot Started!")
 bot.run()
