@@ -87,9 +87,9 @@ async def auto_status():
                     "👤 **Bot Name:** Restricted Saver\n"
                     "🛰 **Server:** Cloud Service\n"
                     "⚡ **Status:** Active & Stable\n"
-                    "📥 **Download Limit:** 1.0 GB\n"
+                    "📥 **Download Limit:** 1.0 GB per file \n"
                     f"⏰ **Last Check:** `{time.strftime('%H:%M:%S')} (UTC)`\n\n"
-                    "💎 _Bot is working fine, send your links!_"
+                    "💎 _Bot is working fine, send your links!_ @RestrictedLink_Bot"
                 )
                 
                 last_msg = await bot.send_message(f"@{FORCE_SUB_CHANNEL}", status_text)
