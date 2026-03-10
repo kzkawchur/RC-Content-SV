@@ -60,37 +60,39 @@ async def check_fsub(client, message):
 @bot.on_message(filters.command("start") & filters.private)
 async def start(client, message):
     if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 আমাদের চ্যানেলে জয়েন করুন", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
+        btn = [[InlineKeyboardButton("Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
         return await message.reply_text(
             f"হ্যালো **{message.from_user.first_name}**!\n\n"
-            "❌ বটটি ব্যবহার করতে হলে আপনাকে প্রথমে আমাদের টেলিগ্রাম চ্যানেলে জয়েন করতে হবে।\n"
-            "নিচের বাটনে ক্লিক করে জয়েন করুন এবং আবার `/start` দিন।",
+            "❌ You must be need to join channel\n"
+            "Join channel and `/start` again ",
             reply_markup=InlineKeyboardMarkup(btn)
         )
 
     await message.reply_text(
-        f"স্বাগতম **{message.from_user.first_name}**!\n\n"
-        "আমি রেস্ট্রিক্টেড ভিডিও ডাউনলোড করতে পারি।\n"
-        "**কীভাবে ব্যবহার করবেন:**\n"
-        "১. আমাকে ভিডিওর লিংকটি পাঠান।\n"
-        "২. চ্যানেলটি প্রাইভেট হলে আপনার আইডিটি সেখানে জয়েন থাকতে হবে।"
+        f"Welcome **{message.from_user.first_name}**!\n\n"
+        "I can help you download restricted videos, photos, and other media.\n"
+        "**How to use:**\n"
+        "1. Send me the message link.\n"
+        "2. If the channel or group is private, make sure your account has already joined it"
     )
 
 # --- লিংক প্রসেসিং এবং কাস্টম ক্যাপশন ---
 @bot.on_message(filters.text & filters.private)
 async def handle_link(client, message):
     if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 আমাদের চ্যানেলে জয়েন করুন", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
+        btn = [[InlineKeyboardButton("Join Channel", url=f"https://t.me/{FORCE_SUB_CHANNEL}")]]
         return await message.reply_text(
-            "❌ আপনি এখনো আমাদের চ্যানেলে জয়েন করেননি! বটটি ব্যবহার করতে প্রথমে জয়েন করুন।",
+            "❌ You haven't joined our channel yet! ⚠️
+To use this bot, please join channel first.",
             reply_markup=InlineKeyboardMarkup(btn)
         )
 
     link = message.text.strip()
     if not "t.me/" in link:
-        return await message.reply_text("❌ এটি কোনো সঠিক টেলিগ্রাম লিংক নয়।")
+        return await message.reply_text("❌ This is not a valid Telegram link.
+Please send a correct Telegram message link.")
 
-    status_msg = await message.reply_text("⏳ প্রসেসিং হচ্ছে... একটু অপেক্ষা করুন।")
+    status_msg = await message.reply_text("⏳ Processing your request... Please wait.")
 
     try:
         if "t.me/c/" in link:
@@ -105,13 +107,13 @@ async def handle_link(client, message):
         if not userbot.is_connected:
             await userbot.start()
 
-        await status_msg.edit("📥 ফাইলটি ডাউনলোড করছি (রেস্ট্রিক্টেড মোড)...")
+        await status_msg.edit("📥 🔒 Downloading the file (Restricted Mode). Please wait...")
         
         target_msg = await userbot.get_messages(chat_id, msg_id)
         
         if target_msg.media:
             file_path = await userbot.download_media(target_msg)
-            await status_msg.edit("📤 ডাউনলোড শেষ! এখন আপনাকে পাঠানো হচ্ছে...")
+            await status_msg.edit("📤 ✅ Download finished! The file is now being sent to you...")
             
             # --- কাস্টম ক্যাপশন (Custom Caption) লজিক ---
             original_caption = target_msg.caption if target_msg.caption else ""
@@ -134,12 +136,12 @@ async def handle_link(client, message):
                 os.remove(file_path)
             await status_msg.delete()
         else:
-            await status_msg.edit("❌ এই লিংকে কোনো মিডিয়া ফাইল পাওয়া যায়নি।")
+            await status_msg.edit("❌ No downloadable media found in this link.")
 
     except FloodWait as e:
         await status_msg.edit(f"⚠️ টেলিগ্রাম লিমিট! {e.value} সেকেন্ড অপেক্ষা করুন।")
     except Exception as e:
-        await status_msg.edit(f"❌ এরর: {str(e)}\n\nনিশ্চিত করুন যে আপনার আইডিটি ওই চ্যানেলের মেম্বার।")
+        await status_msg.edit(f"❌ এরর: {str(e)}\n\nPlease make sure your account has joined that channel.")
 
 print("✅ বট সফলভাবে চালু হয়েছে!")
 bot.run()
