@@ -94,10 +94,10 @@ async def auto_status():
                     "✨ **「 SERVER SYSTEM STATUS 」** ✨\n\n"
                     "🤖 **Bot:** `Premium Restricted Saver`\n"
                     "🟢 **Node:** `Active & Operational`\n"
-                    "🛡️ **Features:** `Queue System + Auto Cleanup`\n"
+                    "🛡️ **Features:** `Telegram Restricted  Content Download `\n"
                     "📦 **Capacity:** `1.0 GB per Task`\n"
                     f"⏱️ **Last Sync:** `{time.strftime('%H:%M:%S')} (UTC)`\n\n"
-                    "💎 _Systems online. Ready for your links!_@RestrictedLink_Bot"
+                    "💎 _Systems online. Ready for your links!_ @RestrictedLink_Bot"
                 )
                 last_msg = await bot.send_message(f"@{FORCE_SUB_CHANNEL}", status_text)
         except: pass
