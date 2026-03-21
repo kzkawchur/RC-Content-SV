@@ -4,7 +4,6 @@ import sys
 import time
 import math
 import sqlite3
-import shutil
 import logging
 import asyncio
 import threading
@@ -14,8 +13,14 @@ from typing import Optional, Dict, Set, Tuple, List
 
 from flask import Flask, jsonify
 from pyrogram import Client, filters, idle
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from pyrogram.errors import FloodWait, RPCError
+from pyrogram.types import (
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    ChatPermissions,
+    Message
+)
+from pyrogram.enums import ChatMemberStatus, ChatType
 
 # =========================================================
 # 1) Logging
@@ -26,7 +31,7 @@ logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
-logger = logging.getLogger("premium_bot")
+logger = logging.getLogger("group_guard_bot")
 
 recent_logs: List[str] = []
 
@@ -37,7 +42,8 @@ class RecentLogHandler(logging.Handler):
             recent_logs.append(msg)
             if len(recent_logs) > 100:
                 recent_logs.pop(0)
-        except Exception: pass
+        except Exception:
+            pass
 
 _recent_handler = RecentLogHandler()
 _recent_handler.setFormatter(logging.Formatter("%(asctime)s | %(levelname)s | %(message)s"))
@@ -55,24 +61,12 @@ class Config:
     api_id: int
     api_hash: str
     bot_token: str
-    string_session: str
 
     port: int
-    download_dir: str
     db_path: str
-
-    force_sub_channel: str
-    custom_caption: str
 
     owner_id: int
     admins: Set[int]
-
-    max_file_size: int
-    max_queue_size: int
-    max_pending_per_user: int
-    user_cooldown_sec: int
-    task_timeout_sec: int
-
     maintenance_mode: bool
 
 def parse_admins(raw: str) -> Set[int]:
@@ -84,7 +78,7 @@ def parse_admins(raw: str) -> Set[int]:
     return ids
 
 def load_config() -> Config:
-    required = ["API_ID", "API_HASH", "BOT_TOKEN", "STRING_SESSION"]
+    required = ["API_ID", "API_HASH", "BOT_TOKEN"]
     missing = [k for k in required if not os.environ.get(k)]
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
@@ -98,24 +92,10 @@ def load_config() -> Config:
         api_id=int(os.environ["API_ID"]),
         api_hash=os.environ["API_HASH"],
         bot_token=os.environ["BOT_TOKEN"],
-        string_session=os.environ["STRING_SESSION"],
-
         port=int(os.environ.get("PORT", "10000")),
-        download_dir=os.environ.get("DOWNLOAD_DIR", "downloads"),
         db_path=os.environ.get("DB_PATH", "bot_data.sqlite3"),
-
-        force_sub_channel=os.environ.get("FORCE_SUB_CHANNEL", "").strip(),
-        custom_caption=os.environ.get("CUSTOM_CAPTION", "").strip(),
-
         owner_id=owner_id,
         admins=admins,
-
-        max_file_size=int(os.environ.get("MAX_FILE_SIZE", str(1 * 1024 * 1024 * 1024))), # 1 GB
-        max_queue_size=int(os.environ.get("MAX_QUEUE_SIZE", "25")),
-        max_pending_per_user=int(os.environ.get("MAX_PENDING_PER_USER", "2")),
-        user_cooldown_sec=int(os.environ.get("USER_COOLDOWN_SEC", "15")),
-        task_timeout_sec=int(os.environ.get("TASK_TIMEOUT_SEC", "900")),
-
         maintenance_mode=env_bool("MAINTENANCE_MODE", False),
     )
 
@@ -127,18 +107,25 @@ CFG = load_config()
 app = Flask(__name__)
 BOOT_TIME = time.time()
 
+state = {
+    "maintenance_mode": CFG.maintenance_mode,
+    "started_at": time.time(),
+    "success_tasks": 0,
+    "failed_tasks": 0,
+}
+
 @app.route("/")
-def home(): return "✅ Bot system is running", 200
+def home():
+    return "✅ Group Guard Bot is running", 200
 
 @app.route("/healthz")
 def healthz():
     return jsonify({
         "ok": True,
         "uptime_sec": round(time.time() - BOOT_TIME, 2),
-        "queue_size": task_queue.qsize() if "task_queue" in globals() else 0,
         "maintenance": state["maintenance_mode"],
-        "active_task": runtime["active_task_id"],
-        "active_user": runtime["active_user_id"],
+        "success": state["success_tasks"],
+        "failed": state["failed_tasks"],
     }), 200
 
 def run_web_server():
@@ -154,73 +141,214 @@ loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
 
 # =========================================================
-# 5) Bot client & Userbot
+# 5) Bot client
 # =========================================================
-bot = Client("safe_system_bot", api_id=CFG.api_id, api_hash=CFG.api_hash, bot_token=CFG.bot_token)
-userbot = Client("userbot_helper", api_id=CFG.api_id, api_hash=CFG.api_hash, session_string=CFG.string_session)
+bot = Client(
+    "group_guard_bot",
+    api_id=CFG.api_id,
+    api_hash=CFG.api_hash,
+    bot_token=CFG.bot_token
+)
 
 # =========================================================
-# 6) Runtime state
+# 6) Runtime
 # =========================================================
-state = {"maintenance_mode": CFG.maintenance_mode, "started_at": time.time(), "total_tasks": 0, "success_tasks": 0, "failed_tasks": 0}
-runtime = {"active_task_id": None, "active_user_id": None}
-task_queue: asyncio.Queue = asyncio.Queue(maxsize=CFG.max_queue_size)
-user_pending_count: Dict[int, int] = {}
-user_last_request: Dict[int, float] = {}
-task_registry: Dict[str, Dict] = {}
-
-TG_LINK_RE = re.compile(r"^(https?://)?t\.me/(c/\d+/\d+|[A-Za-z0-9_]{4,}/\d+)(\?.*)?$", re.IGNORECASE)
+flood_tracker: Dict[Tuple[int, int], List[float]] = {}
 
 # =========================================================
 # 7) Language text
 # =========================================================
 TEXTS = {
     "en": {
-        "welcome": "⚡ **Welcome, {name}!**\n\nSend me any restricted Telegram link and I will extract it for you.",
+        "welcome_private": "⚡ **Welcome, {name}!**\n\nI can protect and manage Telegram groups.\nUse `/help` to see commands.",
         "maintenance": "🛠️ Bot is under maintenance. Please try again later.",
         "blocked": "🚫 You are blocked from using this bot.",
-        "join_required": "🛑 Please join the required channel first.",
-        "cooldown": "⏳ Cooldown active. Try again in `{remain}` seconds.",
-        "busy": "🚦 Server busy right now. Please try again later.",
-        "pending_limit": "📌 You already have `{pending}` pending task(s). Please wait for them to finish.",
-        "task_cancelled": "🛑 Task cancelled successfully.",
+        "lang_set_en": "✅ Language set to English.",
+        "lang_set_bn": "✅ ভাষা বাংলা করা হয়েছে।",
+        "admin_only": "🚫 Admin only.",
+        "settings": "**Settings**\n\n🌐 Language: `{lang}`",
+        "help": (
+            "**Private Commands**\n"
+            "/start - Start bot\n"
+            "/help - Show help\n"
+            "/settings - Settings panel\n"
+            "/lang en|bn - Change language\n\n"
+            "**Group Commands**\n"
+            "/rules\n"
+            "/gsettings\n"
+            "/notes\n"
+            "/getnote <name>\n\n"
+            "**Group Admin Commands**\n"
+            "/setrules <text>\n"
+            "/setwelcome <text>\n"
+            "/welcome on|off\n"
+            "/setlog <chat_id>\n"
+            "/warn (reply)\n"
+            "/unwarn (reply)\n"
+            "/mute (reply)\n"
+            "/unmute (reply)\n"
+            "/ban (reply)\n"
+            "/unban <user_id>\n"
+            "/banword <word>\n"
+            "/unbanword <word>\n"
+            "/banwords\n"
+            "/locklink on|off\n"
+            "/lockmedia on|off\n"
+            "/nightmode on <start> <end>\n"
+            "/nightmode off\n"
+            "/setcmd <cmd> <text>\n"
+            "/save <note> <text>\n"
+            "/delnote <name>\n"
+            "/forcesub <channel_username_or_id>\n"
+            "/forcesub off\n"
+            "/setwarnlimit <number>\n"
+            "/setflood <count> <seconds>\n"
+        )
     },
     "bn": {
-        "welcome": "⚡ **স্বাগতম, {name}!**\n\nযেকোনো রেস্ট্রিক্টেড টেলিগ্রাম লিংক আমাকে দিন, আমি সেটি আপনাকে ডাউনলোড করে দেব।",
+        "welcome_private": "⚡ **স্বাগতম, {name}!**\n\nআমি Telegram group protect ও manage করতে পারি।\nCommand দেখতে `/help` দাও।",
         "maintenance": "🛠️ বট maintenance-এ আছে। পরে আবার চেষ্টা করো।",
         "blocked": "🚫 তুমি এই বট ব্যবহার করতে পারবে না।",
-        "join_required": "🛑 আগে চ্যানেলটিতে জয়েন করুন।",
-        "cooldown": "⏳ Cooldown চলছে। `{remain}` সেকেন্ড পরে আবার চেষ্টা করো।",
-        "busy": "🚦 সার্ভার এখন ব্যস্ত। একটু পরে আবার চেষ্টা করো।",
-        "pending_limit": "📌 তোমার আগে থেকেই `{pending}`টা pending task আছে। এগুলো শেষ হলে আবার দাও।",
-        "task_cancelled": "🛑 Task সফলভাবে cancel করা হয়েছে।",
+        "lang_set_en": "✅ Language set to English.",
+        "lang_set_bn": "✅ ভাষা বাংলা করা হয়েছে।",
+        "admin_only": "🚫 শুধু admin ব্যবহার করতে পারবে।",
+        "settings": "**Settings**\n\n🌐 Language: `{lang}`",
+        "help": (
+            "**Private Commands**\n"
+            "/start - বট চালু\n"
+            "/help - সাহায্য\n"
+            "/settings - সেটিংস\n"
+            "/lang en|bn - ভাষা বদলাও\n\n"
+            "**Group Commands**\n"
+            "/rules\n"
+            "/gsettings\n"
+            "/notes\n"
+            "/getnote <name>\n\n"
+            "**Group Admin Commands**\n"
+            "/setrules <text>\n"
+            "/setwelcome <text>\n"
+            "/welcome on|off\n"
+            "/setlog <chat_id>\n"
+            "/warn (reply)\n"
+            "/unwarn (reply)\n"
+            "/mute (reply)\n"
+            "/unmute (reply)\n"
+            "/ban (reply)\n"
+            "/unban <user_id>\n"
+            "/banword <word>\n"
+            "/unbanword <word>\n"
+            "/banwords\n"
+            "/locklink on|off\n"
+            "/lockmedia on|off\n"
+            "/nightmode on <start> <end>\n"
+            "/nightmode off\n"
+            "/setcmd <cmd> <text>\n"
+            "/save <note> <text>\n"
+            "/delnote <name>\n"
+            "/forcesub <channel_username_or_id>\n"
+            "/forcesub off\n"
+            "/setwarnlimit <number>\n"
+            "/setflood <count> <seconds>\n"
+        )
     }
 }
 
 # =========================================================
-# 8) Storage setup & DB
+# 8) DB
 # =========================================================
-def cleanup_storage() -> None:
-    if os.path.exists(CFG.download_dir):
-        shutil.rmtree(CFG.download_dir, ignore_errors=True)
-    os.makedirs(CFG.download_dir, exist_ok=True)
-
-def db_connect(): return sqlite3.connect(CFG.db_path)
+def db_connect():
+    return sqlite3.connect(CFG.db_path)
 
 def init_db():
     with closing(db_connect()) as conn:
         cur = conn.cursor()
-        cur.execute("CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL, username TEXT, first_name TEXT)")
-        cur.execute("CREATE TABLE IF NOT EXISTS tasks (id TEXT PRIMARY KEY, user_id INTEGER NOT NULL, username TEXT, created_at INTEGER NOT NULL, status TEXT NOT NULL, input_text TEXT, error_text TEXT)")
-        cur.execute("CREATE TABLE IF NOT EXISTS bans (user_id INTEGER PRIMARY KEY, reason TEXT, banned_at INTEGER NOT NULL)")
-        cur.execute("CREATE TABLE IF NOT EXISTS user_settings (user_id INTEGER PRIMARY KEY, language TEXT NOT NULL DEFAULT 'en')")
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            username TEXT,
+            first_name TEXT
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS bans (
+            user_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            banned_at INTEGER NOT NULL
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_settings (
+            user_id INTEGER PRIMARY KEY,
+            language TEXT NOT NULL DEFAULT 'en'
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_settings (
+            chat_id INTEGER PRIMARY KEY,
+            welcome_enabled INTEGER NOT NULL DEFAULT 1,
+            welcome_text TEXT NOT NULL DEFAULT '👋 Welcome, {mention}!',
+            rules_text TEXT NOT NULL DEFAULT '📜 No rules set yet.',
+            banned_words TEXT NOT NULL DEFAULT '',
+            flood_limit INTEGER NOT NULL DEFAULT 6,
+            flood_window_sec INTEGER NOT NULL DEFAULT 10,
+            warn_limit INTEGER NOT NULL DEFAULT 3,
+            link_lock INTEGER NOT NULL DEFAULT 0,
+            media_lock INTEGER NOT NULL DEFAULT 0,
+            night_mode INTEGER NOT NULL DEFAULT 0,
+            night_start INTEGER NOT NULL DEFAULT 0,
+            night_end INTEGER NOT NULL DEFAULT 7,
+            log_channel_id INTEGER NOT NULL DEFAULT 0,
+            force_sub_channel TEXT NOT NULL DEFAULT ''
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_warns (
+            chat_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            warns INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chat_id, user_id)
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS custom_commands (
+            chat_id INTEGER NOT NULL,
+            cmd TEXT NOT NULL,
+            response_text TEXT NOT NULL,
+            PRIMARY KEY(chat_id, cmd)
+        )
+        """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS group_notes (
+            chat_id INTEGER NOT NULL,
+            note_name TEXT NOT NULL,
+            note_text TEXT NOT NULL,
+            PRIMARY KEY(chat_id, note_name)
+        )
+        """)
+
         conn.commit()
 
 def upsert_user(user_id: int, username: Optional[str], first_name: Optional[str]):
     now = int(time.time())
     with closing(db_connect()) as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO users(user_id, first_seen, last_seen, username, first_name) VALUES(?, ?, ?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET last_seen=excluded.last_seen, username=excluded.username, first_name=excluded.first_name", (user_id, now, now, username or "", first_name or ""))
+        cur.execute("""
+            INSERT INTO users(user_id, first_seen, last_seen, username, first_name)
+            VALUES(?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                last_seen=excluded.last_seen,
+                username=excluded.username,
+                first_name=excluded.first_name
+        """, (user_id, now, now, username or "", first_name or ""))
         conn.commit()
 
 def safe_total_users() -> int:
@@ -232,7 +360,10 @@ def safe_total_users() -> int:
 def latest_users(limit: int = 10) -> List[tuple]:
     with closing(db_connect()) as conn:
         cur = conn.cursor()
-        cur.execute("SELECT user_id, username, first_name, last_seen FROM users ORDER BY last_seen DESC LIMIT ?", (limit,))
+        cur.execute("""
+            SELECT user_id, username, first_name, last_seen
+            FROM users ORDER BY last_seen DESC LIMIT ?
+        """, (limit,))
         return cur.fetchall()
 
 def is_banned(user_id: int) -> bool:
@@ -244,7 +375,13 @@ def is_banned(user_id: int) -> bool:
 def ban_user(user_id: int, reason: str = ""):
     with closing(db_connect()) as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO bans(user_id, reason, banned_at) VALUES(?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET reason=excluded.reason, banned_at=excluded.banned_at", (user_id, reason, int(time.time())))
+        cur.execute("""
+            INSERT INTO bans(user_id, reason, banned_at)
+            VALUES(?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                reason=excluded.reason,
+                banned_at=excluded.banned_at
+        """, (user_id, reason, int(time.time())))
         conn.commit()
 
 def unban_user(user_id: int):
@@ -252,30 +389,6 @@ def unban_user(user_id: int):
         cur = conn.cursor()
         cur.execute("DELETE FROM bans WHERE user_id = ?", (user_id,))
         conn.commit()
-
-def add_task_record(task_id: str, user_id: int, username: str, input_text: str):
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("INSERT INTO tasks(id, user_id, username, created_at, status, input_text, error_text) VALUES(?, ?, ?, ?, ?, ?, ?)", (task_id, user_id, username or "", int(time.time()), "queued", input_text, ""))
-        conn.commit()
-
-def update_task_record(task_id: str, status: str, error_text: str = ""):
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("UPDATE tasks SET status = ?, error_text = ? WHERE id = ?", (status, error_text, task_id))
-        conn.commit()
-
-def get_user_tasks(user_id: int, limit: int = 5) -> List[tuple]:
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, created_at, status, input_text FROM tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT ?", (user_id, limit))
-        return cur.fetchall()
-
-def get_task_row(task_id: str) -> Optional[tuple]:
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT id, user_id, username, created_at, status, input_text, error_text FROM tasks WHERE id = ?", (task_id,))
-        return cur.fetchone()
 
 def get_user_language(user_id: int) -> str:
     with closing(db_connect()) as conn:
@@ -287,382 +400,842 @@ def get_user_language(user_id: int) -> str:
 def set_user_language(user_id: int, language: str):
     with closing(db_connect()) as conn:
         cur = conn.cursor()
-        cur.execute("INSERT INTO user_settings(user_id, language) VALUES(?, ?) ON CONFLICT(user_id) DO UPDATE SET language=excluded.language", (user_id, language))
+        cur.execute("""
+            INSERT INTO user_settings(user_id, language)
+            VALUES(?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET language=excluded.language
+        """, (user_id, language))
         conn.commit()
 
+def ensure_group_row(chat_id: int):
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("INSERT OR IGNORE INTO group_settings(chat_id) VALUES(?)", (chat_id,))
+        conn.commit()
+
+def get_group_settings(chat_id: int) -> dict:
+    ensure_group_row(chat_id)
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT welcome_enabled, welcome_text, rules_text, banned_words,
+                   flood_limit, flood_window_sec, warn_limit, link_lock,
+                   media_lock, night_mode, night_start, night_end,
+                   log_channel_id, force_sub_channel
+            FROM group_settings WHERE chat_id = ?
+        """, (chat_id,))
+        row = cur.fetchone()
+        return {
+            "welcome_enabled": bool(row[0]),
+            "welcome_text": row[1],
+            "rules_text": row[2],
+            "banned_words": [w.strip().lower() for w in row[3].split(",") if w.strip()],
+            "flood_limit": int(row[4]),
+            "flood_window_sec": int(row[5]),
+            "warn_limit": int(row[6]),
+            "link_lock": bool(row[7]),
+            "media_lock": bool(row[8]),
+            "night_mode": bool(row[9]),
+            "night_start": int(row[10]),
+            "night_end": int(row[11]),
+            "log_channel_id": int(row[12]),
+            "force_sub_channel": row[13].strip(),
+        }
+
+def update_group_setting(chat_id: int, field: str, value):
+    allowed = {
+        "welcome_enabled", "welcome_text", "rules_text", "banned_words",
+        "flood_limit", "flood_window_sec", "warn_limit", "link_lock",
+        "media_lock", "night_mode", "night_start", "night_end",
+        "log_channel_id", "force_sub_channel"
+    }
+    if field not in allowed:
+        raise ValueError("Invalid field")
+
+    ensure_group_row(chat_id)
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute(f"UPDATE group_settings SET {field} = ? WHERE chat_id = ?", (value, chat_id))
+        conn.commit()
+
+def get_warns(chat_id: int, user_id: int) -> int:
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT warns FROM group_warns WHERE chat_id = ? AND user_id = ?", (chat_id, user_id))
+        row = cur.fetchone()
+        return row[0] if row else 0
+
+def set_warns(chat_id: int, user_id: int, warns: int):
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO group_warns(chat_id, user_id, warns)
+            VALUES(?, ?, ?)
+            ON CONFLICT(chat_id, user_id) DO UPDATE SET warns=excluded.warns
+        """, (chat_id, user_id, warns))
+        conn.commit()
+
+def save_custom_command(chat_id: int, cmd: str, response_text: str):
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO custom_commands(chat_id, cmd, response_text)
+            VALUES(?, ?, ?)
+            ON CONFLICT(chat_id, cmd) DO UPDATE SET response_text=excluded.response_text
+        """, (chat_id, cmd.lower(), response_text))
+        conn.commit()
+
+def get_custom_command(chat_id: int, cmd: str) -> Optional[str]:
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT response_text FROM custom_commands WHERE chat_id = ? AND cmd = ?", (chat_id, cmd.lower()))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def save_note(chat_id: int, note_name: str, note_text: str):
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO group_notes(chat_id, note_name, note_text)
+            VALUES(?, ?, ?)
+            ON CONFLICT(chat_id, note_name) DO UPDATE SET note_text=excluded.note_text
+        """, (chat_id, note_name.lower(), note_text))
+        conn.commit()
+
+def get_note(chat_id: int, note_name: str) -> Optional[str]:
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT note_text FROM group_notes WHERE chat_id = ? AND note_name = ?", (chat_id, note_name.lower()))
+        row = cur.fetchone()
+        return row[0] if row else None
+
+def del_note(chat_id: int, note_name: str):
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("DELETE FROM group_notes WHERE chat_id = ? AND note_name = ?", (chat_id, note_name.lower()))
+        conn.commit()
+
+def list_notes(chat_id: int) -> List[str]:
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT note_name FROM group_notes WHERE chat_id = ? ORDER BY note_name ASC", (chat_id,))
+        return [r[0] for r in cur.fetchall()]
+
 # =========================================================
-# 10) Helpers & Progress Bar
+# 9) Helpers
 # =========================================================
-def is_admin(user_id: int) -> bool: return user_id in CFG.admins
+def is_admin(user_id: int) -> bool:
+    return user_id in CFG.admins
 
 def t(user_id: int, key: str, **kwargs) -> str:
     lang = get_user_language(user_id)
     text = TEXTS.get(lang, TEXTS["en"]).get(key, key)
     return text.format(**kwargs)
 
-def format_duration(seconds: float) -> str:
-    seconds = int(seconds)
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    if h: return f"{h}h {m}m {s}s"
-    if m: return f"{m}m {s}s"
-    return f"{s}s"
+def is_group_chat(message: Message) -> bool:
+    return message.chat.type in {ChatType.GROUP, ChatType.SUPERGROUP}
 
-def humanbytes(size: int) -> str:
-    if not size: return "0 B"
-    power = 1024
-    unit = 0
-    units = ["B", "KB", "MB", "GB", "TB"]
-    while size >= power and unit < len(units) - 1:
-        size /= power
-        unit += 1
-    return f"{size:.2f} {units[unit]}"
-
-def valid_telegram_post_link(text: str) -> bool: return bool(TG_LINK_RE.match(text.strip()))
-
-async def check_fsub(client, message) -> bool:
-    if not CFG.force_sub_channel: return True
+async def is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
     try:
-        await client.get_chat_member(CFG.force_sub_channel, message.from_user.id)
+        member = await client.get_chat_member(chat_id, user_id)
+        return member.status in {ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR}
+    except Exception:
+        return False
+
+async def log_to_channel(client: Client, chat_id: int, text: str):
+    try:
+        settings = get_group_settings(chat_id)
+        log_channel_id = settings["log_channel_id"]
+        if log_channel_id:
+            await client.send_message(log_channel_id, text)
+    except Exception as e:
+        logger.warning(f"log_to_channel failed: {e}")
+
+def text_contains_link(text: str) -> bool:
+    if not text:
+        return False
+    return bool(re.search(r"(https?://|t\.me/|www\.)", text, re.I))
+
+def text_contains_banned_word(text: str, banned_words: List[str]) -> Optional[str]:
+    if not text:
+        return None
+    low = text.lower()
+    for word in banned_words:
+        if re.search(rf"\b{re.escape(word)}\b", low):
+            return word
+    return None
+
+def in_night_mode_window(start_hour: int, end_hour: int) -> bool:
+    now_h = time.localtime().tm_hour
+    if start_hour == end_hour:
         return True
-    except Exception: return False
+    if start_hour < end_hour:
+        return start_hour <= now_h < end_hour
+    return now_h >= start_hour or now_h < end_hour
 
-def make_task_id(user_id: int) -> str: return f"{user_id}_{int(time.time() * 1000)}"
+async def extract_target_user(client: Client, message: Message):
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return message.reply_to_message.from_user
 
-def user_on_cooldown(user_id: int) -> Tuple[bool, int]:
-    last = user_last_request.get(user_id, 0)
-    remain = CFG.user_cooldown_sec - int(time.time() - last)
-    return (remain > 0, max(remain, 0))
+    parts = message.text.split()
+    if len(parts) < 2:
+        return None
 
-def register_task(task_id: str, user_id: int, input_text: str):
-    task_registry[task_id] = {"user_id": user_id, "input_text": input_text, "status": "queued", "created_at": int(time.time()), "cancelled": False}
+    raw = parts[1].strip().lstrip("@")
+    try:
+        if raw.isdigit():
+            return await client.get_users(int(raw))
+        return await client.get_users(raw)
+    except Exception:
+        return None
 
-def set_task_status(task_id: str, status: str):
-    if task_id in task_registry: task_registry[task_id]["status"] = status
-
-def cancel_task(task_id: str, requester_id: int) -> Tuple[bool, str]:
-    task = task_registry.get(task_id)
-    if not task: return False, "Task not found."
-    if task["user_id"] != requester_id and not is_admin(requester_id): return False, "You cannot cancel this task."
-    if task["status"] in {"done", "failed", "cancelled"}: return False, f"Task already `{task['status']}`."
-    if task["status"] == "running": return False, "Task is already running and cannot be cancelled safely."
-    task["cancelled"] = True
-    task["status"] = "cancelled"
-    update_task_record(task_id, "cancelled", "Cancelled by user/admin")
-    return True, "Task cancelled successfully."
-
-def queued_task_lines(limit: int = 15) -> List[str]:
-    lines = []
-    active = runtime["active_task_id"]
-    if active: lines.append(f"▶️ Running: `{active}`")
-    count = 0
-    for task_id, meta in sorted(task_registry.items(), key=lambda x: x[1]["created_at"]):
-        if meta["status"] == "queued" and not meta["cancelled"]:
-            count += 1
-            lines.append(f"{count}. `{task_id}` | user `{meta['user_id']}`")
-            if count >= limit: break
-    return lines
-
-def build_admin_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Stats", callback_data="admin_stats"), InlineKeyboardButton("📦 Queue", callback_data="admin_queue")],
-        [InlineKeyboardButton("👥 Users", callback_data="admin_users"), InlineKeyboardButton("🛠 Maintenance", callback_data="admin_maint")],
-        [InlineKeyboardButton("🧹 Clear Queue", callback_data="admin_clearqueue"), InlineKeyboardButton("📜 Logs", callback_data="admin_logs")]
-    ])
+async def check_forcesub_membership(client: Client, channel_ref: str, user_id: int) -> bool:
+    if not channel_ref:
+        return True
+    try:
+        member = await client.get_chat_member(channel_ref, user_id)
+        return member.status not in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED}
+    except Exception:
+        return False
 
 def build_settings_panel(user_id: int) -> InlineKeyboardMarkup:
     lang = get_user_language(user_id)
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"{'✅ ' if lang == 'en' else ''}English", callback_data="setlang_en"), InlineKeyboardButton(f"{'✅ ' if lang == 'bn' else ''}বাংলা", callback_data="setlang_bn")]
+        [
+            InlineKeyboardButton(f"{'✅ ' if lang == 'en' else ''}English", callback_data="setlang_en"),
+            InlineKeyboardButton(f"{'✅ ' if lang == 'bn' else ''}বাংলা", callback_data="setlang_bn")
+        ]
     ])
 
-async def progress_bar(current, total, ud_type, message, start_time):
-    now = time.time()
-    diff = now - start_time
-    if round(diff % 4.00) == 0 or current == total:
-        percentage = current * 100 / total if total else 0
-        completed = math.floor(percentage / 5)
-        remaining = 20 - completed
-        bar = "[{0}{1}{2}]".format("█" * completed, "", "▒" * remaining)
-        speed = current / diff if diff > 0 else 0
-        
-        tmp = (
-            f"**{ud_type}**\n\n"
-            f"📊 **Progress:** `{round(percentage, 2)}%`\n"
-            f"🚀 `{bar}`\n\n"
-            f"📁 **Size:** `{humanbytes(current)} / {humanbytes(total)}`\n"
-            f"⚡ **Speed:** `{humanbytes(speed)}/s`"
-        )
-        try: await message.edit_text(text=tmp)
-        except Exception: pass
+def build_admin_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 Stats", callback_data="admin_stats"),
+         InlineKeyboardButton("👥 Users", callback_data="admin_users")],
+        [InlineKeyboardButton("🛠 Maintenance", callback_data="admin_maint"),
+         InlineKeyboardButton("📜 Logs", callback_data="admin_logs")]
+    ])
 
 # =========================================================
-# 11) Safe task processing (CORE EXTRACTION LOGIC)
-# =========================================================
-async def process_safe_task(client, message, text_input: str, status_msg, task_id: str):
-    update_task_record(task_id, "running")
-    set_task_status(task_id, "running")
-    runtime["active_task_id"] = task_id
-    runtime["active_user_id"] = message.from_user.id
-
-    try:
-        if task_registry.get(task_id, {}).get("cancelled"):
-            update_task_record(task_id, "cancelled", "Cancelled before processing")
-            set_task_status(task_id, "cancelled")
-            await status_msg.edit_text("🛑 Task was cancelled before processing.")
-            return
-
-        await status_msg.edit_text("🔍 **Task started**\nValidating and extracting content...")
-
-        if not valid_telegram_post_link(text_input):
-            await status_msg.edit_text("❌ **Invalid Link:** Please provide a valid Telegram post link.")
-            update_task_record(task_id, "failed", "Invalid link format")
-            set_task_status(task_id, "failed")
-            state["failed_tasks"] += 1
-            return
-
-        link = text_input.strip()
-        if "t.me/c/" in link:
-            parts = link.split("/")
-            chat_id = int("-100" + parts[parts.index("c") + 1])
-            msg_id = int(parts[-1].split("?")[0])
-        else:
-            parts = link.split("/")
-            chat_id = parts[-2]
-            if chat_id.isdigit(): chat_id = int(chat_id)
-            msg_id = int(parts[-1].split("?")[0])
-
-        if not userbot.is_connected:
-            await userbot.start()
-        
-        target_msg = await userbot.get_messages(chat_id, msg_id)
-        
-        if target_msg.text and not target_msg.media:
-            final_text = f"{target_msg.text}\n\n{CFG.custom_caption}" if CFG.custom_caption else target_msg.text
-            await client.send_message(message.chat.id, text=final_text)
-            await status_msg.delete()
-            
-        elif target_msg.media:
-            media = target_msg.document or target_msg.video or target_msg.audio or target_msg.voice or target_msg.photo
-            file_size = getattr(media, 'file_size', 0)
-            
-            if file_size > CFG.max_file_size:
-                error_txt = f"File size ({humanbytes(file_size)}) exceeds limit."
-                await status_msg.edit_text(f"⛔ **System Alert!**\n\n**File Size:** `{humanbytes(file_size)}`\n⚠️ Limit exceeded! Maximum allowed size is `{humanbytes(CFG.max_file_size)}`.")
-                update_task_record(task_id, "failed", error_txt)
-                set_task_status(task_id, "failed")
-                state["failed_tasks"] += 1
-                return
-
-            start_time = time.time()
-            file_path = await userbot.download_media(
-                target_msg, 
-                progress=progress_bar, 
-                progress_args=("📥 DOWNLOADING CONTENT...", status_msg, start_time)
-            )
-            
-            final_caption = f"{target_msg.caption or ''}\n\n{CFG.custom_caption}" if CFG.custom_caption else (target_msg.caption or "")
-            start_time = time.time()
-            
-            await status_msg.edit_text("🔄 **Preparing to upload...**")
-            
-            try:
-                if target_msg.photo:
-                    await client.send_photo(message.chat.id, photo=file_path, caption=final_caption)
-                elif target_msg.video:
-                    await client.send_video(message.chat.id, video=file_path, caption=final_caption, progress=progress_bar, progress_args=("📤 UPLOADING VIDEO...", status_msg, start_time))
-                else:
-                    await client.send_document(message.chat.id, document=file_path, caption=final_caption, progress=progress_bar, progress_args=("📤 UPLOADING FILE...", status_msg, start_time))
-            finally:
-                if file_path and os.path.exists(file_path): 
-                    os.remove(file_path)
-            
-            await status_msg.delete()
-            await message.reply_text("✅ **Task Completed Successfully!**\n_File has been delivered._", quote=True)
-        else:
-            await status_msg.edit_text("⚠️ **Notice:** No extractable content found in this link.")
-            update_task_record(task_id, "failed", "No extractable content")
-            set_task_status(task_id, "failed")
-            state["failed_tasks"] += 1
-            return
-
-        update_task_record(task_id, "done")
-        set_task_status(task_id, "done")
-        state["success_tasks"] += 1
-
-    except FloodWait as e:
-        await asyncio.sleep(e.value)
-        update_task_record(task_id, "failed", f"FloodWait {e.value}")
-        set_task_status(task_id, "failed")
-        state["failed_tasks"] += 1
-        try: await status_msg.edit_text(f"⚠️ Telegram rate limit. Waited `{e.value}` seconds.")
-        except Exception: pass
-
-    except RPCError as e:
-        logger.exception("Telegram RPC error")
-        update_task_record(task_id, "failed", str(e))
-        set_task_status(task_id, "failed")
-        state["failed_tasks"] += 1
-        try: await status_msg.edit_text("❌ Telegram API error occurred.")
-        except Exception: pass
-
-    except Exception as e:
-        logger.exception("Task failed")
-        update_task_record(task_id, "failed", str(e))
-        set_task_status(task_id, "failed")
-        state["failed_tasks"] += 1
-        try: await status_msg.edit_text("❌ Unexpected task error.")
-        except Exception: pass
-
-    finally:
-        runtime["active_task_id"] = None
-        runtime["active_user_id"] = None
-
-async def process_worker():
-    logger.info("Queue worker started")
-    while True:
-        client, message, text_input, status_msg, task_id = await task_queue.get()
-        user_id = message.from_user.id
-
-        try:
-            if task_registry.get(task_id, {}).get("cancelled"):
-                update_task_record(task_id, "cancelled", "Cancelled in queue")
-                set_task_status(task_id, "cancelled")
-                try: await status_msg.edit_text("🛑 Task cancelled.")
-                except Exception: pass
-                continue
-
-            await asyncio.wait_for(process_safe_task(client, message, text_input, status_msg, task_id), timeout=CFG.task_timeout_sec)
-        except asyncio.TimeoutError:
-            update_task_record(task_id, "failed", "timeout")
-            set_task_status(task_id, "failed")
-            state["failed_tasks"] += 1
-            try: await status_msg.edit_text("⏰ Task timed out.")
-            except Exception: pass
-        finally:
-            user_pending_count[user_id] = max(user_pending_count.get(user_id, 1) - 1, 0)
-            task_queue.task_done()
-
-# =========================================================
-# 12) Commands (Skipped extra ones for brevity, all are same as your code)
+# 10) Private commands
 # =========================================================
 @bot.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message):
+async def start_cmd(client, message: Message):
     user = message.from_user
     upsert_user(user.id, user.username, user.first_name)
-    if is_banned(user.id): return await message.reply_text(t(user.id, "blocked"))
-    if state["maintenance_mode"] and not is_admin(user.id): return await message.reply_text(t(user.id, "maintenance"))
-    if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CFG.force_sub_channel.lstrip('@')}")]]
-        return await message.reply_text(t(user.id, "join_required"), reply_markup=InlineKeyboardMarkup(btn))
-    await message.reply_text(t(user.id, "welcome", name=user.first_name or "User"))
 
-@bot.on_message(filters.command("help") & filters.private)
-async def help_cmd(client, message):
-    text = "**Commands**\n/start - Start\n/settings - Settings\n/lang bn|en\n/mytasks - Tasks\n/task ID\n/cancel ID\n\nAdmin:\n/admin\n/stats\n/users\n/clearqueue\n/broadcast MSG"
-    await message.reply_text(text)
+    if is_banned(user.id):
+        return await message.reply_text(t(user.id, "blocked"))
+    if state["maintenance_mode"] and not is_admin(user.id):
+        return await message.reply_text(t(user.id, "maintenance"))
+
+    await message.reply_text(t(user.id, "welcome_private", name=user.first_name or "User"))
+
+@bot.on_message(filters.command("help") & (filters.private | filters.group))
+async def help_cmd(client, message: Message):
+    uid = message.from_user.id if message.from_user else 0
+    await message.reply_text(t(uid, "help"))
 
 @bot.on_message(filters.command("settings") & filters.private)
-async def settings_cmd(client, message):
+async def settings_cmd(client, message: Message):
     lang = get_user_language(message.from_user.id)
-    await message.reply_text(f"**Settings**\n\n🌐 Language: `{lang}`", reply_markup=build_settings_panel(message.from_user.id))
+    await message.reply_text(
+        t(message.from_user.id, "settings", lang=lang),
+        reply_markup=build_settings_panel(message.from_user.id)
+    )
 
 @bot.on_message(filters.command("lang") & filters.private)
-async def lang_cmd(client, message):
+async def lang_cmd(client, message: Message):
     parts = message.text.split(maxsplit=1)
-    if len(parts) < 2: return await message.reply_text("Usage: `/lang en` or `/lang bn`", quote=True)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: `/lang en` or `/lang bn`")
     lang = parts[1].strip().lower()
-    if lang not in {"en", "bn"}: return await message.reply_text("Use only `en` or `bn`.")
+    if lang not in {"en", "bn"}:
+        return await message.reply_text("Use only `en` or `bn`.")
     set_user_language(message.from_user.id, lang)
-    await message.reply_text(t(message.from_user.id, "lang_set_bn") if lang == "bn" else t(message.from_user.id, "lang_set_en"))
+    if lang == "bn":
+        await message.reply_text(t(message.from_user.id, "lang_set_bn"))
+    else:
+        await message.reply_text(t(message.from_user.id, "lang_set_en"))
 
 @bot.on_message(filters.command("admin") & filters.private)
-async def admin_cmd(client, message):
-    if not is_admin(message.from_user.id): return await message.reply_text(t(message.from_user.id, "admin_only"))
+async def admin_cmd(client, message: Message):
+    if not is_admin(message.from_user.id):
+        return await message.reply_text(t(message.from_user.id, "admin_only"))
     await message.reply_text("🧩 **Admin Panel**", reply_markup=build_admin_panel())
 
 @bot.on_callback_query()
 async def callback_handler(client, callback_query: CallbackQuery):
     user_id = callback_query.from_user.id
     data = callback_query.data
+
     if data.startswith("setlang_"):
         lang = data.split("_", 1)[1]
         set_user_language(user_id, lang)
-        await callback_query.message.edit_text(f"**Settings**\n🌐 Language: `{lang}`", reply_markup=build_settings_panel(user_id))
+        await callback_query.message.edit_text(
+            t(user_id, "settings", lang=lang),
+            reply_markup=build_settings_panel(user_id)
+        )
         await callback_query.answer("Language updated.")
         return
-    if not is_admin(user_id): return await callback_query.answer("Admin only", show_alert=True)
+
+    if not is_admin(user_id):
+        return await callback_query.answer("Admin only", show_alert=True)
+
     if data == "admin_stats":
-        await callback_query.message.edit_text(f"📊 Users: {safe_total_users()}\n✅ Success: {state['success_tasks']}\n❌ Failed: {state['failed_tasks']}\n📦 Queue: {task_queue.qsize()}", reply_markup=build_admin_panel())
-    elif data == "admin_queue":
-        lines = queued_task_lines(limit=10)
-        await callback_query.message.edit_text("📦 Queue Overview\n\n" + ("\n".join(lines) if lines else "Empty."), reply_markup=build_admin_panel())
+        txt = (
+            f"📊 Users: {safe_total_users()}\n"
+            f"✅ Success: {state['success_tasks']}\n"
+            f"❌ Failed: {state['failed_tasks']}\n"
+            f"🛠 Maintenance: {state['maintenance_mode']}"
+        )
+        await callback_query.message.edit_text(txt, reply_markup=build_admin_panel())
+
+    elif data == "admin_users":
+        rows = latest_users(10)
+        if not rows:
+            txt = "No users yet."
+        else:
+            txt = "👥 Latest users\n\n"
+            for uid, username, first_name, last_seen in rows:
+                txt += f"`{uid}` | @{username or '-'} | {first_name or '-'} | {last_seen}\n"
+        await callback_query.message.edit_text(txt, reply_markup=build_admin_panel())
+
     elif data == "admin_maint":
         state["maintenance_mode"] = not state["maintenance_mode"]
-        await callback_query.message.edit_text(f"🛠 Maintenance: `{state['maintenance_mode']}`", reply_markup=build_admin_panel())
-    elif data == "admin_clearqueue":
-        for task_id, meta in list(task_registry.items()):
-            if meta["status"] == "queued" and not meta["cancelled"]:
-                meta["cancelled"] = True; meta["status"] = "cancelled"
-                update_task_record(task_id, "cancelled", "Cleared")
-        await callback_query.message.edit_text("🧹 Cleared queue.", reply_markup=build_admin_panel())
+        await callback_query.message.edit_text(
+            f"🛠 Maintenance: `{state['maintenance_mode']}`",
+            reply_markup=build_admin_panel()
+        )
+
+    elif data == "admin_logs":
+        txt = "\n".join(recent_logs[-20:]) if recent_logs else "No logs."
+        if len(txt) > 3900:
+            txt = txt[-3900:]
+        await callback_query.message.edit_text(f"📜 Recent Logs\n\n`{txt}`", reply_markup=build_admin_panel())
+
     await callback_query.answer()
 
 # =========================================================
-# 13) Generic input handler
+# 11) Group welcome
 # =========================================================
-@bot.on_message(filters.text & filters.private & ~filters.command(["start", "help", "settings", "lang", "admin"]))
-async def handle_text(client, message):
-    user_id = message.from_user.id
-    text_input = message.text.strip()
-    upsert_user(user_id, message.from_user.username, message.from_user.first_name)
+@bot.on_message(filters.new_chat_members)
+async def welcome_new_members(client, message: Message):
+    if not is_group_chat(message):
+        return
 
-    if is_banned(user_id): return await message.reply_text(t(user_id, "blocked"))
-    if state["maintenance_mode"] and not is_admin(user_id): return await message.reply_text(t(user.id, "maintenance"))
-    if not await check_fsub(client, message):
-        btn = [[InlineKeyboardButton("📢 Join Channel", url=f"https://t.me/{CFG.force_sub_channel.lstrip('@')}")]]
-        return await message.reply_text(t(user_id, "join_required"), reply_markup=InlineKeyboardMarkup(btn))
+    settings = get_group_settings(message.chat.id)
+    if not settings["welcome_enabled"]:
+        return
 
-    on_cd, remain = user_on_cooldown(user_id)
-    if on_cd and not is_admin(user_id): return await message.reply_text(t(user_id, "cooldown", remain=remain))
-    if task_queue.full() and not is_admin(user_id): return await message.reply_text(t(user_id, "busy"))
+    for user in message.new_chat_members:
+        mention = user.mention
+        text = settings["welcome_text"].replace("{mention}", mention).replace("{name}", user.first_name or "User")
+        try:
+            await message.reply_text(text)
+        except Exception:
+            pass
 
-    pending = user_pending_count.get(user_id, 0)
-    if pending >= CFG.max_pending_per_user and not is_admin(user_id): return await message.reply_text(t(user_id, "pending_limit", pending=pending))
-
-    task_id = make_task_id(user_id)
-    add_task_record(task_id, user_id, message.from_user.username or "", text_input)
-    register_task(task_id, user_id, text_input)
-
-    user_pending_count[user_id] = pending + 1
-    user_last_request[user_id] = time.time()
-    state["total_tasks"] += 1
-
-    position = task_queue.qsize() + 1
-    status_msg = await message.reply_text(f"📝 **Task queued**\n\n🆔 **ID:** `{task_id}`\n📍 **Position:** `{position}`\n⏳ Please wait.")
-    await task_queue.put((client, message, text_input, status_msg, task_id))
+        await log_to_channel(
+            client,
+            message.chat.id,
+            f"👤 New member joined\nChat: {message.chat.title}\nUser: {user.id} | {user.first_name}"
+        )
 
 # =========================================================
-# 14 & 15) Main & Startup Report
+# 12) Public group commands
+# =========================================================
+@bot.on_message(filters.command("rules") & filters.group)
+async def rules_cmd(client, message: Message):
+    settings = get_group_settings(message.chat.id)
+    await message.reply_text(settings["rules_text"])
+
+@bot.on_message(filters.command("gsettings") & filters.group)
+async def gsettings_cmd(client, message: Message):
+    settings = get_group_settings(message.chat.id)
+    txt = (
+        f"⚙️ **Group Settings**\n\n"
+        f"Welcome: `{settings['welcome_enabled']}`\n"
+        f"Warn Limit: `{settings['warn_limit']}`\n"
+        f"Flood: `{settings['flood_limit']}` msgs / `{settings['flood_window_sec']}` sec\n"
+        f"Link Lock: `{settings['link_lock']}`\n"
+        f"Media Lock: `{settings['media_lock']}`\n"
+        f"Night Mode: `{settings['night_mode']}` (`{settings['night_start']}`-`{settings['night_end']}`)\n"
+        f"Banned Words: `{len(settings['banned_words'])}`\n"
+        f"Log Channel: `{settings['log_channel_id']}`\n"
+        f"Force Sub: `{settings['force_sub_channel'] or 'off'}`"
+    )
+    await message.reply_text(txt)
+
+@bot.on_message(filters.command("notes") & filters.group)
+async def notes_cmd(client, message: Message):
+    items = list_notes(message.chat.id)
+    await message.reply_text("📝 Notes:\n" + ("\n".join(f"- `{x}`" for x in items) if items else "No notes."))
+
+@bot.on_message(filters.command("getnote") & filters.group)
+async def getnote_cmd(client, message: Message):
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /getnote note_name")
+    note = get_note(message.chat.id, parts[1].strip())
+    if not note:
+        return await message.reply_text("Note not found.")
+    await message.reply_text(note)
+
+# =========================================================
+# 13) Group admin commands
+# =========================================================
+@bot.on_message(filters.command("setrules") & filters.group)
+async def setrules_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /setrules your rules here")
+    update_group_setting(message.chat.id, "rules_text", parts[1].strip())
+    await message.reply_text("✅ Rules updated.")
+
+@bot.on_message(filters.command("setwelcome") & filters.group)
+async def setwelcome_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /setwelcome text\nUse {mention} or {name}")
+    update_group_setting(message.chat.id, "welcome_text", parts[1].strip())
+    await message.reply_text("✅ Welcome message updated.")
+
+@bot.on_message(filters.command("welcome") & filters.group)
+async def toggle_welcome_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2 or parts[1].strip().lower() not in {"on", "off"}:
+        return await message.reply_text("Usage: /welcome on|off")
+    value = 1 if parts[1].strip().lower() == "on" else 0
+    update_group_setting(message.chat.id, "welcome_enabled", value)
+    await message.reply_text(f"✅ Welcome {'enabled' if value else 'disabled'}.")
+
+@bot.on_message(filters.command("setlog") & filters.group)
+async def setlog_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /setlog -1001234567890")
+    try:
+        log_chat_id = int(parts[1].strip())
+        update_group_setting(message.chat.id, "log_channel_id", log_chat_id)
+        await message.reply_text("✅ Log channel saved.")
+    except Exception:
+        await message.reply_text("❌ Invalid channel id.")
+
+@bot.on_message(filters.command("setwarnlimit") & filters.group)
+async def setwarnlimit_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await message.reply_text("Usage: /setwarnlimit 3")
+    value = max(1, min(int(parts[1]), 20))
+    update_group_setting(message.chat.id, "warn_limit", value)
+    await message.reply_text(f"✅ Warn limit set to `{value}`")
+
+@bot.on_message(filters.command("setflood") & filters.group)
+async def setflood_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 3 or not parts[1].isdigit() or not parts[2].isdigit():
+        return await message.reply_text("Usage: /setflood 6 10")
+    count = max(2, min(int(parts[1]), 50))
+    seconds = max(2, min(int(parts[2]), 300))
+    update_group_setting(message.chat.id, "flood_limit", count)
+    update_group_setting(message.chat.id, "flood_window_sec", seconds)
+    await message.reply_text(f"✅ Flood set to `{count}` messages in `{seconds}` sec")
+
+@bot.on_message(filters.command("banword") & filters.group)
+async def banword_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /banword word")
+    settings = get_group_settings(message.chat.id)
+    words = set(settings["banned_words"])
+    words.add(parts[1].strip().lower())
+    update_group_setting(message.chat.id, "banned_words", ",".join(sorted(words)))
+    await message.reply_text("✅ Word added to banned list.")
+
+@bot.on_message(filters.command("unbanword") & filters.group)
+async def unbanword_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /unbanword word")
+    settings = get_group_settings(message.chat.id)
+    words = set(settings["banned_words"])
+    words.discard(parts[1].strip().lower())
+    update_group_setting(message.chat.id, "banned_words", ",".join(sorted(words)))
+    await message.reply_text("✅ Word removed.")
+
+@bot.on_message(filters.command("banwords") & filters.group)
+async def banwords_cmd(client, message: Message):
+    settings = get_group_settings(message.chat.id)
+    words = settings["banned_words"]
+    await message.reply_text("🚫 Banned words:\n" + (", ".join(words) if words else "None"))
+
+@bot.on_message(filters.command("warn") & filters.group)
+async def warn_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+
+    target = await extract_target_user(client, message)
+    if not target:
+        return await message.reply_text("Reply to a user or give username/user_id.")
+
+    settings = get_group_settings(message.chat.id)
+    warns = get_warns(message.chat.id, target.id) + 1
+    set_warns(message.chat.id, target.id, warns)
+
+    if warns >= settings["warn_limit"]:
+        try:
+            await client.ban_chat_member(message.chat.id, target.id)
+            set_warns(message.chat.id, target.id, 0)
+            await message.reply_text(f"⛔ {target.mention} banned after reaching warn limit.")
+            await log_to_channel(client, message.chat.id, f"⛔ Auto-ban by warns\nUser: {target.id}\nWarn limit: {settings['warn_limit']}")
+        except Exception as e:
+            await message.reply_text(f"Warn added, but ban failed: {e}")
+    else:
+        await message.reply_text(f"⚠️ {target.mention} warned. Total warns: `{warns}/{settings['warn_limit']}`")
+        await log_to_channel(client, message.chat.id, f"⚠️ Warn issued\nUser: {target.id}\nWarns: {warns}/{settings['warn_limit']}")
+
+@bot.on_message(filters.command("unwarn") & filters.group)
+async def unwarn_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    target = await extract_target_user(client, message)
+    if not target:
+        return await message.reply_text("Reply to a user or give username/user_id.")
+    warns = max(get_warns(message.chat.id, target.id) - 1, 0)
+    set_warns(message.chat.id, target.id, warns)
+    await message.reply_text(f"✅ Warn removed. Current warns: `{warns}`")
+
+@bot.on_message(filters.command("mute") & filters.group)
+async def mute_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    target = await extract_target_user(client, message)
+    if not target:
+        return await message.reply_text("Reply to a user or give username/user_id.")
+    try:
+        await client.restrict_chat_member(message.chat.id, target.id, ChatPermissions(can_send_messages=False))
+        await message.reply_text(f"🔇 {target.mention} muted.")
+    except Exception as e:
+        await message.reply_text(f"❌ Mute failed: {e}")
+
+@bot.on_message(filters.command("unmute") & filters.group)
+async def unmute_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    target = await extract_target_user(client, message)
+    if not target:
+        return await message.reply_text("Reply to a user or give username/user_id.")
+    try:
+        await client.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            ChatPermissions(
+                can_send_messages=True,
+                can_send_polls=True,
+                can_invite_users=True
+            )
+        )
+        await message.reply_text(f"🔊 {target.mention} unmuted.")
+    except Exception as e:
+        await message.reply_text(f"❌ Unmute failed: {e}")
+
+@bot.on_message(filters.command("ban") & filters.group)
+async def ban_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    target = await extract_target_user(client, message)
+    if not target:
+        return await message.reply_text("Reply to a user or give username/user_id.")
+    try:
+        await client.ban_chat_member(message.chat.id, target.id)
+        await message.reply_text(f"⛔ {target.mention} banned.")
+    except Exception as e:
+        await message.reply_text(f"❌ Ban failed: {e}")
+
+@bot.on_message(filters.command("unban") & filters.group)
+async def unban_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /unban user_id")
+    try:
+        user_id = int(parts[1])
+        await client.unban_chat_member(message.chat.id, user_id)
+        await message.reply_text(f"✅ `{user_id}` unbanned.")
+    except Exception as e:
+        await message.reply_text(f"❌ Unban failed: {e}")
+
+@bot.on_message(filters.command("locklink") & filters.group)
+async def locklink_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2 or parts[1].lower() not in {"on", "off"}:
+        return await message.reply_text("Usage: /locklink on|off")
+    value = 1 if parts[1].lower() == "on" else 0
+    update_group_setting(message.chat.id, "link_lock", value)
+    await message.reply_text(f"✅ Link lock {'enabled' if value else 'disabled'}.")
+
+@bot.on_message(filters.command("lockmedia") & filters.group)
+async def lockmedia_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2 or parts[1].lower() not in {"on", "off"}:
+        return await message.reply_text("Usage: /lockmedia on|off")
+    value = 1 if parts[1].lower() == "on" else 0
+    update_group_setting(message.chat.id, "media_lock", value)
+    await message.reply_text(f"✅ Media lock {'enabled' if value else 'disabled'}.")
+
+@bot.on_message(filters.command("nightmode") & filters.group)
+async def nightmode_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2:
+        return await message.reply_text("Usage:\n/nightmode on 0 7\n/nightmode off")
+    mode = parts[1].lower()
+    if mode == "off":
+        update_group_setting(message.chat.id, "night_mode", 0)
+        return await message.reply_text("🌙 Night mode disabled.")
+    if mode == "on":
+        start_h = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+        end_h = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 7
+        update_group_setting(message.chat.id, "night_mode", 1)
+        update_group_setting(message.chat.id, "night_start", start_h)
+        update_group_setting(message.chat.id, "night_end", end_h)
+        return await message.reply_text(f"🌙 Night mode enabled: `{start_h}:00 - {end_h}:00`")
+    await message.reply_text("Usage:\n/nightmode on 0 7\n/nightmode off")
+
+@bot.on_message(filters.command("setcmd") & filters.group)
+async def setcmd_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 2)
+    if len(parts) < 3:
+        return await message.reply_text("Usage: /setcmd hello Hello everyone!")
+    cmd = parts[1].lstrip("/").lower()
+    response = parts[2]
+    save_custom_command(message.chat.id, cmd, response)
+    await message.reply_text(f"✅ Saved /{cmd}")
+
+@bot.on_message(filters.command("save") & filters.group)
+async def save_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 2)
+    if len(parts) < 3:
+        return await message.reply_text("Usage: /save note_name note text")
+    name = parts[1].strip().lower()
+    text = parts[2].strip()
+    save_note(message.chat.id, name, text)
+    await message.reply_text(f"✅ Note `{name}` saved.")
+
+@bot.on_message(filters.command("delnote") & filters.group)
+async def delnote_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage: /delnote note_name")
+    del_note(message.chat.id, parts[1].strip())
+    await message.reply_text("✅ Note deleted.")
+
+@bot.on_message(filters.command("forcesub") & filters.group)
+async def forcesub_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+
+    parts = message.text.split(None, 1)
+    if len(parts) < 2:
+        return await message.reply_text("Usage:\n/forcesub @channelusername\n/forcesub -1001234567890\n/forcesub off")
+
+    value = parts[1].strip()
+    if value.lower() == "off":
+        update_group_setting(message.chat.id, "force_sub_channel", "")
+        return await message.reply_text("✅ Force-sub disabled.")
+
+    update_group_setting(message.chat.id, "force_sub_channel", value)
+    await message.reply_text(f"✅ Force-sub enabled: `{value}`")
+
+# =========================================================
+# 14) Auto moderation
+# =========================================================
+@bot.on_message(filters.group & ~filters.service, group=10)
+async def group_protection_handler(client, message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+    settings = get_group_settings(message.chat.id)
+
+    if await is_group_admin(client, message.chat.id, message.from_user.id):
+        return
+
+    # force-sub / force-task
+    if settings["force_sub_channel"]:
+        ok = await check_forcesub_membership(client, settings["force_sub_channel"], message.from_user.id)
+        if not ok:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+
+            join_target = settings["force_sub_channel"]
+            btn = None
+            if join_target.startswith("@"):
+                btn = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📢 Join Required Channel", url=f"https://t.me/{join_target.lstrip('@')}")]
+                ])
+
+            try:
+                await message.reply_text(
+                    f"🛑 {message.from_user.mention}, group-এ message দিতে হলে আগে `{join_target}` channel-এ join করতে হবে.",
+                    reply_markup=btn
+                )
+            except Exception:
+                pass
+            return
+
+    text = message.text or message.caption or ""
+
+    # link lock
+    if settings["link_lock"] and text_contains_link(text):
+        try:
+            await message.delete()
+            await log_to_channel(client, message.chat.id, f"🔗 Link deleted\nUser: {message.from_user.id}\nChat: {message.chat.title}")
+        except Exception:
+            pass
+        return
+
+    # media lock
+    if settings["media_lock"] and (message.media is not None):
+        try:
+            await message.delete()
+            await log_to_channel(client, message.chat.id, f"🖼 Media deleted\nUser: {message.from_user.id}\nChat: {message.chat.title}")
+        except Exception:
+            pass
+        return
+
+    # night mode
+    if settings["night_mode"] and in_night_mode_window(settings["night_start"], settings["night_end"]):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    # banned words
+    hit = text_contains_banned_word(text, settings["banned_words"])
+    if hit:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+        warns = get_warns(message.chat.id, message.from_user.id) + 1
+        set_warns(message.chat.id, message.from_user.id, warns)
+
+        if warns >= settings["warn_limit"]:
+            try:
+                await client.ban_chat_member(message.chat.id, message.from_user.id)
+                set_warns(message.chat.id, message.from_user.id, 0)
+            except Exception:
+                pass
+
+        await log_to_channel(client, message.chat.id, f"🚫 Banned word hit: {hit}\nUser: {message.from_user.id}\nWarns: {warns}")
+        return
+
+    # anti-flood
+    key = (message.chat.id, message.from_user.id)
+    now = time.time()
+    arr = flood_tracker.get(key, [])
+    arr = [x for x in arr if now - x <= settings["flood_window_sec"]]
+    arr.append(now)
+    flood_tracker[key] = arr
+
+    if len(arr) >= settings["flood_limit"]:
+        try:
+            await client.restrict_chat_member(
+                message.chat.id,
+                message.from_user.id,
+                ChatPermissions(can_send_messages=False)
+            )
+            await message.reply_text(f"🚫 Flood detected. {message.from_user.mention} muted.")
+            await log_to_channel(client, message.chat.id, f"🚫 Flood mute\nUser: {message.from_user.id}\nCount: {len(arr)}")
+        except Exception as e:
+            logger.warning(f"flood action failed: {e}")
+
+# =========================================================
+# 15) Custom command handler
+# =========================================================
+BUILTIN_COMMANDS = {
+    "start", "help", "settings", "lang", "admin",
+    "rules", "gsettings", "notes", "getnote",
+    "setrules", "setwelcome", "welcome", "setlog",
+    "warn", "unwarn", "mute", "unmute", "ban", "unban",
+    "banword", "unbanword", "banwords",
+    "locklink", "lockmedia", "nightmode",
+    "setcmd", "save", "delnote", "forcesub",
+    "setwarnlimit", "setflood"
+}
+
+@bot.on_message(filters.group & filters.text, group=20)
+async def custom_command_handler(client, message: Message):
+    if not message.text or not message.text.startswith("/"):
+        return
+
+    cmd = message.text.split()[0].lstrip("/").split("@")[0].lower()
+    if cmd in BUILTIN_COMMANDS:
+        return
+
+    response = get_custom_command(message.chat.id, cmd)
+    if response:
+        await message.reply_text(response)
+
+# =========================================================
+# 16) Startup
 # =========================================================
 async def startup_report():
-    if not CFG.owner_id: return
-    try: await bot.send_message(CFG.owner_id, f"✅ **Bot Started**\n\nQueue Limit: {CFG.max_queue_size}")
-    except Exception: pass
+    if not CFG.owner_id:
+        return
+    try:
+        await bot.send_message(
+            CFG.owner_id,
+            "✅ **Bot Started Successfully**\n\nGroup Guard Bot is now online."
+        )
+    except Exception:
+        pass
 
 async def main_runner():
-    cleanup_storage()
     init_db()
     threading.Thread(target=run_web_server, daemon=True).start()
 
     await bot.start()
-    await userbot.start() # <-- Userbot Started Here!
-    logger.info("Bot and Userbot started successfully")
+    logger.info("Bot started successfully")
 
-    asyncio.create_task(process_worker())
     asyncio.create_task(startup_report())
     await idle()
 
 if __name__ == "__main__":
-    try: loop.run_until_complete(main_runner())
-    except KeyboardInterrupt: pass
+    try:
+        loop.run_until_complete(main_runner())
+    except KeyboardInterrupt:
+        pass
