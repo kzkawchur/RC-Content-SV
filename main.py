@@ -631,26 +631,45 @@ async def check_force_task(client, user_id, chat_id, message=None):
         return True
     if has_done_force_task(user_id, chat_id):
         return True
-    # Show task panel
+
     tasks = ft["tasks"]
     buttons = []
-    for i, task in enumerate(tasks):
-        label = task.get("label","Subscribe/Follow")
-        url = task.get("url","")
+    for t in tasks:
+        url = t.get("url", "")
+        label = t.get("label", "Visit")
+        if "youtube" in url.lower() or "youtu.be" in url.lower():
+            btn_label = f"Subscribe on YouTube"
+        elif "facebook" in url.lower() or "fb.com" in url.lower():
+            btn_label = f"Follow on Facebook"
+        elif "instagram" in url.lower():
+            btn_label = f"Follow on Instagram"
+        elif "t.me" in url.lower():
+            btn_label = f"Join Telegram Channel"
+        elif "twitter" in url.lower() or "x.com" in url.lower():
+            btn_label = f"Follow on Twitter/X"
+        else:
+            btn_label = label
         if url:
-            buttons.append([InlineKeyboardButton(f"{'YouTube' if 'youtube' in url.lower() or 'youtu.be' in url.lower() else 'Facebook' if 'facebook' in url.lower() or 'fb.com' in url.lower() else 'Telegram' if 't.me' in url.lower() else 'Visit'}: {label}", url=url)])
-    buttons.append([InlineKeyboardButton("Done! Verify Now", callback_data=f"ft_verify_{chat_id}")])
+            buttons.append([InlineKeyboardButton(btn_label, url=url)])
+
+    buttons.append([InlineKeyboardButton(
+        "Done! I completed all tasks - Verify Now",
+        callback_data=f"ft_verify_{chat_id}"
+    )])
+
+    task_lines = "\n".join(f"{i+1}. {t.get('label','Task')}" for i, t in enumerate(tasks))
     text = (
-        "**Complete the following tasks to use this bot:**\n\n"
-        + "\n".join(f"{i+1}. {t.get('label','Task')}" for i,t in enumerate(tasks))
-        + "\n\nAfter completing, click **Done! Verify Now**"
+        "**Complete the tasks below to use this bot in the group:**\n\n"
+        f"{task_lines}\n\n"
+        "After completing ALL tasks, click **Verify Now**."
     )
     try:
         if message:
             await message.reply_text(text, reply_markup=InlineKeyboardMarkup(buttons))
         else:
             await client.send_message(user_id, text, reply_markup=InlineKeyboardMarkup(buttons))
-    except Exception: pass
+    except Exception:
+        pass
     return False
 
 # =========================================================
@@ -732,21 +751,23 @@ HELP = {
     ),
     "mod": (
         "**Moderation Commands:**\n\n"
-        "`/ban [@user] [reason]` - Ban a user\n"
-        "`/unban [@user]` - Unban a user\n"
-        "`/kick [@user] [reason]` - Kick from group\n"
-        "`/mute [@user] [time] [reason]` - Mute user\n"
-        "  Time: `10m`, `2h`, `1d` (optional)\n"
-        "`/unmute [@user]` - Unmute user\n"
+        "`/ban [@user] [reason]` - Ban\n"
         "`/ban [@user] del [reason]` - Ban + delete messages\n"
-        "`/promote [@user]` - Promote to admin\n"
+        "`/unban [@user]` - Unban\n"
+        "`/kick [@user] [reason]` - Kick (can rejoin)\n"
+        "`/mute [@user] [10m/2h/1d] [reason]` - Mute\n"
+        "`/unmute [@user]` - Unmute\n"
+        "`/ro [@user]` - Read-only (text only, no media)\n"
+        "`/unro [@user]` - Remove read-only\n"
+        "`/promote [@user] [title]` - Promote to admin\n"
         "`/demote [@user]` - Remove admin rights\n"
         "`/pin` - Pin replied message\n"
-        "`/unpin` - Unpin message\n"
-        "`/purge` - Delete all messages from reply\n"
+        "`/unpin` - Unpin current message\n"
+        "`/purge` - Delete messages from reply to now\n"
         "`/del` - Delete replied message\n"
-        "`/adminlist` - Show all admins\n"
-        "`/info [@user]` - User info + stats\n"
+        "`/adminlist` - List all admins\n"
+        "`/info [@user]` - User info\n"
+        "`/mystats` - Your own stats\n"
         "`/id` - Get user/chat ID"
     ),
     "warn": (
@@ -1570,21 +1591,85 @@ async def cmd_addtask(client, message):
     chat_id = message.chat.id
     if not await is_admin(client, chat_id, message.from_user.id):
         return await message.reply_text("You need admin rights.")
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) < 3:
+
+    # Get full text after command
+    raw = (message.text or "").strip()
+    # Remove the command part (/addtask or /addtask@botname)
+    raw = re.sub(r"^/addtask\S*\s*", "", raw, flags=re.IGNORECASE).strip()
+
+    if not raw:
         return await message.reply_text(
-            "Usage: `/addtask <label> <url>`\n\n"
+            "Usage: `/addtask <label> | <url>`\n\n"
+            "Use `|` to separate label from URL:\n\n"
             "Examples:\n"
-            "`/addtask Subscribe on YouTube https://youtube.com/@yourchannel`\n"
-            "`/addtask Follow on Facebook https://facebook.com/yourpage`\n"
-            "`/addtask Join our Channel https://t.me/yourchannel`"
+            "`/addtask Subscribe on YouTube | https://youtube.com/@yourchannel`\n"
+            "`/addtask Follow on Facebook | https://facebook.com/yourpage`\n"
+            "`/addtask Join our Channel | https://t.me/yourchannel`\n\n"
+            "Or just URL (label auto-detected):\n"
+            "`/addtask https://youtube.com/@yourchannel`"
         )
-    label, url = parts[1], parts[2]
-    if not url.startswith("http"): return await message.reply_text("URL must start with http.")
+
+    # Method 1: pipe separator  "label | url"
+    if "|" in raw:
+        pipe_parts = raw.split("|", 1)
+        label = pipe_parts[0].strip()
+        url = pipe_parts[1].strip()
+    else:
+        # Method 2: find URL at the end using regex
+        url_match = re.search(r"(https?://\S+)$", raw)
+        if url_match:
+            url = url_match.group(1)
+            label = raw[:url_match.start()].strip()
+            if not label:
+                # Auto-detect label from URL
+                if "youtube.com" in url or "youtu.be" in url:
+                    label = "Subscribe on YouTube"
+                elif "facebook.com" in url or "fb.com" in url:
+                    label = "Follow on Facebook"
+                elif "instagram.com" in url:
+                    label = "Follow on Instagram"
+                elif "t.me" in url:
+                    label = "Join our Telegram Channel"
+                elif "twitter.com" in url or "x.com" in url:
+                    label = "Follow on Twitter/X"
+                else:
+                    label = "Visit Link"
+        else:
+            return await message.reply_text(
+                "Could not find a valid URL.\n\n"
+                "Usage: `/addtask Subscribe on YouTube | https://youtube.com/@channel`"
+            )
+
+    if not url.startswith("http"):
+        return await message.reply_text("URL must start with `http://` or `https://`")
+
     ft = get_force_tasks(chat_id)
+    if len(ft["tasks"]) >= 5:
+        return await message.reply_text("Maximum 5 tasks allowed. Use `/deltask` to remove one.")
+
     ft["tasks"].append({"label": label, "url": url})
     set_force_tasks(chat_id, ft)
-    await message.reply_text(f"Task added!\n\nLabel: `{label}`\nURL: {url}")
+
+    # Auto-detect platform icon
+    if "youtube" in url.lower() or "youtu.be" in url.lower():
+        icon = "YouTube"
+    elif "facebook" in url.lower() or "fb.com" in url.lower():
+        icon = "Facebook"
+    elif "instagram" in url.lower():
+        icon = "Instagram"
+    elif "t.me" in url.lower():
+        icon = "Telegram"
+    else:
+        icon = "Web"
+
+    await message.reply_text(
+        f"Task added successfully!\n\n"
+        f"Platform: `{icon}`\n"
+        f"Label: `{label}`\n"
+        f"URL: {url}\n\n"
+        f"Total tasks: `{len(ft['tasks'])}/5`\n"
+        f"Use `/forcetask on` to activate."
+    )
 
 @bot.on_message(filters.command("deltask") & filters.group)
 async def cmd_deltask(client, message):
@@ -1606,13 +1691,39 @@ async def cmd_deltask(client, message):
 async def cmd_tasklist(client, message):
     chat_id = message.chat.id
     ft = get_force_tasks(chat_id)
-    if not ft["tasks"]: return await message.reply_text("No tasks configured. Use `/addtask` to add.")
-    lines = [f"{i+1}. [{t['label']}]({t['url']})" for i,t in enumerate(ft["tasks"])]
-    status = "ON" if ft["enabled"] else "OFF"
-    await message.reply_text(
-        f"**Force Tasks [{status}]:**\n\n" + "\n".join(lines) +
-        (f"\n\n**Reward:** {ft['reward_text']}" if ft.get("reward_text") else "")
+    if not ft["tasks"]:
+        return await message.reply_text(
+            "No tasks configured.\n\n"
+            "Use `/addtask <label> | <url>` to add tasks.\n\n"
+            "Example:\n"
+            "`/addtask Subscribe on YouTube | https://youtube.com/@channel`"
+        )
+    status = "ACTIVE" if ft["enabled"] else "INACTIVE"
+    lines = []
+    for i, t in enumerate(ft["tasks"]):
+        url = t["url"]
+        if "youtube" in url.lower(): platform = "YouTube"
+        elif "facebook" in url.lower(): platform = "Facebook"
+        elif "instagram" in url.lower(): platform = "Instagram"
+        elif "t.me" in url.lower(): platform = "Telegram"
+        else: platform = "Web"
+        lines.append(f"{i+1}. [{t['label']}]({url}) `[{platform}]`")
+
+    text = (
+        f"**Force Tasks [{status}]**\n\n"
+        + "\n".join(lines)
+        + f"\n\nTotal: `{len(ft['tasks'])}/5`"
     )
+    if ft.get("reward_text"):
+        text += f"\n\n**Reward message:** {ft['reward_text']}"
+
+    btns = [[
+        InlineKeyboardButton(
+            "Turn ON" if not ft["enabled"] else "Turn OFF",
+            callback_data=f"gs_ft_{chat_id}"
+        )
+    ]]
+    await message.reply_text(text, reply_markup=InlineKeyboardMarkup(btns))
 
 @bot.on_message(filters.command("setreward") & filters.group)
 async def cmd_setreward(client, message):
@@ -1680,6 +1791,33 @@ async def cmd_lang(client, message):
         set_lang(message.from_user.id, lang)
     await message.reply_text(f"Language set to `{lang}`.")
 
+@bot.on_message(filters.command("mystats"))
+async def cmd_mystats(client, message):
+    """Show user's own stats."""
+    user_id = message.from_user.id
+    warns = []
+    if message.chat.type == ChatType.GROUP:
+        warns = get_warns(user_id, message.chat.id)
+        max_w = gsetting(message.chat.id, "max_warnings") or 3
+        ft = get_force_tasks(message.chat.id)
+        ft_done = has_done_force_task(user_id, message.chat.id)
+    else:
+        max_w = 3
+        ft_done = False
+    gbanned = is_gbanned(user_id)
+    with closing(db()) as c:
+        total_t = c.execute("SELECT COUNT(*) FROM tasks WHERE user_id=?", (user_id,)).fetchone()[0]
+        done_t = c.execute("SELECT COUNT(*) FROM tasks WHERE user_id=? AND status='done'", (user_id,)).fetchone()[0]
+    await message.reply_text(
+        f"**Your Stats**\n\n"
+        f"Name: {message.from_user.mention}\n"
+        f"ID: `{user_id}`\n"
+        f"Warnings: `{len(warns)}/{max_w}`\n"
+        f"Tasks Completed: `{done_t}/{total_t}`\n"
+        f"Force Task Done: `{ft_done}`\n"
+        f"Globally Banned: `{gbanned}`"
+    )
+
 @bot.on_message(filters.command("report") & filters.group)
 async def cmd_report(client, message):
     chat_id = message.chat.id
@@ -1694,6 +1832,44 @@ async def cmd_report(client, message):
                     f"**Report in {message.chat.title}**\nFrom: {reporter}\nAbout: {reported}")
             except Exception: pass
     await message.reply_text("Report sent to admins!")
+
+@bot.on_message(filters.command("ro") & filters.group)
+async def cmd_ro(client, message):
+    """Set user to read-only (no media, no stickers, just text)."""
+    chat_id = message.chat.id
+    if not await is_admin(client, chat_id, message.from_user.id):
+        return await message.reply_text("You need admin rights.")
+    target = await get_target(client, message)
+    if not target: return await message.reply_text("Reply to a user or provide username.")
+    if await is_admin(client, chat_id, target.id):
+        return await message.reply_text("Cannot restrict an admin.")
+    try:
+        await client.restrict_chat_member(chat_id, target.id, ChatPermissions(
+            can_send_messages=True,
+            can_send_media_messages=False,
+            can_send_other_messages=False,
+            can_add_web_page_previews=False
+        ))
+        await message.reply_text(f"{target.mention} set to read-only. (Text only, no media/stickers)")
+    except ChatAdminRequired:
+        await message.reply_text("I need restrict rights!")
+
+@bot.on_message(filters.command("unro") & filters.group)
+async def cmd_unro(client, message):
+    """Remove read-only restriction."""
+    chat_id = message.chat.id
+    if not await is_admin(client, chat_id, message.from_user.id):
+        return await message.reply_text("You need admin rights.")
+    target = await get_target(client, message)
+    if not target: return await message.reply_text("Reply to a user or provide username.")
+    try:
+        await client.restrict_chat_member(chat_id, target.id, ChatPermissions(
+            can_send_messages=True, can_send_media_messages=True,
+            can_send_other_messages=True, can_add_web_page_previews=True
+        ))
+        await message.reply_text(f"{target.mention} read-only removed.")
+    except ChatAdminRequired:
+        await message.reply_text("I need restrict rights!")
 
 @bot.on_message(filters.command("setlogchannel") & filters.group)
 async def cmd_setlogchannel(client, message):
@@ -1779,7 +1955,16 @@ async def on_member_update(client, update: ChatMemberUpdated):
                 try: welcome_text = welcome_text.format(**fmt_vars)
                 except Exception: pass
             try:
-                await client.send_message(chat_id, welcome_text)
+                # Add rules button if rules are set
+                rules = gsetting(chat_id, "rules")
+                markup = None
+                if rules:
+                    markup = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("View Group Rules", callback_data=f"show_rules_{chat_id}")
+                    ]])
+                sent = await client.send_message(chat_id, welcome_text, reply_markup=markup)
+                # Auto-delete welcome after 5 minutes to keep chat clean
+                asyncio.create_task(auto_del(client, chat_id, sent.id, 300))
             except Exception: pass
 
     elif new_s == ChatMemberStatus.LEFT and old_s == ChatMemberStatus.MEMBER:
@@ -1816,7 +2001,7 @@ async def captcha_timeout(client, chat_id, user_id, msg_id):
     "setwelcome","resetwelcome","welcome","setgoodbye","resetgoodbye","save","note","notes",
     "delnote","filter","filters","stop","stopall","lock","unlock","locks","rules","setrules",
     "antiflood","captcha","addtask","deltask","tasklist","setreward","forcetask","resetuser",
-    "settings","lang","report","setlogchannel","id","info","help","start"
+    "settings","lang","report","setlogchannel","id","info","help","start","mystats","ro","unro"
 ]))
 async def on_group_text(client, message):
     chat_id = message.chat.id
@@ -1965,11 +2150,47 @@ async def on_callback(client, cq: CallbackQuery):
         if not ft["tasks"]:
             mark_force_task_done(user_id, chat_id)
             return await cq.answer("All done!")
-        # We trust the user clicked all links (honor system + admin can reset)
+
+        # Check Telegram channel joins via userbot
+        unjoined = []
+        for task in ft["tasks"]:
+            url = task.get("url", "")
+            label = task.get("label", "Task")
+            # Only verify t.me links (Telegram channels/groups)
+            tg_match = re.search(r"t\.me/([A-Za-z0-9_]+)", url)
+            if tg_match:
+                channel_username = tg_match.group(1)
+                try:
+                    if userbot.is_connected:
+                        member = await userbot.get_chat_member(channel_username, user_id)
+                        if member.status in (ChatMemberStatus.LEFT, ChatMemberStatus.BANNED):
+                            unjoined.append(label)
+                    # If userbot can't check, skip verification for this task
+                except Exception:
+                    pass  # Can't verify = assume ok (for non-public or inaccessible)
+
+        if unjoined:
+            tasks_list = ft["tasks"]
+            buttons = []
+            for task in tasks_list:
+                url = task.get("url","")
+                lbl = task.get("label","Visit")
+                if url:
+                    buttons.append([InlineKeyboardButton(lbl, url=url)])
+            buttons.append([InlineKeyboardButton("Done! Verify Again", callback_data=f"ft_verify_{chat_id}")])
+            not_done = "\n".join(f"- {t}" for t in unjoined)
+            await cq.message.edit_text(
+                f"**Not completed yet!**\n\n"
+                f"Please complete these tasks first:\n{not_done}\n\n"
+                f"After joining, click **Verify Again**.",
+                reply_markup=InlineKeyboardMarkup(buttons)
+            )
+            return await cq.answer("Please complete all tasks first!", show_alert=True)
+
         mark_force_task_done(user_id, chat_id)
-        reward = ft.get("reward_text","") or "You have completed all tasks! You can now use the bot in the group."
+        reward = ft.get("reward_text","") or "All tasks completed! You can now use the bot freely."
         await cq.message.edit_text(f"**Tasks Completed!**\n\n{reward}")
-        return await cq.answer("Verified!")
+        return await cq.answer("Verified! Welcome!", show_alert=False)
 
     # Remove warn button
     if data.startswith("rmwarn_"):
