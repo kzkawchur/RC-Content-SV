@@ -2062,8 +2062,6 @@ async def startup_report():
 async def main_runner():
     cleanup_storage()
     init_db()
-    threading.Thread(target=run_web_server, daemon=True).start()
-    logger.info("Web server started")
 
     await bot.start()
     await userbot.start()
@@ -2075,6 +2073,14 @@ async def main_runner():
     await idle()
 
 if __name__ == "__main__":
+    # âœ… Flask MUST start first so Render sees the port immediately
+    flask_thread = threading.Thread(target=run_web_server, daemon=True)
+    flask_thread.start()
+    logger.info(f"Web server started on port {CFG.port}")
+
+    # Give Flask a moment to bind the port before bot starts
+    time.sleep(2)
+
     try:
         loop.run_until_complete(main_runner())
     except KeyboardInterrupt:
