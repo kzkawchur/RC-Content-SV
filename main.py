@@ -878,7 +878,7 @@ async def start_cmd(client, message):
     )
     await message.reply_text(welcome_text, reply_markup=build_start_buttons())
 
-@bot.on_message(filters.command("start") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("start") & (filters.group))
 async def start_group_cmd(client, message):
     await message.reply_text("ðŸ‘‹ I'm online! Use /help to see what I can do.")
 
@@ -886,7 +886,7 @@ async def start_group_cmd(client, message):
 async def help_cmd_private(client, message):
     await message.reply_text(HELP_TEXTS["main"], reply_markup=build_help_menu())
 
-@bot.on_message(filters.command("help") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("help") & (filters.group))
 async def help_cmd_group(client, message):
     await message.reply_text(HELP_TEXTS["main"], reply_markup=build_help_menu())
 
@@ -898,7 +898,7 @@ async def settings_cmd_private(client, message):
         reply_markup=build_settings_panel(message.from_user.id)
     )
 
-@bot.on_message(filters.command("settings") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("settings") & (filters.group))
 async def settings_cmd_group(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -915,7 +915,7 @@ async def lang_cmd(client, message):
     lang = parts[1].strip().lower()
     if lang not in {"en", "bn"}:
         return await message.reply_text("Use only `en` or `bn`.")
-    if message.chat.type in (ChatType.GROUP, ChatType.SUPERGROUP):
+    if message.chat.type in (ChatType.GROUP,):
         if not await is_group_admin(client, message.chat.id, message.from_user.id):
             return await message.reply_text(tl(message.chat.id, "no_permission", is_group=True))
         set_group_language(message.chat.id, lang)
@@ -926,7 +926,7 @@ async def lang_cmd(client, message):
 # =========================================================
 # 14) Group Moderation Commands
 # =========================================================
-@bot.on_message(filters.command("ban") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("ban") & (filters.group))
 async def ban_cmd(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id
@@ -948,7 +948,7 @@ async def ban_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("unban") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("unban") & (filters.group))
 async def unban_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -962,7 +962,7 @@ async def unban_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("kick") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("kick") & (filters.group))
 async def kick_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -983,7 +983,7 @@ async def kick_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("mute") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("mute") & (filters.group))
 async def mute_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1003,7 +1003,7 @@ async def mute_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("unmute") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("unmute") & (filters.group))
 async def unmute_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1022,7 +1022,7 @@ async def unmute_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("promote") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("promote") & (filters.group))
 async def promote_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1040,7 +1040,7 @@ async def promote_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("demote") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("demote") & (filters.group))
 async def demote_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1058,7 +1058,7 @@ async def demote_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("adminlist") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("adminlist") & (filters.group))
 async def adminlist_cmd(client, message):
     chat_id = message.chat.id
     try:
@@ -1074,7 +1074,7 @@ async def adminlist_cmd(client, message):
     except Exception as e:
         await message.reply_text(f"âŒ Error: {e}")
 
-@bot.on_message(filters.command("pin") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("pin") & (filters.group))
 async def pin_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1087,7 +1087,7 @@ async def pin_cmd(client, message):
     except ChatAdminRequired:
         await message.reply_text(tl(chat_id, "bot_no_admin", is_group=True))
 
-@bot.on_message(filters.command("unpin") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("unpin") & (filters.group))
 async def unpin_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1101,7 +1101,7 @@ async def unpin_cmd(client, message):
 # =========================================================
 # 15) Warning System
 # =========================================================
-@bot.on_message(filters.command("warn") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("warn") & (filters.group))
 async def warn_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1130,7 +1130,7 @@ async def warn_cmd(client, message):
         await message.reply_text(tl(chat_id, "warned_success", is_group=True,
             user=target.mention, count=count, max=max_w, reason=reason))
 
-@bot.on_message(filters.command("unwarn") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("unwarn") & (filters.group))
 async def unwarn_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1141,7 +1141,7 @@ async def unwarn_cmd(client, message):
     remove_last_warning(target.id, chat_id)
     await message.reply_text(tl(chat_id, "unwarned_success", is_group=True, user=target.mention))
 
-@bot.on_message(filters.command(["warnlist", "warnings"]) & (filters.group | filters.supergroup))
+@bot.on_message(filters.command(["warnlist", "warnings"]) & (filters.group))
 async def warnlist_cmd(client, message):
     chat_id = message.chat.id
     target = await get_target_user(client, message)
@@ -1155,7 +1155,7 @@ async def warnlist_cmd(client, message):
     await message.reply_text(tl(chat_id, "warn_list", is_group=True,
         user=target.mention, count=len(warns), max=max_w, reasons=reasons))
 
-@bot.on_message(filters.command("clearwarns") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("clearwarns") & (filters.group))
 async def clearwarns_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1166,7 +1166,7 @@ async def clearwarns_cmd(client, message):
     clear_warnings(target.id, chat_id)
     await message.reply_text(f"âœ… All warnings cleared for **{target.mention}**.")
 
-@bot.on_message(filters.command("setwarnlimit") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("setwarnlimit") & (filters.group))
 async def setwarnlimit_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1183,7 +1183,7 @@ async def setwarnlimit_cmd(client, message):
 # =========================================================
 # 16) Welcome & Goodbye
 # =========================================================
-@bot.on_message(filters.command("setwelcome") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("setwelcome") & (filters.group))
 async def setwelcome_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1194,13 +1194,13 @@ async def setwelcome_cmd(client, message):
     set_group_setting(chat_id, "welcome_text", parts[1].strip())
     await message.reply_text("âœ… Welcome message updated!")
 
-@bot.on_message(filters.command("welcome") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("welcome") & (filters.group))
 async def welcome_cmd(client, message):
     chat_id = message.chat.id
     text = get_group_setting(chat_id, "welcome_text") or tl(chat_id, "welcome_default", is_group=True, mention="@you", title=message.chat.title, count="?")
     await message.reply_text(f"**Current Welcome:**\n\n{text}")
 
-@bot.on_message(filters.command("resetwelcome") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("resetwelcome") & (filters.group))
 async def resetwelcome_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1208,7 +1208,7 @@ async def resetwelcome_cmd(client, message):
     set_group_setting(chat_id, "welcome_text", "")
     await message.reply_text("âœ… Welcome message reset to default.")
 
-@bot.on_message(filters.command("setgoodbye") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("setgoodbye") & (filters.group))
 async def setgoodbye_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1305,7 +1305,7 @@ async def captcha_timeout(client, chat_id, user_id, msg_id):
 # =========================================================
 # 17) Notes
 # =========================================================
-@bot.on_message(filters.command("save") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("save") & (filters.group))
 async def save_note_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1317,7 +1317,7 @@ async def save_note_cmd(client, message):
     save_note(chat_id, name, content)
     await message.reply_text(tl(chat_id, "note_saved", is_group=True, name=name))
 
-@bot.on_message(filters.command("note") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("note") & (filters.group))
 async def get_note_cmd(client, message):
     chat_id = message.chat.id
     parts = message.text.split(maxsplit=1)
@@ -1329,7 +1329,7 @@ async def get_note_cmd(client, message):
         return await message.reply_text(tl(chat_id, "note_not_found", is_group=True, name=name))
     await message.reply_text(f"ðŸ“ **#{name}**\n\n{content}")
 
-@bot.on_message(filters.command("notes") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("notes") & (filters.group))
 async def list_notes_cmd(client, message):
     chat_id = message.chat.id
     notes = list_notes(chat_id)
@@ -1338,7 +1338,7 @@ async def list_notes_cmd(client, message):
     text = "ðŸ“ **Saved Notes:**\n\n" + "\n".join(f"â€¢ `#{n}`" for n in notes)
     await message.reply_text(text)
 
-@bot.on_message(filters.command("delnote") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("delnote") & (filters.group))
 async def del_note_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1353,7 +1353,7 @@ async def del_note_cmd(client, message):
 # =========================================================
 # 18) Filters
 # =========================================================
-@bot.on_message(filters.command("filter") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("filter") & (filters.group))
 async def set_filter_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1365,7 +1365,7 @@ async def set_filter_cmd(client, message):
     save_filter(chat_id, keyword, response)
     await message.reply_text(tl(chat_id, "filter_saved", is_group=True, keyword=keyword))
 
-@bot.on_message(filters.command("filters") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("filters") & (filters.group))
 async def list_filters_cmd(client, message):
     chat_id = message.chat.id
     f = get_filters(chat_id)
@@ -1374,7 +1374,7 @@ async def list_filters_cmd(client, message):
     text = "ðŸ” **Active Filters:**\n\n" + "\n".join(f"â€¢ `{k}`" for k in f.keys())
     await message.reply_text(text)
 
-@bot.on_message(filters.command("stop") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("stop") & (filters.group))
 async def stop_filter_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1401,7 +1401,7 @@ LOCK_TYPES = {
     "bot": "bot_lock",
 }
 
-@bot.on_message(filters.command("lock") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("lock") & (filters.group))
 async def lock_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1420,7 +1420,7 @@ async def lock_cmd(client, message):
     set_group_setting(chat_id, col, 1)
     await message.reply_text(tl(chat_id, "locked", is_group=True, perm=lock_type))
 
-@bot.on_message(filters.command("unlock") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("unlock") & (filters.group))
 async def unlock_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1439,7 +1439,7 @@ async def unlock_cmd(client, message):
     set_group_setting(chat_id, col, 0)
     await message.reply_text(tl(chat_id, "unlocked", is_group=True, perm=lock_type))
 
-@bot.on_message(filters.command("locks") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("locks") & (filters.group))
 async def locks_status_cmd(client, message):
     chat_id = message.chat.id
     ensure_group(chat_id)
@@ -1456,7 +1456,7 @@ async def locks_status_cmd(client, message):
 # =========================================================
 # 20) Anti-Flood config
 # =========================================================
-@bot.on_message(filters.command("antiflood") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("antiflood") & (filters.group))
 async def antiflood_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1480,7 +1480,7 @@ async def antiflood_cmd(client, message):
 # =========================================================
 # 21) Captcha config
 # =========================================================
-@bot.on_message(filters.command("captcha") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("captcha") & (filters.group))
 async def captcha_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1497,7 +1497,7 @@ async def captcha_cmd(client, message):
 # =========================================================
 # 22) Rules
 # =========================================================
-@bot.on_message(filters.command("rules") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("rules") & (filters.group))
 async def rules_cmd(client, message):
     chat_id = message.chat.id
     parts = message.text.split(maxsplit=1)
@@ -1511,7 +1511,7 @@ async def rules_cmd(client, message):
         return await message.reply_text(tl(chat_id, "rules_not_set", is_group=True))
     await message.reply_text(f"ðŸ“‹ **Group Rules:**\n\n{rules}")
 
-@bot.on_message(filters.command("setrules") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("setrules") & (filters.group))
 async def setrules_cmd(client, message):
     chat_id = message.chat.id
     if not await is_group_admin(client, chat_id, message.from_user.id):
@@ -1525,7 +1525,7 @@ async def setrules_cmd(client, message):
 # =========================================================
 # 23) Report
 # =========================================================
-@bot.on_message(filters.command("report") & (filters.group | filters.supergroup))
+@bot.on_message(filters.command("report") & (filters.group))
 async def report_cmd(client, message):
     chat_id = message.chat.id
     if not message.reply_to_message:
@@ -1726,7 +1726,7 @@ async def callback_handler(client, cq: CallbackQuery):
 # =========================================================
 # 26) Group message handler (filters, locks, flood, #notes)
 # =========================================================
-@bot.on_message(filters.text & (filters.group | filters.supergroup) &
+@bot.on_message(filters.text & (filters.group) &
     ~filters.command(["ban","unban","kick","mute","unmute","warn","unwarn","warnlist","clearwarns",
                       "setwarnlimit","promote","demote","adminlist","pin","unpin","setwelcome",
                       "resetwelcome","welcome","setgoodbye","save","note","notes","delnote",
@@ -1771,7 +1771,7 @@ async def group_text_handler(client, message):
             if content:
                 await message.reply_text(f"ðŸ“ **#{note_name}**\n\n{content}")
 
-@bot.on_message(filters.media & (filters.group | filters.supergroup))
+@bot.on_message(filters.media & (filters.group))
 async def group_media_handler(client, message):
     chat_id = message.chat.id
     user_id = message.from_user.id if message.from_user else None
