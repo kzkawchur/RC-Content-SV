@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import re
 import sys
@@ -7,10 +8,19 @@ import sqlite3
 import shutil
 import logging
 import asyncio
+import hashlib
 import threading
+from collections import defaultdict
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Optional, Dict, Set, Tuple, List
+
+# âœ… Force UTF-8 everywhere (fixes emoji garble on Render)
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8")
 
 from flask import Flask, jsonify
 from pyrogram import Client, filters, idle
@@ -166,7 +176,11 @@ task_queue: asyncio.Queue = asyncio.Queue(maxsize=CFG.max_queue_size)
 user_pending_count: Dict[int, int] = {}
 user_last_request: Dict[int, float] = {}
 task_registry: Dict[str, Dict] = {}
-flood_tracker: Dict[str, list] = {}  # key: f"{chat_id}:{user_id}"
+flood_tracker: Dict[str, list] = {}       # key: f"{chat_id}:{user_id}"
+raid_tracker: Dict[int, list] = {}        # key: chat_id => join timestamps
+spam_tracker: Dict[str, list] = {}        # key: f"{chat_id}:{user_id}" => msg hashes
+duplicate_tracker: Dict[str, int] = {}   # duplicate msg count
+warned_spam: Set[str] = set()            # already warned spam keys
 
 TG_LINK_RE = re.compile(
     r"^(https?://)?t\.me/(c/\d+/\d+|[A-Za-z0-9_]{4,}/\d+)(\?.*)?$",
@@ -284,7 +298,11 @@ def cleanup_storage():
     os.makedirs(CFG.download_dir, exist_ok=True)
 
 def db_connect():
-    return sqlite3.connect(CFG.db_path, check_same_thread=False)
+    conn = sqlite3.connect(CFG.db_path, check_same_thread=False, timeout=30)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA cache_size=10000")
+    return conn
 
 def init_db():
     with closing(db_connect()) as conn:
@@ -629,6 +647,94 @@ async def is_group_admin(client, chat_id, user_id) -> bool:
     except Exception:
         return False
 
+
+async def check_cas_ban(user_id: int) -> bool:
+    """Check Combot Anti-Spam (CAS) â€” free global ban database."""
+    try:
+        import urllib.request
+        url = f'https://api.cas.chat/check?user_id={user_id}'
+        with urllib.request.urlopen(url, timeout=5) as resp:
+            import json
+            data = json.loads(resp.read())
+            return data.get('ok', False)  # True = user is CAS banned
+    except Exception:
+        return False
+
+async def check_raid(client, chat_id: int) -> bool:
+    """Returns True if group is under raid (5+ joins in 10s)."""
+    now = time.time()
+    joins = raid_tracker.get(chat_id, [])
+    joins = [t for t in joins if now - t < 10]
+    joins.append(now)
+    raid_tracker[chat_id] = joins
+    if len(joins) >= 5:
+        # Enable slow mode auto during raid
+        try:
+            await client.set_slow_mode(chat_id, 30)
+        except Exception:
+            pass
+        await send_log(client,
+            f"ðŸš¨ **RAID DETECTED** in chat `{chat_id}`!\n"
+            f"Joined: {len(joins)} users in 10s â€” slow mode enabled.")
+        return True
+    return False
+
+def get_msg_hash(text: str) -> str:
+    """Hash message content for duplicate detection."""
+    cleaned = text.strip().lower()
+    return hashlib.md5(cleaned.encode()).hexdigest()
+
+async def check_duplicate_spam(client, message: Message) -> bool:
+    """Returns True if user is sending duplicate messages (spam)."""
+    if not message.text or len(message.text) < 10:
+        return False
+    chat_id = message.chat.id
+    user_id = message.from_user.id if message.from_user else None
+    if not user_id:
+        return False
+    msg_hash = get_msg_hash(message.text)
+    key = f"{chat_id}:{user_id}:{msg_hash}"
+    count = duplicate_tracker.get(key, 0) + 1
+    duplicate_tracker[key] = count
+    # Auto-clean old keys every 100 checks
+    if len(duplicate_tracker) > 500:
+        duplicate_tracker.clear()
+    if count >= 3:
+        duplicate_tracker.pop(key, None)
+        try:
+            await message.delete()
+            await client.restrict_chat_member(
+                chat_id, user_id,
+                ChatPermissions(can_send_messages=False)
+            )
+            warn_msg = await client.send_message(
+                chat_id,
+                f"ðŸ”‡ {message.from_user.mention} muted for sending duplicate messages!"
+            )
+            asyncio.create_task(auto_delete(client, chat_id, warn_msg.id, 30))
+        except Exception:
+            pass
+        return True
+    return False
+
+async def auto_delete(client, chat_id: int, msg_id: int, delay: int):
+    """Auto-delete a message after delay seconds."""
+    await asyncio.sleep(delay)
+    try:
+        await client.delete_messages(chat_id, msg_id)
+    except Exception:
+        pass
+
+async def shadowmute(client, chat_id: int, user_id: int):
+    """Restrict user silently without notifying them."""
+    try:
+        await client.restrict_chat_member(
+            chat_id, user_id,
+            ChatPermissions(can_send_messages=False)
+        )
+    except Exception:
+        pass
+
 async def send_log(client, text):
     if CFG.log_channel:
         try:
@@ -699,13 +805,21 @@ def build_group_settings_panel(chat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("ðŸ”™ Close", callback_data="gs_close")]
     ])
 
-def build_start_buttons() -> InlineKeyboardMarkup:
+async def get_bot_username(client) -> str:
+    try:
+        me = await client.get_me()
+        return me.username or "bot"
+    except Exception:
+        return "bot"
+
+def build_start_buttons(bot_username: str = "bot") -> InlineKeyboardMarkup:
     buttons = [
-        [InlineKeyboardButton("âž• Add to Group", url=f"https://t.me/YOUR_BOT?startgroup=true"),
+        [InlineKeyboardButton("âž• Add to Group", url=f"https://t.me/{bot_username}?startgroup=true"),
          InlineKeyboardButton("â“ Help", callback_data="help_main")]
     ]
     if CFG.support_chat:
         buttons.append([InlineKeyboardButton("ðŸ’¬ Support", url=f"https://t.me/{CFG.support_chat.lstrip('@')}")])
+    buttons.append([InlineKeyboardButton("ðŸ”’ Security Info", callback_data="help_security")])
     return InlineKeyboardMarkup(buttons)
 
 def build_help_menu() -> InlineKeyboardMarkup:
@@ -720,6 +834,7 @@ def build_help_menu() -> InlineKeyboardMarkup:
          InlineKeyboardButton("ðŸŒŠ Anti-Flood", callback_data="help_flood")],
         [InlineKeyboardButton("ðŸ“¥ Downloader", callback_data="help_downloader"),
          InlineKeyboardButton("âš™ï¸ Settings", callback_data="help_settings")],
+        [InlineKeyboardButton("ðŸ”’ Security", callback_data="help_security")],
         [InlineKeyboardButton("ðŸ”™ Back", callback_data="help_back")]
     ])
 
@@ -804,6 +919,24 @@ Send a private message to the bot with any restricted Telegram post link:
 `https://t.me/channelname/123`
 
 The bot will download and send you the file!""",
+    "security": """ðŸ”’ **Advanced Security Features**
+
+**Auto-Protection (always active):**
+â€¢ ðŸš« **CAS Ban** â€” Auto-bans globally known spammers on join
+â€¢ ðŸŒŠ **Anti-Raid** â€” Detects mass joins (5+ in 10s) â†’ enables slow mode
+â€¢ ðŸ” **Anti-Spam** â€” Mutes users sending same message 3x
+â€¢ ðŸŽ£ **Anti-Scam** â€” Detects & deletes phishing/scam keywords
+
+**Admin Configurable:**
+â€¢ `/captcha on` â€” Button verify for new members (60s timeout)
+â€¢ `/antiflood 5 10 mute` â€” Flood control
+â€¢ `/lock links` â€” Block all URLs
+â€¢ `/warn` â†’ auto-ban at limit
+â€¢ `/ban`, `/mute` â€” Manual moderation
+
+**Global Bot Admin:**
+â€¢ `/gban` â€” Global ban across all chats
+â€¢ `/broadcast` â€” Message all users""",
     "settings": """âš™ï¸ **Settings**
 
 `/settings` â€” Group settings panel (in groups)
@@ -869,18 +1002,30 @@ async def start_cmd(client, message):
         btn = [[InlineKeyboardButton("ðŸ“¢ Join Channel", url=f"https://t.me/{CFG.force_sub_channel.lstrip('@')}")]]
         return await message.reply_text(tl(user.id, "join_required"), reply_markup=InlineKeyboardMarkup(btn))
 
-    welcome_text = (
-        f"ðŸ‘‹ **Hello, {user.first_name}!**\n\n"
-        f"I'm **GroupHelp Bot** â€” a powerful group manager + content extractor!\n\n"
-        f"**In Groups:** I manage moderation, welcome messages, filters, notes & more.\n"
-        f"**In Private:** Send me any restricted Telegram link and I'll extract it!\n\n"
-        f"Use the buttons below to learn more ðŸ‘‡"
-    )
-    await message.reply_text(welcome_text, reply_markup=build_start_buttons())
+    lang = get_user_language(user.id)
+    if lang == "bn":
+        welcome_text = (
+            f"âš¡ **à¦¸à§à¦¬à¦¾à¦—à¦¤à¦®, {user.first_name}!**\n\n"
+            f"à¦†à¦®à¦¿ **GroupHelp Bot** â€” à¦¶à¦•à§à¦¤à¦¿à¦¶à¦¾à¦²à§€ à¦—à§à¦°à§à¦ª à¦®à§à¦¯à¦¾à¦¨à§‡à¦œà¦¾à¦° + à¦•à¦¨à§à¦Ÿà§‡à¦¨à§à¦Ÿ à¦à¦•à§à¦¸à¦Ÿà§à¦°à§à¦¯à¦¾à¦•à§à¦Ÿà¦°!\n\n"
+            f"ðŸ›¡ **à¦—à§à¦°à§à¦ªà§‡:** Ban, Mute, Warn, Welcome, Notes, Filters, Locks & à¦†à¦°à¦“ à¦…à¦¨à§‡à¦• à¦•à¦¿à¦›à§à¥¤\n"
+            f"ðŸ“¥ **Private-à¦:** à¦¯à§‡à¦•à§‹à¦¨à§‹ restricted Telegram à¦²à¦¿à¦‚à¦• à¦ªà¦¾à¦ à¦¾à¦“, à¦†à¦®à¦¿ à¦¡à¦¾à¦‰à¦¨à¦²à§‹à¦¡ à¦•à¦°à§‡ à¦¦à§‡à¦¬!\n\n"
+            f"à¦¨à¦¿à¦šà§‡à¦° à¦¬à¦¾à¦Ÿà¦¨à§‡ à¦•à§à¦²à¦¿à¦• à¦•à¦°à§‹ ðŸ‘‡"
+        )
+    else:
+        welcome_text = (
+            f"âš¡ **Welcome, {user.first_name}!**\n\n"
+            f"I'm **GroupHelp Bot** â€” a powerful group manager + content extractor!\n\n"
+            f"ðŸ›¡ **In Groups:** Ban, Mute, Warn, Welcome, Notes, Filters, Locks & more.\n"
+            f"ðŸ“¥ **In Private:** Send any restricted Telegram link, I'll download it for you!\n\n"
+            f"Use the buttons below ðŸ‘‡"
+        )
+    bot_username = await get_bot_username(client)
+    await message.reply_text(welcome_text, reply_markup=build_start_buttons(bot_username))
 
 @bot.on_message(filters.command("start") & (filters.group))
 async def start_group_cmd(client, message):
-    await message.reply_text("ðŸ‘‹ I'm online! Use /help to see what I can do.")
+    # Silently ignore /start in groups to avoid spam
+    pass
 
 @bot.on_message(filters.command("help") & filters.private)
 async def help_cmd_private(client, message):
@@ -1235,6 +1380,29 @@ async def member_update_handler(client, update: ChatMemberUpdated):
     ):
         upsert_user(user.id, user.username, user.first_name)
 
+        # ðŸ”’ CAS Ban check (Combot Anti-Spam global database)
+        if await check_cas_ban(user.id):
+            try:
+                await client.ban_chat_member(chat_id, user.id)
+                cas_msg = await client.send_message(
+                    chat_id,
+                    f"ðŸš« **CAS Ban:** [{user.first_name}](tg://user?id={user.id}) was auto-banned "
+                    f"(found in global spam database)."
+                )
+                asyncio.create_task(auto_delete(client, chat_id, cas_msg.id, 30))
+                await send_log(client, f"ðŸš« CAS Auto-Ban: {user.first_name} (`{user.id}`) in `{update.chat.title}`")
+            except Exception:
+                pass
+            return
+
+        # ðŸ”’ Anti-Raid check
+        if await check_raid(client, chat_id):
+            raid_msg = await client.send_message(
+                chat_id,
+                "âš ï¸ **Raid detected!** Slow mode enabled for 30 seconds."
+            )
+            asyncio.create_task(auto_delete(client, chat_id, raid_msg.id, 35))
+
         # Captcha check
         if get_group_setting(chat_id, "captcha_enabled"):
             try:
@@ -1550,6 +1718,41 @@ async def report_cmd(client, message):
 # =========================================================
 # 24) Admin Bot Panel
 # =========================================================
+@bot.on_message(filters.command("id"))
+async def id_cmd(client, message):
+    """Get user/chat ID."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        u = message.reply_to_message.from_user
+        await message.reply_text(f"ðŸ‘¤ **User ID:** `{u.id}`\nðŸ“› Name: {u.first_name}")
+    elif message.chat.type in (ChatType.GROUP,):
+        await message.reply_text(
+            f"ðŸ‘¥ **Chat ID:** `{message.chat.id}`\n"
+            f"ðŸ‘¤ **Your ID:** `{message.from_user.id}`"
+        )
+    else:
+        await message.reply_text(f"ðŸ‘¤ **Your ID:** `{message.from_user.id}`")
+
+@bot.on_message(filters.command("info"))
+async def info_cmd(client, message):
+    """Get detailed user info."""
+    target = await get_target_user(client, message)
+    user = target or message.from_user
+    warns = []
+    if message.chat.type in (ChatType.GROUP,):
+        warns = get_warnings(user.id, message.chat.id)
+    max_w = get_group_setting(message.chat.id, "max_warnings") if message.chat.type in (ChatType.GROUP,) else 3
+    gbanned = is_globally_banned(user.id)
+    text = (
+        f"ðŸ‘¤ **User Info**\n\n"
+        f"ðŸ†” ID: `{user.id}`\n"
+        f"ðŸ“› Name: {user.first_name or ''} {user.last_name or ''}\n"
+        f"ðŸ‘¤ Username: @{user.username or 'None'}\n"
+        f"ðŸ¤– Bot: `{user.is_bot}`\n"
+        f"âš ï¸ Warnings: `{len(warns)}/{max_w or 3}`\n"
+        f"ðŸš« GBanned: `{gbanned}`"
+    )
+    await message.reply_text(text)
+
 @bot.on_message(filters.command("admin") & filters.private)
 async def admin_cmd(client, message):
     if not is_bot_admin(message.from_user.id):
@@ -1571,6 +1774,46 @@ async def stats_cmd(client, message):
         f"ðŸ›  Maintenance: `{state['maintenance_mode']}`"
     )
     await message.reply_text(text)
+
+@bot.on_message(filters.command("gban") & filters.private)
+async def gban_cmd(client, message):
+    if not is_bot_admin(message.from_user.id):
+        return
+    target = await get_target_user(client, message)
+    if not target:
+        return await message.reply_text("Usage: `/gban @user [reason]` or reply to user")
+    reason = await get_reason(message, "Global ban by admin")
+    ban_user_global(target.id, reason)
+    # Try to ban from all known groups
+    banned_in = 0
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT DISTINCT chat_id FROM group_settings")
+        chats = [r[0] for r in cur.fetchall()]
+    for chat_id in chats:
+        try:
+            await client.ban_chat_member(chat_id, target.id)
+            banned_in += 1
+            await asyncio.sleep(0.1)
+        except Exception:
+            pass
+    await message.reply_text(
+        f"ðŸŒ **Global Ban**\n\n"
+        f"User: {target.mention}\n"
+        f"Reason: {reason}\n"
+        f"Banned in: {banned_in} chats"
+    )
+    await send_log(client, f"ðŸŒ GBAN: {target.mention} (`{target.id}`) by {message.from_user.mention}\nReason: {reason}")
+
+@bot.on_message(filters.command("ungban") & filters.private)
+async def ungban_cmd(client, message):
+    if not is_bot_admin(message.from_user.id):
+        return
+    target = await get_target_user(client, message)
+    if not target:
+        return await message.reply_text("Usage: `/ungban @user`")
+    unban_user_global(target.id)
+    await message.reply_text(f"âœ… {target.mention} has been globally unbanned.")
 
 @bot.on_message(filters.command("broadcast") & filters.private)
 async def broadcast_cmd(client, message):
@@ -1606,7 +1849,7 @@ async def callback_handler(client, cq: CallbackQuery):
     if data == "help_back":
         await cq.message.edit_text(HELP_TEXTS["main"], reply_markup=build_help_menu())
         return await cq.answer()
-    for key in ["mod", "welcome", "warn", "notes", "filters", "locks", "captcha", "flood", "downloader", "settings"]:
+    for key in ["mod", "welcome", "warn", "notes", "filters", "locks", "captcha", "flood", "downloader", "settings", "security"]:
         if data == f"help_{key}":
             back_btn = InlineKeyboardMarkup([[InlineKeyboardButton("ðŸ”™ Back", callback_data="help_back")]])
             await cq.message.edit_text(HELP_TEXTS.get(key, ""), reply_markup=back_btn)
@@ -1746,11 +1989,50 @@ async def group_text_handler(client, message):
         if await check_flood(client, message):
             return
 
+    # Duplicate spam detection
+    if not is_admin_user:
+        if await check_duplicate_spam(client, message):
+            return
+
+    # Scam/phishing keyword detection
+    if not is_admin_user:
+        scam_keywords = [
+            "free nitro", "claim your prize", "you have been selected",
+            "click here to claim", "airdrop", "crypto giveaway",
+            "send 0.1 btc", "double your", "investment profit",
+            "t.me/+", "@everyone", "adult content", "18+ group"
+        ]
+        msg_lower = (message.text or "").lower()
+        for kw in scam_keywords:
+            if kw in msg_lower:
+                try:
+                    await message.delete()
+                    warn_msg = await message.reply_text(
+                        f"ðŸš« {message.from_user.mention} â€” Potential scam/spam detected and removed!"
+                    )
+                    asyncio.create_task(auto_delete(client, chat_id, warn_msg.id, 20))
+                    add_warning(user_id, chat_id, f"Auto: scam keyword '{kw}'")
+                    warns = get_warnings(user_id, chat_id)
+                    max_w = get_group_setting(chat_id, "max_warnings") or 3
+                    if len(warns) >= max_w:
+                        clear_warnings(user_id, chat_id)
+                        await client.ban_chat_member(chat_id, user_id)
+                        await send_log(client, f"ðŸš« Auto-ban (scam spam): {message.from_user.mention} in `{message.chat.title}`")
+                    else:
+                        await send_log(client, f"âš ï¸ Scam keyword by {message.from_user.mention}: `{kw}`")
+                except Exception:
+                    pass
+                return
+
     # Lock: links
     if not is_admin_user and get_group_setting(chat_id, "link_lock"):
         if re.search(r"https?://|t\.me/|@\w+", message.text or ""):
             try:
                 await message.delete()
+                muted_msg = await message.reply_text(
+                    f"ðŸ”— {message.from_user.mention} â€” Links are not allowed here!"
+                )
+                asyncio.create_task(auto_delete(client, chat_id, muted_msg.id, 10))
             except Exception:
                 pass
             return
