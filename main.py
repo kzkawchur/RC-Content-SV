@@ -32,7 +32,7 @@ logging.basicConfig(
     level=LOG_LEVEL,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("grouphelp_ui_clone")
+logger = logging.getLogger("group_guard_2")
 
 # =========================================================
 # Config
@@ -80,9 +80,9 @@ def load_config() -> Config:
         bot_token=os.environ["BOT_TOKEN"],
         owner_id=owner_id,
         admin_ids=admins,
-        db_path=os.environ.get("DB_PATH", "bot.sqlite3"),
+        db_path=os.environ.get("DB_PATH", "group_guard_2.sqlite3"),
         port=int(os.environ.get("PORT", "10000")),
-        secret_key=os.environ.get("SECRET_KEY", "CHANGE_ME_SECRET"),
+        secret_key=os.environ.get("SECRET_KEY", "CHANGE_THIS_SECRET"),
         maintenance_mode=env_bool("MAINTENANCE_MODE", False),
     )
 
@@ -90,7 +90,7 @@ def load_config() -> Config:
 CFG = load_config()
 
 # =========================================================
-# App / Runtime
+# Flask / runtime
 # =========================================================
 app = Flask(__name__)
 BOOT_TIME = time.time()
@@ -100,15 +100,15 @@ runtime = {
     "bot_id": 0,
     "maintenance": CFG.maintenance_mode,
 }
-flood_tracker: Dict[Tuple[int, int], List[float]] = {}
 pending_inputs: Dict[int, Dict] = {}
+flood_tracker: Dict[Tuple[int, int], List[float]] = {}
 
 # =========================================================
-# Flask
+# Flask routes
 # =========================================================
 @app.route("/")
 def home():
-    return "✅ Bot running", 200
+    return "✅ Group Guard 2.0 is running", 200
 
 
 @app.route("/healthz")
@@ -126,7 +126,6 @@ def healthz():
 def run_web_server():
     app.run(host="0.0.0.0", port=CFG.port)
 
-
 # =========================================================
 # Event loop
 # =========================================================
@@ -139,7 +138,7 @@ asyncio.set_event_loop(loop)
 # Bot
 # =========================================================
 bot = Client(
-    "grouphelp_like_bot",
+    "group_guard_2",
     api_id=CFG.api_id,
     api_hash=CFG.api_hash,
     bot_token=CFG.bot_token,
@@ -495,7 +494,6 @@ def get_custom(chat_id: int, cmd: str) -> Optional[str]:
         row = cur.fetchone()
         return row[0] if row else None
 
-
 # =========================================================
 # Helpers
 # =========================================================
@@ -520,7 +518,7 @@ def bool_icon(v: bool) -> str:
 
 
 def sign_data(raw: str) -> str:
-    sig = hmac.new(CFG.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:12]
+    sig = hmac.new(CFG.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:8]
     return f"{raw}|{sig}"
 
 
@@ -528,12 +526,14 @@ def verify_data(data: str) -> Optional[str]:
     if "|" not in data:
         return None
     raw, sig = data.rsplit("|", 1)
-    expected = hmac.new(CFG.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:12]
+    expected = hmac.new(CFG.secret_key.encode(), raw.encode(), hashlib.sha256).hexdigest()[:8]
     return raw if hmac.compare_digest(sig, expected) else None
 
 
+# short callback codes
 def cb(uid: int, page: str, chat_id: int = 0, extra: str = "") -> str:
-    return sign_data(f"{uid}:{page}:{chat_id}:{extra}")
+    raw = f"{uid}:{page}:{chat_id}:{extra}"
+    return sign_data(raw)
 
 
 def parse_cb(data: str) -> Optional[dict]:
@@ -613,23 +613,13 @@ async def apply_warn_action(client: Client, chat_id: int, user_id: int, settings
         logger.warning(f"warn action failed: {e}")
 
 
-async def log_to_channel(client: Client, chat_id: int, text: str):
-    s = get_settings(chat_id)
-    if not s["log_channel_id"]:
-        return
-    try:
-        await client.send_message(s["log_channel_id"], text)
-    except Exception:
-        pass
-
-
 # =========================================================
 # UI text
 # =========================================================
 def main_text() -> str:
     return (
         "👋 **Hello!**\n"
-        "Group Help is the most complete Bot to help\n"
+        "Group Guard 2.0 is a complete Bot to help\n"
         "you manage your groups easily and safely!\n\n"
         "👉 Add me in a Supergroup and promote me\n"
         "as Admin to let me get in action!\n\n"
@@ -653,7 +643,7 @@ def manage_groups_text() -> str:
 
 def settings_home_text(chat_id: int) -> str:
     s = get_settings(chat_id)
-    title = s["title"] or f"Chat {chat_id}"
+    title = s["title"] or f"Group {chat_id}"
     return (
         "SETTINGS\n"
         f"Group: {title}\n\n"
@@ -661,108 +651,26 @@ def settings_home_text(chat_id: int) -> str:
         "change."
     )
 
-
-def help_menu_text() -> str:
-    return "Welcome to the help menu!"
-
-
-def basic_commands_text() -> str:
-    return (
-        "Base Commands\n\n"
-        "👮 Available to Admins&Moderators\n"
-        "🕵️ Available to Admins\n\n"
-        "👮 /reload updates the Admins list and their privileges\n\n"
-        "🕵️ /settings lets you manage all the Bot settings in a group\n\n"
-        "👮 /ban lets you ban a user from the group\n"
-        "without giving him the possibility to join again using the link of the group\n\n"
-        "👮 /mute puts a user in read-only mode. He can\n"
-        "read but he can't send any messages\n\n"
-        "👮 /kick bans a user from the group, giving\n"
-        "him the possibility to join again with the link of the group\n\n"
-        "👮 /unban lets you remove a user from group's\n"
-        "blacklist, giving them the possibility to join again with the link of the group\n\n"
-        "👮 /info gives information about a user\n"
-        "👮 /infopvt is the same of /info, but sends\n"
-        "infos in private chat\n\n"
-        "◻️ /staff gives the complete List of group Staff"
-    )
-
-
-def advanced_commands_text() -> str:
-    return (
-        "Advanced Commands\n\n"
-        "🕵️ Available to Admins\n"
-        "👮 Available to Admins&Moderators\n"
-        "🧹 Available to Admins&Cleaners\n\n"
-        "WARN MANAGEMENT\n"
-        "👮 /warn adds a warn to the user\n"
-        "👮 /unwarn removes a warn to the user\n"
-        "👮 /warns lets you see and manage user Warns\n"
-        "🕵️ /delwarn deletes the message and add a warn to the user\n\n"
-        "🧹 /del deletes the selected message\n"
-        "🧹 /logdel deletes the selected message and sends it to the Log Channel\n\n"
-        "◻️ /me sends in private chat a message with his own infos, group infos, warns received,\n"
-        "rules of the group, banned words list...\n\n"
-        "🕵️ /send permits to send a post using HTML in the group, through the Bot\n"
-        "➡️ Example: /send Hello World!\n\n"
-        "👮 /intervention lets you request the intervention of a member of Official Bot Support"
-    )
-
-
-def experts_text() -> str:
-    return (
-        "Experts Commands\n\n"
-        "👥 Available to all users\n"
-        "👮 Available to Admins&Moderators\n"
-        "🕵️ Available to Admins\n\n"
-        "👥 /geturl, by replying to a message, you receive the link that refers directly to that message.\n\n"
-        "🕵️ /inactives [days] sends in private chat the list of users who have not sent a message in the last [days].\n\n"
-        "Pinned Messages\n"
-        "🕵️ /pin [message] sends the message through the Bot and pins it.\n"
-        "🕵️ /pin pins the message in reply.\n"
-        "🕵️ /editpin [message] edits the current pinned message.\n"
-        "🕵️ /delpin removes the pinned message.\n"
-        "🕵️ /repin removes and pins again the current pinned message.\n"
-        "👥 /pinned refers to the current pinned message.\n\n"
-        "🕵️ /list sends in private chat the list of users of the group with the number of messages sent by them.\n"
-        "🕵️ /list roles sends in private chat the list of all the special roles assigned to users\n"
-        "🕵️ /graphic sends a graph showing the trend of the group members.\n"
-        "🕵️ /trend sends the group's growth statistics."
-    )
-
-
-def pro_guides_text() -> str:
-    return (
-        "Pro Guides\n"
-        "In this menu you will find some guides for very\n"
-        "advanced Group Help functions.\n"
-        "I recommend you to use them only if you\n"
-        "know what you are doing and following them\n"
-        "completely and correctly."
-    )
-
-
 # =========================================================
-# UI builders
+# Keyboards
 # =========================================================
 def main_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("➕ Add me to a Group ➕", url=get_add_group_url())],
-        [InlineKeyboardButton("⚙️ Manage group Settings ✍️", callback_data=cb(uid, "manage_groups"))],
-        [InlineKeyboardButton("👥 Group", callback_data=cb(uid, "manage_groups")),
-         InlineKeyboardButton("Channel 📢", callback_data=cb(uid, "channel"))],
-        [InlineKeyboardButton("🚑 Support", callback_data=cb(uid, "support")),
-         InlineKeyboardButton("Information 💬", callback_data=cb(uid, "information"))],
-        [InlineKeyboardButton("🇬🇧 Languages 🇬🇧", callback_data=cb(uid, "languages"))],
+        [InlineKeyboardButton("⚙️ Manage group Settings ✍️", callback_data=cb(uid, "mg"))],
+        [InlineKeyboardButton("👥 Group", callback_data=cb(uid, "mg")),
+         InlineKeyboardButton("Channel 📢", callback_data=cb(uid, "ch"))],
+        [InlineKeyboardButton("🚑 Support", callback_data=cb(uid, "su")),
+         InlineKeyboardButton("Information 💬", callback_data=cb(uid, "in"))],
+        [InlineKeyboardButton("🇬🇧 Languages 🇬🇧", callback_data=cb(uid, "ul"))],
     ])
 
 
 def manage_groups_kb(uid: int) -> InlineKeyboardMarkup:
     rows = []
-    groups = list_groups(40)
-    for chat_id, title in groups:
+    for chat_id, title in list_groups(40):
         label = (title[:40] + "…") if len(title) > 40 else (title or str(chat_id))
-        rows.append([InlineKeyboardButton(label, callback_data=cb(uid, "settings_home", chat_id))])
+        rows.append([InlineKeyboardButton(label, callback_data=cb(uid, "sh", chat_id))])
     if not rows:
         rows.append([InlineKeyboardButton("➕ Add me to a Group ➕", url=get_add_group_url())])
     return InlineKeyboardMarkup(rows)
@@ -770,52 +678,32 @@ def manage_groups_kb(uid: int) -> InlineKeyboardMarkup:
 
 def settings_home_kb(uid: int, chat_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📜 Regulation", callback_data=cb(uid, "regulation", chat_id)),
-         InlineKeyboardButton("✉️ Anti-Spam", callback_data=cb(uid, "anti_spam", chat_id))],
-        [InlineKeyboardButton("💬 Welcome", callback_data=cb(uid, "welcome", chat_id)),
-         InlineKeyboardButton("🗣️ Anti-Flood", callback_data=cb(uid, "anti_flood", chat_id))],
-        [InlineKeyboardButton("👋 Goodbye", callback_data=cb(uid, "goodbye", chat_id)),
-         InlineKeyboardButton("🕉️ Alphabets", callback_data=cb(uid, "alphabets", chat_id))],
-        [InlineKeyboardButton("🧠 Captcha", callback_data=cb(uid, "captcha", chat_id)),
-         InlineKeyboardButton("🔦 Checks", callback_data=cb(uid, "checks", chat_id))],
-        [InlineKeyboardButton("🆘 @Admin", callback_data=cb(uid, "admin_cmd", chat_id)),
-         InlineKeyboardButton("🔐 Blocks", callback_data=cb(uid, "blocks", chat_id))],
-        [InlineKeyboardButton("📸 Media", callback_data=cb(uid, "media", chat_id)),
-         InlineKeyboardButton("🔞 Porn", callback_data=cb(uid, "porn", chat_id))],
-        [InlineKeyboardButton("❗ Warns", callback_data=cb(uid, "warns_panel", chat_id)),
-         InlineKeyboardButton("🌘 Night", callback_data=cb(uid, "night", chat_id))],
-        [InlineKeyboardButton("🔔 Tag", callback_data=cb(uid, "tag", chat_id)),
-         InlineKeyboardButton("🔗 Link", callback_data=cb(uid, "group_link", chat_id))],
-        [InlineKeyboardButton("📬 Approval mode", callback_data=cb(uid, "approval", chat_id))],
-        [InlineKeyboardButton("🗑️ Deleting Messages", callback_data=cb(uid, "deleting", chat_id))],
-        [InlineKeyboardButton("🇬🇧 Lang", callback_data=cb(uid, "group_lang", chat_id)),
-         InlineKeyboardButton("✅ Close", callback_data=cb(uid, "close")),
-         InlineKeyboardButton("▶️ Other", callback_data=cb(uid, "other", chat_id))],
+        [InlineKeyboardButton("📜 Regulation", callback_data=cb(uid, "rg", chat_id)),
+         InlineKeyboardButton("✉️ Anti-Spam", callback_data=cb(uid, "as", chat_id))],
+        [InlineKeyboardButton("💬 Welcome", callback_data=cb(uid, "we", chat_id)),
+         InlineKeyboardButton("🗣️ Anti-Flood", callback_data=cb(uid, "af", chat_id))],
+        [InlineKeyboardButton("👋 Goodbye", callback_data=cb(uid, "gb", chat_id)),
+         InlineKeyboardButton("🕉️ Alphabets", callback_data=cb(uid, "al", chat_id))],
+        [InlineKeyboardButton("🧠 Captcha", callback_data=cb(uid, "cp", chat_id)),
+         InlineKeyboardButton("🔦 Checks", callback_data=cb(uid, "ck", chat_id))],
+        [InlineKeyboardButton("🆘 @Admin", callback_data=cb(uid, "ad", chat_id)),
+         InlineKeyboardButton("🔐 Blocks", callback_data=cb(uid, "bl", chat_id))],
+        [InlineKeyboardButton("📸 Media", callback_data=cb(uid, "md", chat_id)),
+         InlineKeyboardButton("🔞 Porn", callback_data=cb(uid, "pn", chat_id))],
+        [InlineKeyboardButton("❗ Warns", callback_data=cb(uid, "wp", chat_id)),
+         InlineKeyboardButton("🌘 Night", callback_data=cb(uid, "ng", chat_id))],
+        [InlineKeyboardButton("🔔 Tag", callback_data=cb(uid, "tg", chat_id)),
+         InlineKeyboardButton("🔗 Link", callback_data=cb(uid, "gl", chat_id))],
+        [InlineKeyboardButton("📬 Approval mode", callback_data=cb(uid, "ap", chat_id))],
+        [InlineKeyboardButton("🗑️ Deleting Messages", callback_data=cb(uid, "dl", chat_id))],
+        [InlineKeyboardButton("🇬🇧 Lang", callback_data=cb(uid, "lg", chat_id)),
+         InlineKeyboardButton("✅ Close", callback_data=cb(uid, "cl")),
+         InlineKeyboardButton("▶️ Other", callback_data=cb(uid, "ot", chat_id))],
     ])
 
 
-# =========================================================
-# Renderers
-# =========================================================
-async def edit_panel(cq: CallbackQuery, text: str, kb: Optional[InlineKeyboardMarkup]):
-    await cq.message.edit_text(text, reply_markup=kb)
-
-
-async def render_main(cq: CallbackQuery, uid: int):
-    await edit_panel(cq, main_text(), main_kb(uid))
-
-
-async def render_manage_groups(cq: CallbackQuery, uid: int):
-    await edit_panel(cq, manage_groups_text(), manage_groups_kb(uid))
-
-
-async def render_settings_home(cq: CallbackQuery, uid: int, chat_id: int):
-    await edit_panel(cq, settings_home_text(chat_id), settings_home_kb(uid, chat_id))
-
-
-def back_kb(uid: int, back_page: str, chat_id: int = 0) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, back_page, chat_id))]])
-
+def back_kb(uid: int, page: str, chat_id: int = 0) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, page, chat_id))]])
 
 # =========================================================
 # Commands
@@ -829,9 +717,7 @@ async def start_cmd(client, message: Message):
         try:
             chat_id = int(parts[1].split("_", 1)[1])
             if await is_group_admin(client, chat_id, message.from_user.id):
-                text = settings_home_text(chat_id)
-                kb = settings_home_kb(message.from_user.id, chat_id)
-                return await message.reply_text(text, reply_markup=kb)
+                return await message.reply_text(settings_home_text(chat_id), reply_markup=settings_home_kb(message.from_user.id, chat_id))
         except Exception:
             pass
 
@@ -839,25 +725,25 @@ async def start_cmd(client, message: Message):
 
 
 @bot.on_message(filters.command("help") & filters.private)
-async def help_cmd_private(client, message: Message):
+async def help_private(client, message: Message):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "help_basic")),
-         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "help_advanced"))],
-        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "help_experts")),
-         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "help_pro"))],
+        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "hb")),
+         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "ha"))],
+        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "he")),
+         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "hp"))],
     ])
-    await message.reply_text(help_menu_text(), reply_markup=kb)
+    await message.reply_text("Welcome to the help menu!", reply_markup=kb)
 
 
 @bot.on_message(filters.command("help") & filters.group)
-async def help_cmd_group(client, message: Message):
+async def help_group(client, message: Message):
     kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "help_basic")),
-         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "help_advanced"))],
-        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "help_experts")),
-         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "help_pro"))],
+        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "hb")),
+         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "ha"))],
+        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "he")),
+         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "hp"))],
     ])
-    await message.reply_text(help_menu_text(), reply_markup=kb)
+    await message.reply_text("Welcome to the help menu!", reply_markup=kb)
 
 
 @bot.on_message(filters.command("reload") & filters.group)
@@ -865,16 +751,16 @@ async def reload_cmd(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
         return await message.reply_text("Admin only.")
     register_group(message.chat.id, message.chat.title or "")
-    await message.reply_text("✅ Reloaded admins/groups cache for this group.")
+    await message.reply_text("✅ Reloaded.")
 
 
 @bot.on_message(filters.command("settings") & filters.group)
-async def settings_cmd_group(client, message: Message):
+async def settings_group(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
         return await message.reply_text("Admin only.")
     register_group(message.chat.id, message.chat.title or "")
-    link = f"https://t.me/{bot_username()}?start=settings_{message.chat.id}" if bot_username() else ""
-    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open in pvt", url=link)]]) if link else None
+    url = f"https://t.me/{bot_username()}?start=settings_{message.chat.id}" if bot_username() else ""
+    kb = InlineKeyboardMarkup([[InlineKeyboardButton("Open in pvt", url=url)]]) if url else None
     await message.reply_text("Open settings in private chat.", reply_markup=kb)
 
 
@@ -944,20 +830,18 @@ async def unapprove_cmd(client, message: Message):
     unapprove_user(message.chat.id, message.reply_to_message.from_user.id)
     await message.reply_text("✅ Unapproved.")
 
-
 # =========================================================
-# Group registry / welcome / moderation
+# Group events / moderation
 # =========================================================
 @bot.on_message(filters.group)
-async def group_registry_touch(client, message: Message):
+async def touch_group(client, message: Message):
     register_group(message.chat.id, message.chat.title or "")
     if message.from_user:
         upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
 
 
 @bot.on_message(filters.new_chat_members)
-async def new_members_handler(client, message: Message):
-    register_group(message.chat.id, message.chat.title or "")
+async def joined_handler(client, message: Message):
     s = get_settings(message.chat.id)
 
     for user in message.new_chat_members:
@@ -974,20 +858,6 @@ async def new_members_handler(client, message: Message):
                 await message.reply_text(f"🧠 {user.mention}, verify that you are not a robot.")
             except Exception:
                 pass
-
-        if s["check_at_join"]:
-            name = f"{user.first_name or ''} {user.last_name or ''}".strip()
-            low_name = name.lower()
-
-            blocked_name = False
-            if re.search(r"[\u0600-\u06FF]", name) and "arabic name" in low_name:
-                blocked_name = True
-
-            if blocked_name and s["checks_delete_messages"]:
-                try:
-                    await client.ban_chat_member(message.chat.id, user.id)
-                except Exception:
-                    pass
 
 
 @bot.on_message(filters.left_chat_member)
@@ -1028,9 +898,7 @@ async def moderation_handler(client, message: Message):
                 pass
             btn = None
             if s["force_sub_channel"].startswith("@"):
-                btn = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Join Channel", url=f"https://t.me/{s['force_sub_channel'].lstrip('@')}")]
-                ])
+                btn = InlineKeyboardMarkup([[InlineKeyboardButton("Join Channel", url=f"https://t.me/{s['force_sub_channel'].lstrip('@')}")]])
             try:
                 await message.reply_text("You must join the required channel first.", reply_markup=btn)
             except Exception:
@@ -1064,9 +932,6 @@ async def moderation_handler(client, message: Message):
         except Exception:
             pass
         return
-
-    if s["link_enabled"] and s["group_link"] and text.strip() == s["group_link"].strip():
-        pass
 
     if s["media_enabled"] and message.media is not None:
         try:
@@ -1159,7 +1024,7 @@ async def moderation_handler(client, message: Message):
 
 
 @bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "warn", "unwarn", "warns", "approve", "unapprove", "reload"]) & filters.group, group=15)
-async def delete_command_messages(client, message: Message):
+async def delete_commands_if_needed(client, message: Message):
     s = get_settings(message.chat.id)
     if s["deleting_commands"]:
         try:
@@ -1170,7 +1035,7 @@ async def delete_command_messages(client, message: Message):
 
 
 @bot.on_edited_message(filters.group, group=16)
-async def edited_message_checks(client, message: Message):
+async def edit_checks(client, message: Message):
     s = get_settings(message.chat.id)
     if not s["deleting_edit_checks"]:
         return
@@ -1185,9 +1050,8 @@ async def edited_message_checks(client, message: Message):
         except Exception:
             pass
 
-
 # =========================================================
-# Custom command handler
+# Custom commands
 # =========================================================
 BUILTINS = {
     "start", "help", "settings", "reload", "rules", "link",
@@ -1206,7 +1070,7 @@ async def custom_commands_handler(client, message: Message):
         await message.reply_text(res)
 
 # =========================================================
-# Pending input session handler
+# Pending input handler
 # =========================================================
 @bot.on_message(filters.private & filters.text, group=30)
 async def pending_input_handler(client, message: Message):
@@ -1221,41 +1085,37 @@ async def pending_input_handler(client, message: Message):
     text = message.text.strip()
 
     try:
-        if action == "set_rules":
+        if action == "sr":
             update_setting(chat_id, "rules_text", text)
             return await message.reply_text("✅ Rules updated.")
-        if action == "set_welcome":
+        if action == "sw":
             update_setting(chat_id, "welcome_text", text)
             return await message.reply_text("✅ Welcome message updated.")
-        if action == "set_goodbye":
+        if action == "sg":
             update_setting(chat_id, "goodbye_text", text)
             return await message.reply_text("✅ Goodbye message updated.")
-        if action == "set_group_link":
+        if action == "sl":
             update_setting(chat_id, "group_link", text)
             update_setting(chat_id, "link_enabled", 1)
             return await message.reply_text("✅ Group link saved.")
-        if action == "add_banned_word":
+        if action == "ab":
             s = get_settings(chat_id)
             words = [w.strip().lower() for w in s["banned_words"].split(",") if w.strip()]
             if text.lower() not in words:
                 words.append(text.lower())
             update_setting(chat_id, "banned_words", ",".join(words))
             return await message.reply_text("✅ Banned word added.")
-        if action == "remove_banned_word":
+        if action == "rb":
             s = get_settings(chat_id)
             words = [w.strip().lower() for w in s["banned_words"].split(",") if w.strip()]
             words = [w for w in words if w != text.lower()]
             update_setting(chat_id, "banned_words", ",".join(words))
             return await message.reply_text("✅ Banned word removed.")
-        if action == "set_log_channel":
+        if action == "lc":
             update_setting(chat_id, "log_channel_id", int(text))
             return await message.reply_text("✅ Log channel updated.")
-        if action == "set_forcesub":
-            update_setting(chat_id, "force_sub_channel", text)
-            return await message.reply_text("✅ ForceSub updated.")
     except Exception as e:
         return await message.reply_text(f"❌ Failed: {e}")
-
 
 # =========================================================
 # Callback handler
@@ -1264,7 +1124,7 @@ async def pending_input_handler(client, message: Message):
 async def callback_handler(client, cq: CallbackQuery):
     p = parse_cb(cq.data)
     if not p:
-        return await cq.answer("Invalid panel.", show_alert=True)
+        return await cq.answer("Invalid button data.", show_alert=True)
 
     uid = cq.from_user.id
     if p["uid"] != uid:
@@ -1275,74 +1135,127 @@ async def callback_handler(client, cq: CallbackQuery):
     extra = p["extra"]
 
     try:
-        if page == "close":
+        if page == "cl":
             await cq.message.edit_text("Closed.")
             return await cq.answer("Closed")
 
-        if page == "manage_groups":
-            return await render_manage_groups(cq, uid)
+        if page == "mg":
+            return await cq.message.edit_text(manage_groups_text(), reply_markup=manage_groups_kb(uid))
 
-        if page == "settings_home":
+        if page == "sh":
             if not await is_group_admin(client, chat_id, uid):
                 return await cq.answer("You are not admin in this group.", show_alert=True)
-            return await render_settings_home(cq, uid, chat_id)
+            return await cq.message.edit_text(settings_home_text(chat_id), reply_markup=settings_home_kb(uid, chat_id))
 
-        if page == "channel":
-            return await edit_panel(
-                cq,
-                "Channel 📢\n\nThis section is informational in this build.",
-                back_kb(uid, "home")
-            )
-
-        if page == "support":
-            return await edit_panel(
-                cq,
-                "🚑 Support\n\nUse your own support group / owner contact.",
-                back_kb(uid, "home")
-            )
-
-        if page == "information":
-            return await edit_panel(
-                cq,
-                "Information 💬\n\nScreenshot-matched GroupHelp-style control panel build.",
-                back_kb(uid, "home")
-            )
-
-        if page == "languages":
+        if page == "ch":
+            return await cq.message.edit_text("Channel 📢\n\nThis section is informational in this build.", reply_markup=back_kb(uid, "hmn"))
+        if page == "su":
+            return await cq.message.edit_text("🚑 Support\n\nUse your own support group / owner contact.", reply_markup=back_kb(uid, "hmn"))
+        if page == "in":
+            return await cq.message.edit_text("Information 💬\n\nGroup Guard 2.0 screenshot-matched control panel build.", reply_markup=back_kb(uid, "hmn"))
+        if page == "ul":
             lang = get_user_lang(uid)
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{'✅ ' if lang=='en' else ''}English", callback_data=cb(uid, "set_user_lang", 0, "en")),
-                 InlineKeyboardButton(f"{'✅ ' if lang=='bn' else ''}বাংলা", callback_data=cb(uid, "set_user_lang", 0, "bn"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "home"))]
+                [InlineKeyboardButton(f"{'✅ ' if lang=='en' else ''}English", callback_data=cb(uid, "suL", 0, "en")),
+                 InlineKeyboardButton(f"{'✅ ' if lang=='bn' else ''}বাংলা", callback_data=cb(uid, "suL", 0, "bn"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))]
             ])
-            return await edit_panel(cq, "🇬🇧 Languages 🇬🇧", kb)
-
-        if page == "set_user_lang":
+            return await cq.message.edit_text("🇬🇧 Languages 🇬🇧", reply_markup=kb)
+        if page == "suL":
             set_user_lang(uid, extra if extra in {"en", "bn"} else "en")
-            lang = get_user_lang(uid)
+            return await cq.answer("Updated")
+        if page == "hmn":
+            return await cq.message.edit_text(main_text(), reply_markup=main_kb(uid))
+
+        if page == "hb":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = (
+                "Base Commands\n\n"
+                "👮 Available to Admins&Moderators\n"
+                "🕵️ Available to Admins\n\n"
+                "👮 /reload updates the Admins list and their privileges\n\n"
+                "🕵️ /settings lets you manage all the Bot settings in a group\n\n"
+                "👮 /ban lets you ban a user from the group\n"
+                "without giving him the possibility to join again using the link of the group\n\n"
+                "👮 /mute puts a user in read-only mode.\n\n"
+                "👮 /kick bans a user from the group.\n\n"
+                "👮 /unban lets you remove a user from blacklist.\n\n"
+                "👮 /info gives information about a user\n"
+                "👮 /infopvt sends infos in private chat\n\n"
+                "◻️ /staff gives the complete List of group Staff"
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "ha":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = (
+                "Advanced Commands\n\n"
+                "🕵️ Available to Admins\n"
+                "👮 Available to Admins&Moderators\n"
+                "🧹 Available to Admins&Cleaners\n\n"
+                "WARN MANAGEMENT\n"
+                "👮 /warn adds a warn to the user\n"
+                "👮 /unwarn removes a warn to the user\n"
+                "👮 /warns lets you see and manage user Warns\n"
+                "🕵️ /delwarn deletes the message and add a warn to the user\n\n"
+                "🧹 /del deletes the selected message\n"
+                "🧹 /logdel deletes the selected message and sends it to the Log Channel"
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "he":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = (
+                "Experts Commands\n\n"
+                "👥 Available to all users\n"
+                "👮 Available to Admins&Moderators\n"
+                "🕵️ Available to Admins\n\n"
+                "👥 /geturl gives direct message link\n\n"
+                "🕵️ /inactives [days]\n\n"
+                "Pinned Messages:\n"
+                "/pin /editpin /delpin /repin /pinned\n\n"
+                "/list /list roles /graphic /trend"
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "hp":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{'✅ ' if lang=='en' else ''}English", callback_data=cb(uid, "set_user_lang", 0, "en")),
-                 InlineKeyboardButton(f"{'✅ ' if lang=='bn' else ''}বাংলা", callback_data=cb(uid, "set_user_lang", 0, "bn"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "home"))]
+                [InlineKeyboardButton("Set up Staff group", callback_data=cb(uid, "ps", 0, "staff"))],
+                [InlineKeyboardButton("👾 How to create a Clone", callback_data=cb(uid, "ps", 0, "clone"))],
+                [InlineKeyboardButton("Users Roles", callback_data=cb(uid, "ps", 0, "roles"))],
+                [InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]
             ])
-            return await edit_panel(cq, "🇬🇧 Languages 🇬🇧", kb)
+            txt = (
+                "Pro Guides\n"
+                "In this menu you will find some guides for very\n"
+                "advanced Group Guard 2.0 functions."
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "home":
-            return await render_main(cq, uid)
+        if page == "ps":
+            return await cq.message.edit_text(f"{extra.title()}\n\nGuide placeholder.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hp"))]]))
 
-        # Admin check for group settings
+        if page == "hmu":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(uid, "hb")),
+                 InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(uid, "ha"))],
+                [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(uid, "he")),
+                 InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(uid, "hp"))],
+            ])
+            return await cq.message.edit_text("Welcome to the help menu!", reply_markup=kb)
+
         if chat_id and not await is_group_admin(client, chat_id, uid):
             return await cq.answer("You are not admin in this group.", show_alert=True)
 
         s = get_settings(chat_id)
 
-        if page == "regulation":
+        if page == "rg":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "regulation_act", chat_id, "customize"))],
-                [InlineKeyboardButton("📍 Commands Permissions", callback_data=cb(uid, "regulation_act", chat_id, "permission"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "rga", chat_id, "c"))],
+                [InlineKeyboardButton("📍 Commands Permissions", callback_data=cb(uid, "rga", chat_id, "p"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "📜 Group's regulations\n"
                 "From this menu you can manage the group's\n"
                 "regulations, that will be shown with the\n"
@@ -1350,35 +1263,35 @@ async def callback_handler(client, cq: CallbackQuery):
                 "To edit who can use the /rules command, go to\n"
                 "the \"Commands permissions\" section."
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "regulation_act":
-            if extra == "customize":
-                pending_inputs[uid] = {"action": "set_rules", "chat_id": chat_id}
-                return await cq.answer("Send the new rules text in private chat.", show_alert=True)
-            if extra == "permission":
+        if page == "rga":
+            if extra == "c":
+                pending_inputs[uid] = {"action": "sr", "chat_id": chat_id}
+                return await cq.answer("Send new rules text in private chat.", show_alert=True)
+            if extra == "p":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='all' else ''}All users", callback_data=cb(uid, "reg_perm", chat_id, "all"))],
-                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='admins' else ''}Admins only", callback_data=cb(uid, "reg_perm", chat_id, "admins"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "regulation", chat_id))]
+                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='all' else ''}All users", callback_data=cb(uid, "rgp", chat_id, "all"))],
+                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='admins' else ''}Admins only", callback_data=cb(uid, "rgp", chat_id, "admins"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "rg", chat_id))]
                 ])
-                return await edit_panel(cq, "Commands Permissions", kb)
+                return await cq.message.edit_text("Commands Permissions", reply_markup=kb)
 
-        if page == "reg_perm":
+        if page == "rgp":
             update_setting(chat_id, "rules_cmd_permission", extra)
             return await cq.answer("Updated")
 
-        if page == "welcome":
+        if page == "we":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "welcome_act", chat_id, "off")),
-                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "welcome_act", chat_id, "on"))],
-                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "welcome_act", chat_id, "customize"))],
-                [InlineKeyboardButton("🔔 Always send", callback_data=cb(uid, "welcome_act", chat_id, "always")),
-                 InlineKeyboardButton("Send 1st join", callback_data=cb(uid, "welcome_act", chat_id, "first"))],
-                [InlineKeyboardButton(f"Delete last message {'✅' if s['welcome_delete_last'] else '✖️'}", callback_data=cb(uid, "welcome_act", chat_id, "toggle_delete_last"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "wea", chat_id, "off")),
+                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "wea", chat_id, "on"))],
+                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "wea", chat_id, "c"))],
+                [InlineKeyboardButton("🔔 Always send", callback_data=cb(uid, "wea", chat_id, "a")),
+                 InlineKeyboardButton("Send 1st join", callback_data=cb(uid, "wea", chat_id, "f"))],
+                [InlineKeyboardButton(f"Delete last message {'✅' if s['welcome_delete_last'] else '✖️'}", callback_data=cb(uid, "wea", chat_id, "d"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "💬 Welcome Message\n"
                 "From this menu you can set a welcome\n"
                 "message that will be sent when someone joins\n"
@@ -1386,235 +1299,201 @@ async def callback_handler(client, cq: CallbackQuery):
                 f"Status: {'On ✅' if s['welcome_enabled'] else 'Off ❌'}\n"
                 f"Mode: {'Send the welcome message at every join of the users in the group' if s['welcome_mode']=='always' else 'Send only at first join'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "welcome_act":
+        if page == "wea":
             if extra == "off":
                 update_setting(chat_id, "welcome_enabled", 0)
             elif extra == "on":
                 update_setting(chat_id, "welcome_enabled", 1)
-            elif extra == "customize":
-                pending_inputs[uid] = {"action": "set_welcome", "chat_id": chat_id}
+            elif extra == "c":
+                pending_inputs[uid] = {"action": "sw", "chat_id": chat_id}
                 return await cq.answer("Send welcome text in private chat.", show_alert=True)
-            elif extra == "always":
+            elif extra == "a":
                 update_setting(chat_id, "welcome_mode", "always")
-            elif extra == "first":
+            elif extra == "f":
                 update_setting(chat_id, "welcome_mode", "first")
-            elif extra == "toggle_delete_last":
+            elif extra == "d":
                 update_setting(chat_id, "welcome_delete_last", 0 if s["welcome_delete_last"] else 1)
-            s = get_settings(chat_id)
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "welcome_act", chat_id, "off")),
-                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "welcome_act", chat_id, "on"))],
-                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "welcome_act", chat_id, "customize"))],
-                [InlineKeyboardButton(f"{'✅ ' if s['welcome_mode']=='always' else ''}🔔 Always send", callback_data=cb(uid, "welcome_act", chat_id, "always")),
-                 InlineKeyboardButton(f"{'✅ ' if s['welcome_mode']=='first' else ''}Send 1st join", callback_data=cb(uid, "welcome_act", chat_id, "first"))],
-                [InlineKeyboardButton(f"Delete last message {'✅' if s['welcome_delete_last'] else '✖️'}", callback_data=cb(uid, "welcome_act", chat_id, "toggle_delete_last"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
-            ])
-            text = (
-                "💬 Welcome Message\n"
-                "From this menu you can set a welcome\n"
-                "message that will be sent when someone joins\n"
-                "the group.\n\n"
-                f"Status: {'On ✅' if s['welcome_enabled'] else 'Off ❌'}\n"
-                f"Mode: {'Send the welcome message at every join of the users in the group' if s['welcome_mode']=='always' else 'Send only at first join'}"
-            )
-            return await edit_panel(cq, text, kb)
+            return await cq.answer("Updated")
 
-        if page == "goodbye":
+        if page == "gb":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "goodbye_act", chat_id, "off")),
-                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "goodbye_act", chat_id, "on"))],
-                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "goodbye_act", chat_id, "customize"))],
-                [InlineKeyboardButton(f"💌 Send in private chat {'✅' if s['goodbye_private'] else '✖️'}", callback_data=cb(uid, "goodbye_act", chat_id, "toggle_private"))],
-                [InlineKeyboardButton(f"♻️ Delete last message {'✅' if s['goodbye_delete_last'] else '✖️'}", callback_data=cb(uid, "goodbye_act", chat_id, "toggle_delete_last"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "gba", chat_id, "off")),
+                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "gba", chat_id, "on"))],
+                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "gba", chat_id, "c"))],
+                [InlineKeyboardButton(f"💌 Send in private chat {'✅' if s['goodbye_private'] else '✖️'}", callback_data=cb(uid, "gba", chat_id, "p"))],
+                [InlineKeyboardButton(f"♻️ Delete last message {'✅' if s['goodbye_delete_last'] else '✖️'}", callback_data=cb(uid, "gba", chat_id, "d"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "👋 Goodbye\n"
                 "From this menu you can set a goodbye\n"
                 "message that will be sent when someone\n"
                 "leaves the group.\n\n"
                 f"Status: {'On ✅' if s['goodbye_enabled'] else 'Off ❌'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "goodbye_act":
+        if page == "gba":
             if extra == "off":
                 update_setting(chat_id, "goodbye_enabled", 0)
             elif extra == "on":
                 update_setting(chat_id, "goodbye_enabled", 1)
-            elif extra == "customize":
-                pending_inputs[uid] = {"action": "set_goodbye", "chat_id": chat_id}
+            elif extra == "c":
+                pending_inputs[uid] = {"action": "sg", "chat_id": chat_id}
                 return await cq.answer("Send goodbye text in private chat.", show_alert=True)
-            elif extra == "toggle_private":
+            elif extra == "p":
                 update_setting(chat_id, "goodbye_private", 0 if s["goodbye_private"] else 1)
-            elif extra == "toggle_delete_last":
+            elif extra == "d":
                 update_setting(chat_id, "goodbye_delete_last", 0 if s["goodbye_delete_last"] else 1)
             return await cq.answer("Updated")
 
-        if page == "captcha":
+        if page == "cp":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Activate" if not s["captcha_enabled"] else "✖️ Deactivate", callback_data=cb(uid, "captcha_act", chat_id, "toggle"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✅ Activate" if not s["captcha_enabled"] else "✖️ Deactivate", callback_data=cb(uid, "cpa", chat_id, "t"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🧠 Captcha\n"
                 "By activating the captcha, when a user\n"
                 "enters the group he will not be able to send\n"
                 "messages until he has confirmed that he is not\n"
                 "a robot.\n\n"
-                "⏰ You can also decide to set a punishment\n"
-                "down below for those who will not resolve the\n"
-                "captcha within the desired time.\n\n"
                 f"Status: {'On ✅' if s['captcha_enabled'] else 'Off ❌'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "captcha_act":
+        if page == "cpa":
             update_setting(chat_id, "captcha_enabled", 0 if s["captcha_enabled"] else 1)
             return await cq.answer("Updated")
 
-        if page == "admin_cmd":
+        if page == "ad":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✖️ Nobody", callback_data=cb(uid, "admin_act", chat_id, "nobody")),
-                 InlineKeyboardButton("👑 Founder", callback_data=cb(uid, "admin_act", chat_id, "founder"))],
-                [InlineKeyboardButton("👥 Staff Group", callback_data=cb(uid, "admin_act", chat_id, "staffgroup"))],
-                [InlineKeyboardButton(f"🔔 Tag Founder {'✅' if s['admin_tag_founder'] else '❌'}", callback_data=cb(uid, "admin_act", chat_id, "tag_founder"))],
-                [InlineKeyboardButton(f"🔔 Tag Admins {'✅' if s['admin_tag_admins'] else '❌'}", callback_data=cb(uid, "admin_act", chat_id, "tag_admins"))],
-                [InlineKeyboardButton("🛠️ Advanced settings", callback_data=cb(uid, "admin_act", chat_id, "advanced"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✖️ Nobody", callback_data=cb(uid, "ada", chat_id, "n")),
+                 InlineKeyboardButton("👑 Founder", callback_data=cb(uid, "ada", chat_id, "f"))],
+                [InlineKeyboardButton("👥 Staff Group", callback_data=cb(uid, "ada", chat_id, "s"))],
+                [InlineKeyboardButton(f"🔔 Tag Founder {'✅' if s['admin_tag_founder'] else '❌'}", callback_data=cb(uid, "ada", chat_id, "tf"))],
+                [InlineKeyboardButton(f"🔔 Tag Admins {'✅' if s['admin_tag_admins'] else '❌'}", callback_data=cb(uid, "ada", chat_id, "ta"))],
+                [InlineKeyboardButton("🛠️ Advanced settings", callback_data=cb(uid, "ada", chat_id, "adv"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🆘 @admin command\n"
                 "@admin (or /report) is a command available to\n"
-                "users to attract the attention of the group's\n"
-                "staff.\n\n"
+                "users to attract the attention of the group's staff.\n\n"
                 "Status: Active\n"
                 f"Send to: {'Nobody' if s['admin_status']=='nobody' else '👑 Founder' if s['admin_status']=='founder' else '👥 Staff Group'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "admin_act":
-            if extra in {"nobody", "founder", "staffgroup"}:
-                update_setting(chat_id, "admin_status", extra)
-            elif extra == "tag_founder":
+        if page == "ada":
+            if extra == "n":
+                update_setting(chat_id, "admin_status", "nobody")
+            elif extra == "f":
+                update_setting(chat_id, "admin_status", "founder")
+            elif extra == "s":
+                update_setting(chat_id, "admin_status", "staffgroup")
+            elif extra == "tf":
                 update_setting(chat_id, "admin_tag_founder", 0 if s["admin_tag_founder"] else 1)
-            elif extra == "tag_admins":
+            elif extra == "ta":
                 update_setting(chat_id, "admin_tag_admins", 0 if s["admin_tag_admins"] else 1)
-            elif extra == "advanced":
-                return await edit_panel(cq, "Advanced settings\n\nThis section is not expanded in this build.", back_kb(uid, "admin_cmd", chat_id))
+            elif extra == "adv":
+                return await cq.message.edit_text("Advanced settings\n\nThis section is informational in this build.", reply_markup=back_kb(uid, "ad", chat_id))
             return await cq.answer("Updated")
 
-        if page == "media":
-            text = (
+        if page == "md":
+            txt = (
                 "📸 Media\n\n"
-                "This simplified build supports media block as a whole.\n"
+                "This build manages media globally.\n"
                 f"Status: {'On ✅' if s['media_enabled'] else 'Off ❌'}\n"
                 f"Action: {s['media_action'].title()}"
             )
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Allow", callback_data=cb(uid, "media_act", chat_id, "allow")),
-                 InlineKeyboardButton("❗ Warn", callback_data=cb(uid, "media_act", chat_id, "warn")),
-                 InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "media_act", chat_id, "mute"))],
-                [InlineKeyboardButton("🚫 Block", callback_data=cb(uid, "media_act", chat_id, "block")),
-                 InlineKeyboardButton("🗑️ Delete", callback_data=cb(uid, "media_act", chat_id, "delete"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✅ Allow", callback_data=cb(uid, "mda", chat_id, "allow")),
+                 InlineKeyboardButton("❗ Warn", callback_data=cb(uid, "mda", chat_id, "warn")),
+                 InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "mda", chat_id, "mute"))],
+                [InlineKeyboardButton("🚫 Block", callback_data=cb(uid, "mda", chat_id, "block")),
+                 InlineKeyboardButton("🗑️ Delete", callback_data=cb(uid, "mda", chat_id, "delete"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "media_act":
+        if page == "mda":
             if extra == "allow":
                 update_setting(chat_id, "media_enabled", 0)
                 update_setting(chat_id, "media_action", "allow")
-            elif extra == "warn":
+            else:
                 update_setting(chat_id, "media_enabled", 1)
-                update_setting(chat_id, "media_action", "warn")
-            elif extra == "mute":
-                update_setting(chat_id, "media_enabled", 1)
-                update_setting(chat_id, "media_action", "mute")
-            elif extra == "block":
-                update_setting(chat_id, "media_enabled", 1)
-                update_setting(chat_id, "media_action", "block")
-            elif extra == "delete":
-                update_setting(chat_id, "media_enabled", 1)
-                update_setting(chat_id, "media_action", "delete")
+                update_setting(chat_id, "media_action", extra)
             return await cq.answer("Updated")
 
-        if page == "warns_panel":
+        if page == "wp":
             row_numbers = []
             for n in [2, 3, 4, 5, 6]:
                 label = f"{n}{' ✅' if s['warns_limit']==n else ''}"
-                row_numbers.append(InlineKeyboardButton(label, callback_data=cb(uid, "warns_act", chat_id, f"limit_{n}")))
+                row_numbers.append(InlineKeyboardButton(label, callback_data=cb(uid, "wpa", chat_id, f"l{n}")))
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🧾 Warned List", callback_data=cb(uid, "warns_act", chat_id, "list"))],
-                [InlineKeyboardButton("✖️ Off", callback_data=cb(uid, "warns_act", chat_id, "off")),
-                 InlineKeyboardButton("❗ Kick", callback_data=cb(uid, "warns_act", chat_id, "kick"))],
-                [InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "warns_act", chat_id, "mute")),
-                 InlineKeyboardButton("🚫 Ban", callback_data=cb(uid, "warns_act", chat_id, "ban"))],
-                [InlineKeyboardButton("🔇⏱️ Set mute duration", callback_data=cb(uid, "warns_act", chat_id, "mute_duration"))],
+                [InlineKeyboardButton("🧾 Warned List", callback_data=cb(uid, "wpa", chat_id, "ls"))],
+                [InlineKeyboardButton("✖️ Off", callback_data=cb(uid, "wpa", chat_id, "off")),
+                 InlineKeyboardButton("❗ Kick", callback_data=cb(uid, "wpa", chat_id, "kick"))],
+                [InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "wpa", chat_id, "mute")),
+                 InlineKeyboardButton("🚫 Ban", callback_data=cb(uid, "wpa", chat_id, "ban"))],
+                [InlineKeyboardButton("🔇⏱️ Set mute duration", callback_data=cb(uid, "wpa", chat_id, "dur"))],
                 row_numbers,
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "❗ User warnings\n"
                 "The warning system allows you to give\n"
-                "warnings to users for incorrect behavior in the\n"
-                "group, before actually punishing them.\n\n"
+                "warnings to users before actually punishing them.\n\n"
                 f"Punishment: {s['warns_action'].title()}\n"
                 f"Max Warns allowed: {s['warns_limit']}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "warns_act":
-            if extra == "list":
+        if page == "wpa":
+            if extra == "ls":
                 rows = list_warned(chat_id)
                 txt = "Warned List\n\n" + ("\n".join(f"`{uid2}` → {w}" for uid2, w in rows) if rows else "Empty.")
                 await cq.message.reply_text(txt)
-                return await cq.answer("Sent.")
+                return await cq.answer("Sent")
             if extra in {"off", "kick", "mute", "ban"}:
                 update_setting(chat_id, "warns_action", extra)
-            elif extra.startswith("limit_"):
-                update_setting(chat_id, "warns_limit", int(extra.split("_", 1)[1]))
-            elif extra == "mute_duration":
+            elif extra.startswith("l"):
+                update_setting(chat_id, "warns_limit", int(extra[1:]))
+            elif extra == "dur":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("10m", callback_data=cb(uid, "warns_mute_set", chat_id, "10")),
-                     InlineKeyboardButton("30m", callback_data=cb(uid, "warns_mute_set", chat_id, "30")),
-                     InlineKeyboardButton("60m", callback_data=cb(uid, "warns_mute_set", chat_id, "60"))],
-                    [InlineKeyboardButton("120m", callback_data=cb(uid, "warns_mute_set", chat_id, "120")),
-                     InlineKeyboardButton("240m", callback_data=cb(uid, "warns_mute_set", chat_id, "240"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "warns_panel", chat_id))]
+                    [InlineKeyboardButton("10m", callback_data=cb(uid, "wpm", chat_id, "10")),
+                     InlineKeyboardButton("30m", callback_data=cb(uid, "wpm", chat_id, "30")),
+                     InlineKeyboardButton("60m", callback_data=cb(uid, "wpm", chat_id, "60"))],
+                    [InlineKeyboardButton("120m", callback_data=cb(uid, "wpm", chat_id, "120")),
+                     InlineKeyboardButton("240m", callback_data=cb(uid, "wpm", chat_id, "240"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "wp", chat_id))]
                 ])
-                return await edit_panel(cq, "Set mute duration", kb)
+                return await cq.message.edit_text("Set mute duration", reply_markup=kb)
             return await cq.answer("Updated")
 
-        if page == "warns_mute_set":
+        if page == "wpm":
             update_setting(chat_id, "warns_mute_minutes", int(extra))
             return await cq.answer("Updated")
 
-        if page == "tag":
+        if page == "tg":
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🪪 Buy the PRO", url="https://t.me")],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
-                "🔔 Tag alert\n"
-                "When a user will be tagged, he will be notified\n"
-                "with a private alert.\n\n"
-                "⚠️ Available only for PRO groups"
-            )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text("🔔 Tag alert\n\nAvailable only for PRO groups.", reply_markup=kb)
 
-        if page == "anti_spam":
+        if page == "as":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Telegram links", callback_data=cb(uid, "anti_spam_toggle", chat_id, "tg"))],
-                [InlineKeyboardButton("Forwarding", callback_data=cb(uid, "anti_spam_toggle", chat_id, "forward")) ,
-                 InlineKeyboardButton("Quote", callback_data=cb(uid, "anti_spam_toggle", chat_id, "quote"))],
-                [InlineKeyboardButton("Total links block", callback_data=cb(uid, "anti_spam_toggle", chat_id, "total"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("Telegram links", callback_data=cb(uid, "asa", chat_id, "tg"))],
+                [InlineKeyboardButton("Forwarding", callback_data=cb(uid, "asa", chat_id, "fw")),
+                 InlineKeyboardButton("Quote", callback_data=cb(uid, "asa", chat_id, "qt"))],
+                [InlineKeyboardButton("Total links block", callback_data=cb(uid, "asa", chat_id, "tl"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "✉️ Anti-Spam\n"
                 "In this menu you can decide whether to\n"
                 "protect your groups from unnecessary links,\n"
@@ -1624,75 +1503,68 @@ async def callback_handler(client, cq: CallbackQuery):
                 f"Quote: {bool_icon(bool(s['antispam_quote']))}\n"
                 f"Total links block: {bool_icon(bool(s['antispam_total_links']))}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "anti_spam_toggle":
-            mapping = {
-                "tg": "antispam_tg_links",
-                "forward": "antispam_forwarding",
-                "quote": "antispam_quote",
-                "total": "antispam_total_links",
-            }
-            field = mapping[extra]
+        if page == "asa":
+            field = {"tg": "antispam_tg_links", "fw": "antispam_forwarding", "qt": "antispam_quote", "tl": "antispam_total_links"}[extra]
             update_setting(chat_id, field, 0 if s[field] else 1)
             return await cq.answer("Updated")
 
-        if page == "anti_flood":
+        if page == "af":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📄 Messages", callback_data=cb(uid, "antiflood_conf", chat_id, "messages")),
-                 InlineKeyboardButton("🕒 Time", callback_data=cb(uid, "antiflood_conf", chat_id, "time"))],
-                [InlineKeyboardButton("❌ Off", callback_data=cb(uid, "antiflood_action", chat_id, "off")),
-                 InlineKeyboardButton("❕ Warn", callback_data=cb(uid, "antiflood_action", chat_id, "warn"))],
-                [InlineKeyboardButton("❗ Kick", callback_data=cb(uid, "antiflood_action", chat_id, "kick")),
-                 InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "antiflood_action", chat_id, "mute")),
-                 InlineKeyboardButton("🚫 Ban", callback_data=cb(uid, "antiflood_action", chat_id, "ban"))],
-                [InlineKeyboardButton("🗑️ Delete Messages", callback_data=cb(uid, "antiflood_action", chat_id, "delete"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("📄 Messages", callback_data=cb(uid, "afc", chat_id, "m")),
+                 InlineKeyboardButton("🕒 Time", callback_data=cb(uid, "afc", chat_id, "t"))],
+                [InlineKeyboardButton("❌ Off", callback_data=cb(uid, "afa", chat_id, "off")),
+                 InlineKeyboardButton("❕ Warn", callback_data=cb(uid, "afa", chat_id, "warn"))],
+                [InlineKeyboardButton("❗ Kick", callback_data=cb(uid, "afa", chat_id, "kick")),
+                 InlineKeyboardButton("🔇 Mute", callback_data=cb(uid, "afa", chat_id, "mute")),
+                 InlineKeyboardButton("🚫 Ban", callback_data=cb(uid, "afa", chat_id, "ban"))],
+                [InlineKeyboardButton("🗑️ Delete Messages", callback_data=cb(uid, "afa", chat_id, "delete"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🗣️ Antiflood\n"
                 "From this menu you can set a punishment for\n"
-                "those who send many messages in a short\n"
-                "time.\n\n"
+                "those who send many messages in a short time.\n\n"
                 f"Currently the antiflood is triggered when {s['antiflood_messages']} messages are sent within {s['antiflood_seconds']} seconds.\n\n"
                 f"Punishment: {s['antiflood_action'].title()}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "antiflood_action":
+        if page == "afa":
             update_setting(chat_id, "antiflood_action", extra)
             return await cq.answer("Updated")
 
-        if page == "antiflood_conf":
-            if extra == "messages":
+        if page == "afc":
+            if extra == "m":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(str(n), callback_data=cb(uid, "antiflood_set_messages", chat_id, str(n))) for n in [3, 4, 5, 6, 7]],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "anti_flood", chat_id))]
+                    [InlineKeyboardButton(str(n), callback_data=cb(uid, "afm", chat_id, str(n))) for n in [3, 4, 5, 6, 7]],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "af", chat_id))]
                 ])
-                return await edit_panel(cq, "Choose messages threshold", kb)
-            if extra == "time":
+                return await cq.message.edit_text("Choose messages threshold", reply_markup=kb)
+            if extra == "t":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(str(n), callback_data=cb(uid, "antiflood_set_time", chat_id, str(n))) for n in [2, 3, 4, 5, 6]],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "anti_flood", chat_id))]
+                    [InlineKeyboardButton(str(n), callback_data=cb(uid, "aft", chat_id, str(n))) for n in [2, 3, 4, 5, 6]],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "af", chat_id))]
                 ])
-                return await edit_panel(cq, "Choose seconds threshold", kb)
+                return await cq.message.edit_text("Choose seconds threshold", reply_markup=kb)
 
-        if page == "antiflood_set_messages":
+        if page == "afm":
             update_setting(chat_id, "antiflood_messages", int(extra))
             return await cq.answer("Updated")
-        if page == "antiflood_set_time":
+        if page == "aft":
             update_setting(chat_id, "antiflood_seconds", int(extra))
             return await cq.answer("Updated")
 
-        if page == "alphabets":
+        if page == "al":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🟣 ARABIC", callback_data=cb(uid, "alpha_toggle", chat_id, "arabic")),
-                 InlineKeyboardButton("🇷🇺 CYRILLIC", callback_data=cb(uid, "alpha_toggle", chat_id, "cyrillic"))],
-                [InlineKeyboardButton("CHINESE", callback_data=cb(uid, "alpha_toggle", chat_id, "chinese")),
-                 InlineKeyboardButton("LATIN", callback_data=cb(uid, "alpha_toggle", chat_id, "latin"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("🟣 ARABIC", callback_data=cb(uid, "ala", chat_id, "a")),
+                 InlineKeyboardButton("🇷🇺 CYRILLIC", callback_data=cb(uid, "ala", chat_id, "c"))],
+                [InlineKeyboardButton("CHINESE", callback_data=cb(uid, "ala", chat_id, "h")),
+                 InlineKeyboardButton("LATIN", callback_data=cb(uid, "ala", chat_id, "l"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🕉️ Alphabets\n"
                 "Select punishment for any user who send\n"
                 "messages written in certain alphabets.\n\n"
@@ -1701,27 +1573,22 @@ async def callback_handler(client, cq: CallbackQuery):
                 f"Chinese — Status: {'On' if s['alphabet_chinese'] else 'Off'}\n"
                 f"Latin — Status: {'On' if s['alphabet_latin'] else 'Off'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "alpha_toggle":
-            field = {
-                "arabic": "alphabet_arabic",
-                "cyrillic": "alphabet_cyrillic",
-                "chinese": "alphabet_chinese",
-                "latin": "alphabet_latin",
-            }[extra]
+        if page == "ala":
+            field = {"a": "alphabet_arabic", "c": "alphabet_cyrillic", "h": "alphabet_chinese", "l": "alphabet_latin"}[extra]
             update_setting(chat_id, field, 0 if s[field] else 1)
             return await cq.answer("Updated")
 
-        if page == "checks":
+        if page == "ck":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("OBLIGATIONS", callback_data=cb(uid, "checks_info", chat_id, "obligations")),
-                 InlineKeyboardButton("NAME BLOCKS", callback_data=cb(uid, "checks_info", chat_id, "nameblocks"))],
-                [InlineKeyboardButton(f"📜 Check at the join {'✅' if s['check_at_join'] else '✖️'}", callback_data=cb(uid, "checks_toggle", chat_id, "join"))],
-                [InlineKeyboardButton(f"🗑️ Delete Messages {'✅' if s['checks_delete_messages'] else '✖️'}", callback_data=cb(uid, "checks_toggle", chat_id, "delete"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("OBLIGATIONS", callback_data=cb(uid, "cki", chat_id, "o")),
+                 InlineKeyboardButton("NAME BLOCKS", callback_data=cb(uid, "cki", chat_id, "n"))],
+                [InlineKeyboardButton(f"📜 Check at the join {'✅' if s['check_at_join'] else '✖️'}", callback_data=cb(uid, "cka", chat_id, "j"))],
+                [InlineKeyboardButton(f"🗑️ Delete Messages {'✅' if s['checks_delete_messages'] else '✖️'}", callback_data=cb(uid, "cka", chat_id, "d"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "OBLIGATION OF...\n"
                 "• Surname: Off\n"
                 "• Username: Off\n"
@@ -1738,232 +1605,204 @@ async def callback_handler(client, cq: CallbackQuery):
                 "🗑️ Delete Messages\n"
                 f"Status: {'Active ✅' if s['checks_delete_messages'] else 'Off ✖️'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "checks_info":
-            return await edit_panel(cq, f"{extra.title()}\n\nThis subpanel is informational in this build.", back_kb(uid, "checks", chat_id))
+        if page == "cki":
+            return await cq.message.edit_text(("OBLIGATIONS" if extra == "o" else "NAME BLOCKS") + "\n\nInformational subpanel.", reply_markup=back_kb(uid, "ck", chat_id))
 
-        if page == "checks_toggle":
-            if extra == "join":
+        if page == "cka":
+            if extra == "j":
                 update_setting(chat_id, "check_at_join", 0 if s["check_at_join"] else 1)
-            elif extra == "delete":
+            elif extra == "d":
                 update_setting(chat_id, "checks_delete_messages", 0 if s["checks_delete_messages"] else 1)
             return await cq.answer("Updated")
 
-        if page == "blocks":
+        if page == "bl":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("⛔ Blacklist", callback_data=cb(uid, "blocks_sub", chat_id, "blacklist"))],
-                [InlineKeyboardButton("🤖 Bot block", callback_data=cb(uid, "blocks_sub", chat_id, "botblock"))],
-                [InlineKeyboardButton("🧑 Join block", callback_data=cb(uid, "blocks_sub", chat_id, "joinblock"))],
-                [InlineKeyboardButton("🚪 Leave block", callback_data=cb(uid, "blocks_sub", chat_id, "leaveblock"))],
-                [InlineKeyboardButton("🏃 Join-Leave block", callback_data=cb(uid, "blocks_sub", chat_id, "joinleave"))],
-                [InlineKeyboardButton("Multiple joins bloc", callback_data=cb(uid, "blocks_sub", chat_id, "multiple"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("⛔ Blacklist", callback_data=cb(uid, "bls", chat_id, "b"))],
+                [InlineKeyboardButton("🤖 Bot block", callback_data=cb(uid, "bls", chat_id, "bot"))],
+                [InlineKeyboardButton("🧑 Join block", callback_data=cb(uid, "bls", chat_id, "j"))],
+                [InlineKeyboardButton("🚪 Leave block", callback_data=cb(uid, "bls", chat_id, "l"))],
+                [InlineKeyboardButton("🏃 Join-Leave block", callback_data=cb(uid, "bls", chat_id, "jl"))],
+                [InlineKeyboardButton("Multiple joins bloc", callback_data=cb(uid, "bls", chat_id, "m"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            return await edit_panel(cq, "🔐 Blocks", kb)
+            return await cq.message.edit_text("🔐 Blocks", reply_markup=kb)
 
-        if page == "blocks_sub":
-            if extra == "blacklist":
+        if page == "bls":
+            if extra == "b":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Add word", callback_data=cb(uid, "blacklist_action", chat_id, "add")),
-                     InlineKeyboardButton("➖ Remove word", callback_data=cb(uid, "blacklist_action", chat_id, "remove"))],
-                    [InlineKeyboardButton("📋 Show", callback_data=cb(uid, "blacklist_action", chat_id, "show"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "blocks", chat_id))]
+                    [InlineKeyboardButton("➕ Add word", callback_data=cb(uid, "bla", chat_id, "a")),
+                     InlineKeyboardButton("➖ Remove word", callback_data=cb(uid, "bla", chat_id, "r"))],
+                    [InlineKeyboardButton("📋 Show", callback_data=cb(uid, "bla", chat_id, "s"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "bl", chat_id))]
                 ])
-                return await edit_panel(cq, "Blacklist", kb)
-            return await edit_panel(cq, f"{extra.title()}\n\nNot implemented deeply in this build.", back_kb(uid, "blocks", chat_id))
+                return await cq.message.edit_text("Blacklist", reply_markup=kb)
+            return await cq.message.edit_text("This block subfeature is not deeply configurable in this build.", reply_markup=back_kb(uid, "bl", chat_id))
 
-        if page == "blacklist_action":
-            if extra == "add":
-                pending_inputs[uid] = {"action": "add_banned_word", "chat_id": chat_id}
-                return await cq.answer("Send the word in private chat.", show_alert=True)
-            if extra == "remove":
-                pending_inputs[uid] = {"action": "remove_banned_word", "chat_id": chat_id}
-                return await cq.answer("Send the word in private chat.", show_alert=True)
-            if extra == "show":
+        if page == "bla":
+            if extra == "a":
+                pending_inputs[uid] = {"action": "ab", "chat_id": chat_id}
+                return await cq.answer("Send word in private chat.", show_alert=True)
+            if extra == "r":
+                pending_inputs[uid] = {"action": "rb", "chat_id": chat_id}
+                return await cq.answer("Send word in private chat.", show_alert=True)
+            if extra == "s":
                 words = [w.strip() for w in s["banned_words"].split(",") if w.strip()]
                 await cq.message.reply_text("Blacklist\n\n" + (", ".join(words) if words else "Empty."))
                 return await cq.answer("Sent")
 
-        if page == "porn":
+        if page == "pn":
             kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🪪 Buy the PRO", url="https://t.me")],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            return await edit_panel(cq, "🔞 Porn\n\nAvailable only for PRO groups.", kb)
+            return await cq.message.edit_text("🔞 Porn\n\nAvailable only for PRO groups.", reply_markup=kb)
 
-        if page == "night":
+        if page == "ng":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("📸 Delete medias", callback_data=cb(uid, "night_act", chat_id, "media")),
-                 InlineKeyboardButton("🤫 Global Silence", callback_data=cb(uid, "night_act", chat_id, "silence"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("📸 Delete medias", callback_data=cb(uid, "nga", chat_id, "m")),
+                 InlineKeyboardButton("🤫 Global Silence", callback_data=cb(uid, "nga", chat_id, "s"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🌘 Night mode\n"
                 "Select the actions you want to limit every\n"
                 "night.\n\n"
                 f"Status: {'On ✅' if s['night_enabled'] else '✖️ Off'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "night_act":
+        if page == "nga":
             update_setting(chat_id, "night_enabled", 1)
-            if extra == "media":
+            if extra == "m":
                 update_setting(chat_id, "night_delete_medias", 0 if s["night_delete_medias"] else 1)
-            elif extra == "silence":
+            elif extra == "s":
                 update_setting(chat_id, "night_global_silence", 0 if s["night_global_silence"] else 1)
             return await cq.answer("Updated")
 
-        if page == "group_link":
+        if page == "gl":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✍🏻 Set", callback_data=cb(uid, "group_link_set", chat_id))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("✍🏻 Set", callback_data=cb(uid, "gla", chat_id, "s"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "🔗 Group link\n"
                 "Here you can set the link of the group, which\n"
                 "will be visible with the command /link.\n\n"
                 f"Status: {'Activated' if s['link_enabled'] and s['group_link'] else 'Deactivated'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "group_link_set":
-            pending_inputs[uid] = {"action": "set_group_link", "chat_id": chat_id}
-            return await cq.answer("Send the group link in private chat.", show_alert=True)
+        if page == "gla":
+            pending_inputs[uid] = {"action": "sl", "chat_id": chat_id}
+            return await cq.answer("Send group link in private chat.", show_alert=True)
 
-        if page == "approval":
+        if page == "ap":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔓 Auto-approval ⬇️", callback_data=cb(uid, "approval_toggle", chat_id))],
-                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "approval_set", chat_id, "off")),
-                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "approval_set", chat_id, "on"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("🔓 Auto-approval ⬇️", callback_data=cb(uid, "apa", chat_id, "t"))],
+                [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "apa", chat_id, "off")),
+                 InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "apa", chat_id, "on"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            text = (
+            txt = (
                 "📬 Approval mode\n"
                 "Through this menu you can decide to delegate\n"
-                "the management of group approvals to the\n"
-                "bot.\n\n"
-                "💡 Status:\n"
-                f"• Auto-approval: {'Activated' if s['approval_enabled'] else 'Deactivated'}"
+                "the management of group approvals to the bot.\n\n"
+                f"Status:\n• Auto-approval: {'Activated' if s['approval_enabled'] else 'Deactivated'}"
             )
-            return await edit_panel(cq, text, kb)
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
-        if page == "approval_toggle":
-            update_setting(chat_id, "approval_enabled", 0 if s["approval_enabled"] else 1)
+        if page == "apa":
+            if extra == "t":
+                update_setting(chat_id, "approval_enabled", 0 if s["approval_enabled"] else 1)
+            elif extra == "off":
+                update_setting(chat_id, "approval_enabled", 0)
+            elif extra == "on":
+                update_setting(chat_id, "approval_enabled", 1)
             return await cq.answer("Updated")
 
-        if page == "approval_set":
-            update_setting(chat_id, "approval_enabled", 1 if extra == "on" else 0)
-            return await cq.answer("Updated")
-
-        if page == "deleting":
+        if page == "dl":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🤖 Commands", callback_data=cb(uid, "deleting_toggle", chat_id, "commands"))],
-                [InlineKeyboardButton("🤫 Global Silence", callback_data=cb(uid, "deleting_toggle", chat_id, "globalsilence"))],
-                [InlineKeyboardButton("✍🏻 Edit Checks", callback_data=cb(uid, "deleting_toggle", chat_id, "editchecks"))],
-                [InlineKeyboardButton("💥 Service Messages", callback_data=cb(uid, "deleting_toggle", chat_id, "servicemsg"))],
-                [InlineKeyboardButton("🕒 Scheduled deletion", callback_data=cb(uid, "deleting_toggle", chat_id, "scheduled"))],
-                [InlineKeyboardButton("Block cancellation", callback_data=cb(uid, "deleting_toggle", chat_id, "blockcancel"))],
-                [InlineKeyboardButton("Delete all messages", callback_data=cb(uid, "deleting_toggle", chat_id, "allmsg"))],
-                [InlineKeyboardButton("♻️ Messages self-destruction", callback_data=cb(uid, "deleting_toggle", chat_id, "selfdestruct"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton("🤖 Commands", callback_data=cb(uid, "dla", chat_id, "c"))],
+                [InlineKeyboardButton("🤫 Global Silence", callback_data=cb(uid, "dla", chat_id, "g"))],
+                [InlineKeyboardButton("✍🏻 Edit Checks", callback_data=cb(uid, "dla", chat_id, "e"))],
+                [InlineKeyboardButton("💥 Service Messages", callback_data=cb(uid, "dla", chat_id, "s"))],
+                [InlineKeyboardButton("🕒 Scheduled deletion", callback_data=cb(uid, "dla", chat_id, "t"))],
+                [InlineKeyboardButton("Block cancellation", callback_data=cb(uid, "dla", chat_id, "b"))],
+                [InlineKeyboardButton("Delete all messages", callback_data=cb(uid, "dla", chat_id, "a"))],
+                [InlineKeyboardButton("♻️ Messages self-destruction", callback_data=cb(uid, "dla", chat_id, "d"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            return await edit_panel(cq, "🗑️ Deleting Messages\nWhat messages do you want the Bot to delete?", kb)
+            return await cq.message.edit_text("🗑️ Deleting Messages\nWhat messages do you want the Bot to delete?", reply_markup=kb)
 
-        if page == "deleting_toggle":
+        if page == "dla":
             mapping = {
-                "commands": "deleting_commands",
-                "globalsilence": "deleting_global_silence",
-                "editchecks": "deleting_edit_checks",
-                "servicemsg": "deleting_service_messages",
-                "scheduled": "deleting_scheduled",
-                "blockcancel": "deleting_block_cancellation",
-                "allmsg": "deleting_all_messages",
-                "selfdestruct": "deleting_self_destruct",
+                "c": "deleting_commands",
+                "g": "deleting_global_silence",
+                "e": "deleting_edit_checks",
+                "s": "deleting_service_messages",
+                "t": "deleting_scheduled",
+                "b": "deleting_block_cancellation",
+                "a": "deleting_all_messages",
+                "d": "deleting_self_destruct",
             }
             field = mapping[extra]
             update_setting(chat_id, field, 0 if s[field] else 1)
             return await cq.answer("Updated")
 
-        if page == "group_lang":
+        if page == "lg":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton(f"{'✅ ' if s['lang']=='en' else ''}English", callback_data=cb(uid, "set_group_lang", chat_id, "en")),
-                 InlineKeyboardButton(f"{'✅ ' if s['lang']=='bn' else ''}বাংলা", callback_data=cb(uid, "set_group_lang", chat_id, "bn"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id))]
+                [InlineKeyboardButton(f"{'✅ ' if s['lang']=='en' else ''}English", callback_data=cb(uid, "lga", chat_id, "en")),
+                 InlineKeyboardButton(f"{'✅ ' if s['lang']=='bn' else ''}বাংলা", callback_data=cb(uid, "lga", chat_id, "bn"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            return await edit_panel(cq, "🇬🇧 Lang", kb)
+            return await cq.message.edit_text("🇬🇧 Lang", reply_markup=kb)
 
-        if page == "set_group_lang":
+        if page == "lga":
             update_setting(chat_id, "lang", extra if extra in {"en", "bn"} else "en")
             return await cq.answer("Updated")
 
-        if page == "other":
+        if page == "ot":
             kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🗂️ Topic", callback_data=cb(uid, "other_sub", chat_id, "topic"))],
-                [InlineKeyboardButton("🔤 Banned Words", callback_data=cb(uid, "other_sub", chat_id, "bannedwords"))],
-                [InlineKeyboardButton("🕒 Recurring messages", callback_data=cb(uid, "other_sub", chat_id, "recurring"))],
-                [InlineKeyboardButton("👥 Members Management", callback_data=cb(uid, "other_sub", chat_id, "members"))],
-                [InlineKeyboardButton("🫥 Masked users", callback_data=cb(uid, "other_sub", chat_id, "masked"))],
-                [InlineKeyboardButton("📣 Discussion group", callback_data=cb(uid, "other_sub", chat_id, "discussion"))],
-                [InlineKeyboardButton("Personal Commands", callback_data=cb(uid, "other_sub", chat_id, "personal"))],
-                [InlineKeyboardButton("🎭 Magic Stickers&GIFs", callback_data=cb(uid, "other_sub", chat_id, "magic"))],
-                [InlineKeyboardButton("Message length", callback_data=cb(uid, "other_sub", chat_id, "length"))],
-                [InlineKeyboardButton("📢 Channels management", callback_data=cb(uid, "other_sub", chat_id, "channels"))],
-                [InlineKeyboardButton("Permissions", callback_data=cb(uid, "other_sub", chat_id, "permissions")),
-                 InlineKeyboardButton("Log Channel", callback_data=cb(uid, "other_sub", chat_id, "logchannel"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "settings_home", chat_id)),
-                 InlineKeyboardButton("✅ Close", callback_data=cb(uid, "close")),
-                 InlineKeyboardButton("🇬🇧 Lang", callback_data=cb(uid, "group_lang", chat_id))]
+                [InlineKeyboardButton("🗂️ Topic", callback_data=cb(uid, "ots", chat_id, "t"))],
+                [InlineKeyboardButton("🔤 Banned Words", callback_data=cb(uid, "ots", chat_id, "bw"))],
+                [InlineKeyboardButton("🕒 Recurring messages", callback_data=cb(uid, "ots", chat_id, "rm"))],
+                [InlineKeyboardButton("👥 Members Management", callback_data=cb(uid, "ots", chat_id, "mm"))],
+                [InlineKeyboardButton("🫥 Masked users", callback_data=cb(uid, "ots", chat_id, "mu"))],
+                [InlineKeyboardButton("📣 Discussion group", callback_data=cb(uid, "ots", chat_id, "dg"))],
+                [InlineKeyboardButton("Personal Commands", callback_data=cb(uid, "ots", chat_id, "pc"))],
+                [InlineKeyboardButton("🎭 Magic Stickers&GIFs", callback_data=cb(uid, "ots", chat_id, "mg"))],
+                [InlineKeyboardButton("Message length", callback_data=cb(uid, "ots", chat_id, "ml"))],
+                [InlineKeyboardButton("📢 Channels management", callback_data=cb(uid, "ots", chat_id, "cm"))],
+                [InlineKeyboardButton("Permissions", callback_data=cb(uid, "ots", chat_id, "pm")),
+                 InlineKeyboardButton("Log Channel", callback_data=cb(uid, "ots", chat_id, "lc"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id)),
+                 InlineKeyboardButton("✅ Close", callback_data=cb(uid, "cl")),
+                 InlineKeyboardButton("🇬🇧 Lang", callback_data=cb(uid, "lg", chat_id))]
             ])
-            return await edit_panel(cq, settings_home_text(chat_id), kb)
+            return await cq.message.edit_text(settings_home_text(chat_id), reply_markup=kb)
 
-        if page == "other_sub":
-            if extra == "bannedwords":
+        if page == "ots":
+            if extra == "bw":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("➕ Add word", callback_data=cb(uid, "blacklist_action", chat_id, "add")),
-                     InlineKeyboardButton("➖ Remove word", callback_data=cb(uid, "blacklist_action", chat_id, "remove"))],
-                    [InlineKeyboardButton("📋 Show", callback_data=cb(uid, "blacklist_action", chat_id, "show"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "other", chat_id))]
+                    [InlineKeyboardButton("➕ Add word", callback_data=cb(uid, "bla", chat_id, "a")),
+                     InlineKeyboardButton("➖ Remove word", callback_data=cb(uid, "bla", chat_id, "r"))],
+                    [InlineKeyboardButton("📋 Show", callback_data=cb(uid, "bla", chat_id, "s"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
                 ])
-                return await edit_panel(cq, "Banned Words", kb)
-            if extra == "logchannel":
+                return await cq.message.edit_text("Banned Words", reply_markup=kb)
+            if extra == "lc":
                 kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("Set Log Channel", callback_data=cb(uid, "set_log_channel", chat_id))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "other", chat_id))]
+                    [InlineKeyboardButton("Set Log Channel", callback_data=cb(uid, "otlc", chat_id, "s"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
                 ])
-                return await edit_panel(cq, f"Log Channel\n\nCurrent: `{s['log_channel_id']}`", kb)
-            return await edit_panel(cq, f"{extra.title()}\n\nNot expanded in this build.", back_kb(uid, "other", chat_id))
+                return await cq.message.edit_text(f"Log Channel\n\nCurrent: `{s['log_channel_id']}`", reply_markup=kb)
+            return await cq.message.edit_text("This subfeature is informational in this build.", reply_markup=back_kb(uid, "ot", chat_id))
 
-        if page == "set_log_channel":
-            pending_inputs[uid] = {"action": "set_log_channel", "chat_id": chat_id}
-            return await cq.answer("Send channel id in private chat.", show_alert=True)
-
-        if page == "help_basic":
-            return await edit_panel(cq, basic_commands_text(), InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "help_menu"))]]))
-        if page == "help_advanced":
-            return await edit_panel(cq, advanced_commands_text(), InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "help_menu"))]]))
-        if page == "help_experts":
-            return await edit_panel(cq, experts_text(), InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "help_menu"))]]))
-        if page == "help_pro":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Set up Staff group", callback_data=cb(uid, "pro_sub", 0, "staff"))],
-                [InlineKeyboardButton("👾 How to create a Clone", callback_data=cb(uid, "pro_sub", 0, "clone"))],
-                [InlineKeyboardButton("Users Roles", callback_data=cb(uid, "pro_sub", 0, "roles"))],
-                [InlineKeyboardButton("Back to Help", callback_data=cb(uid, "help_menu"))]
-            ])
-            return await edit_panel(cq, pro_guides_text(), kb)
-
-        if page == "pro_sub":
-            return await edit_panel(cq, f"{extra.title()}\n\nGuide placeholder.", InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "help_pro"))]]))
-
-        if page == "help_menu":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(uid, "help_basic")),
-                 InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(uid, "help_advanced"))],
-                [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(uid, "help_experts")),
-                 InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(uid, "help_pro"))],
-            ])
-            return await edit_panel(cq, help_menu_text(), kb)
+        if page == "otlc":
+            pending_inputs[uid] = {"action": "lc", "chat_id": chat_id}
+            return await cq.answer("Send log channel id in private chat.", show_alert=True)
 
         return await cq.answer("Unknown panel", show_alert=True)
 
@@ -1977,7 +1816,7 @@ async def callback_handler(client, cq: CallbackQuery):
 async def startup_report():
     if CFG.owner_id:
         try:
-            await bot.send_message(CFG.owner_id, "✅ Bot started.")
+            await bot.send_message(CFG.owner_id, "✅ Group Guard 2.0 started.")
         except Exception:
             pass
 
