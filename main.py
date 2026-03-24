@@ -23,6 +23,7 @@ from pyrogram.types import (
 )
 from pyrogram.enums import ChatMemberStatus
 
+
 # =========================================================
 # Logging
 # =========================================================
@@ -33,6 +34,7 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("group_guard_2")
+
 
 # =========================================================
 # Config
@@ -93,6 +95,7 @@ def load_config() -> Config:
 
 CFG = load_config()
 
+
 # =========================================================
 # Flask / runtime
 # =========================================================
@@ -104,8 +107,10 @@ runtime = {
     "bot_id": 0,
     "maintenance": CFG.maintenance_mode,
 }
+
 pending_inputs: Dict[int, Dict] = {}
 flood_tracker: Dict[Tuple[int, int], List[float]] = {}
+
 
 # =========================================================
 # Flask routes
@@ -130,13 +135,16 @@ def healthz():
 def run_web_server():
     app.run(host="0.0.0.0", port=CFG.port)
 
+
 # =========================================================
 # Event loop
 # =========================================================
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
 loop = asyncio.new_event_loop()
 asyncio.set_event_loop(loop)
+
 
 # =========================================================
 # Bot
@@ -147,6 +155,7 @@ bot = Client(
     api_hash=CFG.api_hash,
     bot_token=CFG.bot_token,
 )
+
 
 # =========================================================
 # DB
@@ -322,14 +331,6 @@ def upsert_user(user_id: int, username: Optional[str], first_name: Optional[str]
         conn.commit()
 
 
-def get_user_lang(user_id: int) -> str:
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        return row[0] if row and row[0] in {"en", "bn"} else "en"
-
-
 def set_user_lang(user_id: int, lang: str):
     now = int(time.time())
     with closing(db_connect()) as conn:
@@ -342,6 +343,14 @@ def set_user_lang(user_id: int, lang: str):
             last_seen=excluded.last_seen
         """, (user_id, now, now, lang))
         conn.commit()
+
+
+def get_user_lang(user_id: int) -> str:
+    with closing(db_connect()) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT lang FROM users WHERE user_id = ?", (user_id,))
+        row = cur.fetchone()
+        return row[0] if row and row[0] in {"en", "bn"} else "en"
 
 
 def register_group(chat_id: int, title: str):
@@ -371,17 +380,12 @@ def get_settings(chat_id: int) -> dict:
         cur.execute("SELECT * FROM settings WHERE chat_id = ?", (chat_id,))
         row = cur.fetchone()
         cols = [d[0] for d in cur.description]
-        data = dict(zip(cols, row))
-        data["min_message_length"], data["max_message_length"] = normalize_msglen(
-            int(data.get("min_message_length", 0)),
-            int(data.get("max_message_length", 0)),
-        )
-        return data
+        return dict(zip(cols, row))
 
 
 def normalize_msglen(min_len: int, max_len: int) -> Tuple[int, int]:
-    min_len = max(0, int(min_len))
-    max_len = max(0, int(max_len))
+    min_len = max(0, min_len)
+    max_len = max(0, max_len)
     if max_len > 0 and min_len > max_len:
         min_len, max_len = max_len, min_len
     return min_len, max_len
@@ -520,6 +524,7 @@ def get_custom(chat_id: int, cmd: str) -> Optional[str]:
         row = cur.fetchone()
         return row[0] if row else None
 
+
 # =========================================================
 # Helpers
 # =========================================================
@@ -533,10 +538,6 @@ async def is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
         return member.status in {ChatMemberStatus.OWNER, ChatMemberStatus.ADMINISTRATOR}
     except Exception:
         return False
-
-
-def bool_icon(v: bool) -> str:
-    return "✅" if v else "❌"
 
 
 def sign_data(raw: str) -> str:
@@ -639,15 +640,18 @@ def should_check_message_length(message: Message) -> bool:
         return False
     if message.text:
         text = message.text.strip()
-        if not text or text.startswith("/"):
+        if not text:
+            return False
+        if text.startswith("/"):
             return False
         return True
-    if message.caption and message.caption.strip():
-        return True
+    if message.caption:
+        return bool(message.caption.strip())
     return False
 
+
 # =========================================================
-# UI text
+# UI texts
 # =========================================================
 def main_text() -> str:
     return (
@@ -664,25 +668,18 @@ def main_text() -> str:
 def manage_groups_text() -> str:
     return (
         "Manage group Settings\n"
-        "👉 Select the group whose settings you want\n"
-        "to change.\n\n"
-        "If a group in which you are an administrator\n"
-        "doesn't appear here:\n"
+        "👉 Select the group whose settings you want to change.\n\n"
+        "If a group in which you are an administrator doesn't appear here:\n"
         "• Send /reload in the group and try again\n"
-        "• Send /settings in the group and then press\n"
-        "\"Open in pvt\""
+        "• Send /settings in the group and then press \"Open in pvt\""
     )
 
 
 def settings_home_text(chat_id: int) -> str:
     s = get_settings(chat_id)
     title = s["title"] or f"Group {chat_id}"
-    return (
-        "SETTINGS\n"
-        f"Group: {title}\n\n"
-        "Select one of the settings that you want to\n"
-        "change."
-    )
+    return f"SETTINGS\nGroup: {title}\n\nSelect one of the settings that you want to change."
+
 
 # =========================================================
 # Keyboards
@@ -722,10 +719,8 @@ def settings_home_kb(uid: int, chat_id: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🆘 @Admin", callback_data=cb(uid, "ad", chat_id)),
          InlineKeyboardButton("🔐 Blocks", callback_data=cb(uid, "bl", chat_id))],
         [InlineKeyboardButton("📸 Media", callback_data=cb(uid, "md", chat_id)),
-         InlineKeyboardButton("🔞 Porn", callback_data=cb(uid, "pn", chat_id))],
-        [InlineKeyboardButton("❗ Warns", callback_data=cb(uid, "wp", chat_id)),
          InlineKeyboardButton("🌘 Night", callback_data=cb(uid, "ng", chat_id))],
-        [InlineKeyboardButton("🔔 Tag", callback_data=cb(uid, "tg", chat_id)),
+        [InlineKeyboardButton("❗ Warns", callback_data=cb(uid, "wp", chat_id)),
          InlineKeyboardButton("🔗 Link", callback_data=cb(uid, "gl", chat_id))],
         [InlineKeyboardButton("📬 Approval mode", callback_data=cb(uid, "ap", chat_id))],
         [InlineKeyboardButton("🗑️ Deleting Messages", callback_data=cb(uid, "dl", chat_id))],
@@ -735,61 +730,8 @@ def settings_home_kb(uid: int, chat_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def back_kb(uid: int, page: str, chat_id: int = 0) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, page, chat_id))]])
-
 # =========================================================
-# Render helper
-# =========================================================
-async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: str):
-    s = get_settings(chat_id)
-
-    if page == "we":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "wea", chat_id, "off")),
-             InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "wea", chat_id, "on"))],
-            [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "wea", chat_id, "c"))],
-            [InlineKeyboardButton("🔔 Always send", callback_data=cb(uid, "wea", chat_id, "a")),
-             InlineKeyboardButton("Send 1st join", callback_data=cb(uid, "wea", chat_id, "f"))],
-            [InlineKeyboardButton(f"Delete last message {'✅' if s['welcome_delete_last'] else '✖️'}", callback_data=cb(uid, "wea", chat_id, "d"))],
-            [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-        ])
-        txt = f"💬 Welcome Message\nStatus: {'On ✅' if s['welcome_enabled'] else 'Off ❌'}"
-        return await cq.message.edit_text(txt, reply_markup=kb)
-
-    if page == "gb":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✖️ Turn off", callback_data=cb(uid, "gba", chat_id, "off")),
-             InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "gba", chat_id, "on"))],
-            [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "gba", chat_id, "c"))],
-            [InlineKeyboardButton(f"💌 Send in private chat {'✅' if s['goodbye_private'] else '✖️'}", callback_data=cb(uid, "gba", chat_id, "p"))],
-            [InlineKeyboardButton(f"♻️ Delete last message {'✅' if s['goodbye_delete_last'] else '✖️'}", callback_data=cb(uid, "gba", chat_id, "d"))],
-            [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-        ])
-        txt = f"👋 Goodbye\nStatus: {'On ✅' if s['goodbye_enabled'] else 'Off ❌'}"
-        return await cq.message.edit_text(txt, reply_markup=kb)
-
-    if page == "cp":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Activate" if not s["captcha_enabled"] else "✖️ Deactivate", callback_data=cb(uid, "cpa", chat_id, "t"))],
-            [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-        ])
-        txt = f"🧠 Captcha\nStatus: {'On ✅' if s['captcha_enabled'] else 'Off ❌'}"
-        return await cq.message.edit_text(txt, reply_markup=kb)
-
-    if page == "ot":
-        kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔤 Banned Words", callback_data=cb(uid, "ots", chat_id, "bw"))],
-            [InlineKeyboardButton("Message length", callback_data=cb(uid, "ots", chat_id, "ml"))],
-            [InlineKeyboardButton("Log Channel", callback_data=cb(uid, "ots", chat_id, "lc"))],
-            [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id)),
-             InlineKeyboardButton("✅ Close", callback_data=cb(uid, "cl")),
-             InlineKeyboardButton("🇬🇧 Lang", callback_data=cb(uid, "lg", chat_id))]
-        ])
-        return await cq.message.edit_text(settings_home_text(chat_id), reply_markup=kb)
-
-# =========================================================
-# Core commands
+# Commands
 # =========================================================
 @bot.on_message(filters.command("start") & filters.private)
 async def start_cmd(client, message: Message):
@@ -831,9 +773,7 @@ async def help_group(client, message: Message):
     ])
     await message.reply_text("Welcome to the help menu!", reply_markup=kb)
 
-# =========================================================
-# Group commands
-# =========================================================
+
 @bot.on_message(filters.command("reload") & filters.group)
 async def reload_cmd(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
@@ -911,4 +851,773 @@ async def setmsglen_cmd(client, message: Message):
             f"Min: {s['min_message_length']}\n"
             f"Max: {s['max_message_length']}\n"
             f"Short action: {s['short_message_action']}\n"
-            f"Long action: {s['long
+            f"Long action: {s['long_message_action']}"
+        )
+    except Exception as e:
+        await message.reply_text(f"Failed: {e}")
+
+
+@bot.on_message(filters.command("warn") & filters.group)
+async def warn_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    target = message.reply_to_message.from_user
+    s = get_settings(message.chat.id)
+    wc = get_warns(message.chat.id, target.id) + 1
+    set_warns(message.chat.id, target.id, wc)
+    await apply_warn_action(client, message.chat.id, target.id, s, wc)
+    await message.reply_text(f"⚠️ Warn added: `{wc}/{s['warns_limit']}`")
+
+
+@bot.on_message(filters.command("unwarn") & filters.group)
+async def unwarn_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    target = message.reply_to_message.from_user
+    wc = max(0, get_warns(message.chat.id, target.id) - 1)
+    set_warns(message.chat.id, target.id, wc)
+    await message.reply_text(f"✅ Warns: {wc}")
+
+
+@bot.on_message(filters.command("warns") & filters.group)
+async def warns_cmd(client, message: Message):
+    rows = list_warned(message.chat.id)
+    txt = "Warned List\n\n" + ("\n".join(f"`{uid}` → {w}" for uid, w in rows) if rows else "Empty.")
+    await message.reply_text(txt)
+
+
+@bot.on_message(filters.command("approve") & filters.group)
+async def approve_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    approve_user(message.chat.id, message.reply_to_message.from_user.id)
+    await message.reply_text("✅ Approved.")
+
+
+@bot.on_message(filters.command("unapprove") & filters.group)
+async def unapprove_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    unapprove_user(message.chat.id, message.reply_to_message.from_user.id)
+    await message.reply_text("✅ Unapproved.")
+
+
+@bot.on_message(filters.command("mute") & filters.group)
+async def mute_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    target = message.reply_to_message.from_user
+    try:
+        await client.restrict_chat_member(message.chat.id, target.id, ChatPermissions(can_send_messages=False))
+        await message.reply_text("🔇 Muted.")
+    except Exception as e:
+        await message.reply_text(f"Mute failed: {e}")
+
+
+@bot.on_message(filters.command("unmute") & filters.group)
+async def unmute_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    target = message.reply_to_message.from_user
+    try:
+        await client.restrict_chat_member(
+            message.chat.id,
+            target.id,
+            ChatPermissions(
+                can_send_messages=True,
+                can_send_polls=True,
+                can_invite_users=True,
+            ),
+        )
+        await message.reply_text("🔊 Unmuted.")
+    except Exception as e:
+        await message.reply_text(f"Unmute failed: {e}")
+
+
+@bot.on_message(filters.command("ban") & filters.group)
+async def ban_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    if not message.reply_to_message or not message.reply_to_message.from_user:
+        return await message.reply_text("Reply to a user.")
+    target = message.reply_to_message.from_user
+    try:
+        await client.ban_chat_member(message.chat.id, target.id)
+        await message.reply_text("🚫 Banned.")
+    except Exception as e:
+        await message.reply_text(f"Ban failed: {e}")
+
+
+@bot.on_message(filters.command("unban") & filters.group)
+async def unban_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+    parts = message.text.split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        return await message.reply_text("Usage: /unban user_id")
+    try:
+        await client.unban_chat_member(message.chat.id, int(parts[1]))
+        await message.reply_text("✅ Unbanned.")
+    except Exception as e:
+        await message.reply_text(f"Unban failed: {e}")
+
+
+# =========================================================
+# Group tracking / moderation
+# =========================================================
+@bot.on_message(filters.group)
+async def touch_group(client, message: Message):
+    register_group(message.chat.id, message.chat.title or "")
+    if message.from_user:
+        upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
+
+
+@bot.on_message(filters.new_chat_members)
+async def joined_handler(client, message: Message):
+    s = get_settings(message.chat.id)
+    for user in message.new_chat_members:
+        if s["welcome_enabled"]:
+            text = s["welcome_text"].replace("{mention}", user.mention).replace("{name}", user.first_name or "User")
+            try:
+                await message.reply_text(text)
+            except Exception:
+                pass
+
+        if s["captcha_enabled"]:
+            try:
+                await client.restrict_chat_member(message.chat.id, user.id, ChatPermissions(can_send_messages=False))
+                await message.reply_text(f"🧠 {user.mention}, verify that you are not a robot.")
+            except Exception:
+                pass
+
+
+@bot.on_message(filters.left_chat_member)
+async def left_handler(client, message: Message):
+    s = get_settings(message.chat.id)
+    if s["goodbye_enabled"] and message.left_chat_member:
+        text = s["goodbye_text"].replace("{name}", message.left_chat_member.first_name or "User")
+        try:
+            if s["goodbye_private"]:
+                await client.send_message(message.left_chat_member.id, text)
+            else:
+                await message.reply_text(text)
+        except Exception:
+            pass
+
+
+@bot.on_message(filters.group & ~filters.service, group=10)
+async def moderation_handler(client, message: Message):
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if await is_group_admin(client, message.chat.id, message.from_user.id):
+        return
+
+    s = get_settings(message.chat.id)
+    text = message.text or message.caption or ""
+
+    if should_check_message_length(message):
+        msg_len = len(text.strip())
+        min_len = int(s["min_message_length"])
+        max_len = int(s["max_message_length"])
+        min_len, max_len = normalize_msglen(min_len, max_len)
+
+        if min_len > 0 and msg_len < min_len:
+            try:
+                await message.delete()
+                if s["short_message_action"] == "warn":
+                    wc = get_warns(message.chat.id, message.from_user.id) + 1
+                    set_warns(message.chat.id, message.from_user.id, wc)
+                    await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            except Exception:
+                pass
+            return
+
+        if max_len > 0 and msg_len > max_len:
+            try:
+                await message.delete()
+                if s["long_message_action"] == "warn":
+                    wc = get_warns(message.chat.id, message.from_user.id) + 1
+                    set_warns(message.chat.id, message.from_user.id, wc)
+                    await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            except Exception:
+                pass
+            return
+
+    if s["approval_enabled"] and not is_approved(message.chat.id, message.from_user.id):
+        try:
+            await message.delete()
+            await message.reply_text(f"🛑 {message.from_user.mention}, only approved users can speak here.")
+        except Exception:
+            pass
+        return
+
+    if s["force_sub_channel"]:
+        ok = await check_forcesub(client, s["force_sub_channel"], message.from_user.id)
+        if not ok:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+    if s["antispam_forwarding"] and (message.forward_date or message.forward_from or message.forward_sender_name):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    if s["antispam_quote"] and message.reply_to_message:
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    if s["antispam_tg_links"] and text_has_tg_link(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    if s["antispam_total_links"] and text_has_link(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    if s["media_enabled"] and message.media is not None:
+        try:
+            if s["media_action"] == "allow":
+                return
+            await message.delete()
+            if s["media_action"] == "warn":
+                wc = get_warns(message.chat.id, message.from_user.id) + 1
+                set_warns(message.chat.id, message.from_user.id, wc)
+                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            elif s["media_action"] == "mute":
+                await client.restrict_chat_member(message.chat.id, message.from_user.id, ChatPermissions(can_send_messages=False))
+        except Exception:
+            pass
+        return
+
+    if s["night_enabled"]:
+        if s["night_delete_medias"] and message.media is not None:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+        if s["night_global_silence"]:
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            return
+
+    banned_words = [w.strip().lower() for w in s["banned_words"].split(",") if w.strip()]
+    low = text.lower()
+
+    for bw in banned_words:
+        if bw and re.search(rf"\b{re.escape(bw)}\b", low):
+            try:
+                await message.delete()
+            except Exception:
+                pass
+            wc = get_warns(message.chat.id, message.from_user.id) + 1
+            set_warns(message.chat.id, message.from_user.id, wc)
+            await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            return
+
+    if s["alphabet_arabic"] and text_has_arabic(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+    if s["alphabet_cyrillic"] and text_has_cyrillic(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+    if s["alphabet_chinese"] and text_has_chinese(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+    if s["alphabet_latin"] and text_has_latin(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+        return
+
+    key = (message.chat.id, message.from_user.id)
+    now = time.time()
+    arr = [x for x in flood_tracker.get(key, []) if now - x <= s["antiflood_seconds"]]
+    arr.append(now)
+    flood_tracker[key] = arr
+
+    if len(arr) >= s["antiflood_messages"]:
+        try:
+            action = s["antiflood_action"]
+            if action == "warn":
+                wc = get_warns(message.chat.id, message.from_user.id) + 1
+                set_warns(message.chat.id, message.from_user.id, wc)
+                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            elif action == "kick":
+                await client.ban_chat_member(message.chat.id, message.from_user.id)
+                await client.unban_chat_member(message.chat.id, message.from_user.id)
+            elif action == "mute":
+                await client.restrict_chat_member(message.chat.id, message.from_user.id, ChatPermissions(can_send_messages=False))
+            elif action == "ban":
+                await client.ban_chat_member(message.chat.id, message.from_user.id)
+            elif action == "delete":
+                await message.delete()
+        except Exception:
+            pass
+
+
+@bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "msglen", "setmsglen", "warn", "unwarn", "warns", "approve", "unapprove", "reload", "mute", "unmute", "ban", "unban"]) & filters.group, group=15)
+async def delete_commands_if_needed(client, message: Message):
+    s = get_settings(message.chat.id)
+    if s["deleting_commands"]:
+        try:
+            await asyncio.sleep(2)
+            await message.delete()
+        except Exception:
+            pass
+
+
+@bot.on_edited_message(filters.group, group=16)
+async def edit_checks(client, message: Message):
+    s = get_settings(message.chat.id)
+    if not s["deleting_edit_checks"]:
+        return
+    if not message.from_user or message.from_user.is_bot:
+        return
+    if await is_group_admin(client, message.chat.id, message.from_user.id):
+        return
+    text = message.text or message.caption or ""
+    if text_has_link(text):
+        try:
+            await message.delete()
+        except Exception:
+            pass
+
+
+@bot.on_message(filters.service, group=17)
+async def service_delete_handler(client, message: Message):
+    s = get_settings(message.chat.id)
+    if s["deleting_service_messages"]:
+        try:
+            await asyncio.sleep(2)
+            await message.delete()
+        except Exception:
+            pass
+
+
+# =========================================================
+# Custom commands
+# =========================================================
+BUILTINS = {
+    "start", "help", "settings", "reload", "rules", "link",
+    "msglen", "setmsglen",
+    "warn", "unwarn", "warns", "approve", "unapprove",
+    "mute", "unmute", "ban", "unban",
+}
+
+@bot.on_message(filters.group & filters.text, group=20)
+async def custom_commands_handler(client, message: Message):
+    if not message.text or not message.text.startswith("/"):
+        return
+    cmd = message.text.split()[0].lstrip("/").split("@")[0].lower()
+    if cmd in BUILTINS:
+        return
+    res = get_custom(message.chat.id, cmd)
+    if res:
+        await message.reply_text(res)
+
+
+# =========================================================
+# Private pending input
+# =========================================================
+@bot.on_message(filters.private & filters.text, group=30)
+async def pending_input_handler(client, message: Message):
+    if not message.from_user or message.text.startswith("/"):
+        return
+    sess = pending_inputs.pop(message.from_user.id, None)
+    if not sess:
+        return
+
+    action = sess["action"]
+    chat_id = sess["chat_id"]
+    text = message.text.strip()
+
+    try:
+        if action == "sr":
+            update_setting(chat_id, "rules_text", text)
+            return await message.reply_text("✅ Rules updated.")
+        if action == "sw":
+            update_setting(chat_id, "welcome_text", text)
+            return await message.reply_text("✅ Welcome message updated.")
+        if action == "sg":
+            update_setting(chat_id, "goodbye_text", text)
+            return await message.reply_text("✅ Goodbye message updated.")
+        if action == "sl":
+            update_setting(chat_id, "group_link", text)
+            update_setting(chat_id, "link_enabled", 1)
+            return await message.reply_text("✅ Group link saved.")
+        if action == "ab":
+            s = get_settings(chat_id)
+            words = [w.strip().lower() for w in s["banned_words"].split(",") if w.strip()]
+            if text.lower() not in words:
+                words.append(text.lower())
+            update_setting(chat_id, "banned_words", ",".join(words))
+            return await message.reply_text("✅ Banned word added.")
+        if action == "rb":
+            s = get_settings(chat_id)
+            words = [w.strip().lower() for w in s["banned_words"].split(",") if w.strip()]
+            words = [w for w in words if w != text.lower()]
+            update_setting(chat_id, "banned_words", ",".join(words))
+            return await message.reply_text("✅ Banned word removed.")
+    except Exception as e:
+        return await message.reply_text(f"❌ Failed: {e}")
+
+
+# =========================================================
+# Callback handler
+# =========================================================
+@bot.on_callback_query()
+async def callback_handler(client, cq: CallbackQuery):
+    p = parse_cb(cq.data)
+    if not p:
+        return await cq.answer("Invalid button data.", show_alert=True)
+
+    uid = cq.from_user.id
+    if p["uid"] != uid:
+        return await cq.answer("This panel is not for you.", show_alert=True)
+
+    page = p["page"]
+    chat_id = p["chat_id"]
+    extra = p["extra"]
+
+    try:
+        if page == "cl":
+            await cq.message.edit_text("Closed.")
+            return await cq.answer("Closed")
+
+        if page == "mg":
+            return await cq.message.edit_text(manage_groups_text(), reply_markup=manage_groups_kb(uid))
+
+        if page == "sh":
+            if not await is_group_admin(client, chat_id, uid):
+                return await cq.answer("You are not admin in this group.", show_alert=True)
+            return await cq.message.edit_text(settings_home_text(chat_id), reply_markup=settings_home_kb(uid, chat_id))
+
+        if page == "hmn":
+            return await cq.message.edit_text(main_text(), reply_markup=main_kb(uid))
+
+        if page == "ch":
+            return await cq.message.edit_text("Channel 📢\n\nThis section is informational in this build.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))]]))
+
+        if page == "su":
+            rows = []
+            if CFG.support_channel:
+                url = f"https://t.me/{CFG.support_channel.lstrip('@')}" if CFG.support_channel.startswith("@") else CFG.support_channel
+                rows.append([InlineKeyboardButton("📢 Support Channel", url=url)])
+            if CFG.support_group:
+                url = f"https://t.me/{CFG.support_group.lstrip('@')}" if CFG.support_group.startswith("@") else CFG.support_group
+                rows.append([InlineKeyboardButton("👥 Support Group", url=url)])
+            rows.append([InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))])
+            return await cq.message.edit_text("🚑 Support\n\nNeed help? Use the support links below.", reply_markup=InlineKeyboardMarkup(rows))
+
+        if page == "in":
+            return await cq.message.edit_text("Information 💬\n\nGroup Guard 2.0 control panel build.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))]]))
+
+        if page == "ul":
+            lang = get_user_lang(uid)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"{'✅ ' if lang == 'en' else ''}English", callback_data=cb(uid, "suL", 0, "en")),
+                 InlineKeyboardButton(f"{'✅ ' if lang == 'bn' else ''}বাংলা", callback_data=cb(uid, "suL", 0, "bn"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))]
+            ])
+            return await cq.message.edit_text("Languages", reply_markup=kb)
+
+        if page == "suL":
+            set_user_lang(uid, extra if extra in {"en", "bn"} else "en")
+            return await cq.answer("Updated")
+
+        if page == "hb":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = (
+                "Base Commands\n\n"
+                "/reload\n/settings\n/ban\n/mute\n/unban\n/help\n/rules\n/link"
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "ha":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = (
+                "Advanced Commands\n\n"
+                "/warn\n/unwarn\n/warns\n/approve\n/unapprove\n/msglen\n/setmsglen"
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "he":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = "Experts Commands\n\nMore expert commands can be added later."
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "hp":
+            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
+            txt = "Pro Guides\n\nAdvanced guides can be added later."
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "hmu":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(uid, "hb")),
+                 InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(uid, "ha"))],
+                [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(uid, "he")),
+                 InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(uid, "hp"))],
+            ])
+            return await cq.message.edit_text("Welcome to the help menu!", reply_markup=kb)
+
+        if chat_id and not await is_group_admin(client, chat_id, uid):
+            return await cq.answer("You are not admin in this group.", show_alert=True)
+
+        s = get_settings(chat_id)
+
+        if page == "rg":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "rga", chat_id, "c"))],
+                [InlineKeyboardButton("📍 Commands Permissions", callback_data=cb(uid, "rga", chat_id, "p"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
+            ])
+            txt = "Group regulations menu"
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "rga":
+            if extra == "c":
+                pending_inputs[uid] = {"action": "sr", "chat_id": chat_id}
+                return await cq.answer("Send new rules text in private chat.", show_alert=True)
+            if extra == "p":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='all' else ''}All users", callback_data=cb(uid, "rgp", chat_id, "all"))],
+                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='admins' else ''}Admins only", callback_data=cb(uid, "rgp", chat_id, "admins"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "rg", chat_id))]
+                ])
+                return await cq.message.edit_text("Commands Permissions", reply_markup=kb)
+
+        if page == "rgp":
+            update_setting(chat_id, "rules_cmd_permission", extra)
+            return await cq.answer("Updated")
+
+        if page == "we":
+            return await cq.message.edit_text(
+                f"Welcome Message\nStatus: {'On' if s['welcome_enabled'] else 'Off'}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Turn off", callback_data=cb(uid, "wea", chat_id, "off")),
+                     InlineKeyboardButton("Turn on", callback_data=cb(uid, "wea", chat_id, "on"))],
+                    [InlineKeyboardButton("Customize", callback_data=cb(uid, "wea", chat_id, "c"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
+                ])
+            )
+
+        if page == "wea":
+            if extra == "off":
+                update_setting(chat_id, "welcome_enabled", 0)
+            elif extra == "on":
+                update_setting(chat_id, "welcome_enabled", 1)
+            elif extra == "c":
+                pending_inputs[uid] = {"action": "sw", "chat_id": chat_id}
+                return await cq.answer("Send welcome text in private chat.", show_alert=True)
+            return await cq.answer("Updated")
+
+        if page == "gb":
+            return await cq.message.edit_text(
+                f"Goodbye Message\nStatus: {'On' if s['goodbye_enabled'] else 'Off'}",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Turn off", callback_data=cb(uid, "gba", chat_id, "off")),
+                     InlineKeyboardButton("Turn on", callback_data=cb(uid, "gba", chat_id, "on"))],
+                    [InlineKeyboardButton("Customize", callback_data=cb(uid, "gba", chat_id, "c"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
+                ])
+            )
+
+        if page == "gba":
+            if extra == "off":
+                update_setting(chat_id, "goodbye_enabled", 0)
+            elif extra == "on":
+                update_setting(chat_id, "goodbye_enabled", 1)
+            elif extra == "c":
+                pending_inputs[uid] = {"action": "sg", "chat_id": chat_id}
+                return await cq.answer("Send goodbye text in private chat.", show_alert=True)
+            return await cq.answer("Updated")
+
+        if page == "ot":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔤 Banned Words", callback_data=cb(uid, "ots", chat_id, "bw"))],
+                [InlineKeyboardButton("Message length", callback_data=cb(uid, "ots", chat_id, "ml"))],
+                [InlineKeyboardButton("Log Channel", callback_data=cb(uid, "ots", chat_id, "lc"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
+            ])
+            return await cq.message.edit_text("Other settings", reply_markup=kb)
+
+        if page == "ots":
+            if extra == "bw":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("Add word", callback_data=cb(uid, "bla", chat_id, "a")),
+                     InlineKeyboardButton("Remove word", callback_data=cb(uid, "bla", chat_id, "r"))],
+                    [InlineKeyboardButton("Show", callback_data=cb(uid, "bla", chat_id, "s"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
+                ])
+                return await cq.message.edit_text("Banned Words", reply_markup=kb)
+
+            if extra == "ml":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➖ Min", callback_data=cb(uid, "mla", chat_id, "min_minus")),
+                     InlineKeyboardButton("➕ Min", callback_data=cb(uid, "mla", chat_id, "min_plus"))],
+                    [InlineKeyboardButton("➖ Max", callback_data=cb(uid, "mla", chat_id, "max_minus")),
+                     InlineKeyboardButton("➕ Max", callback_data=cb(uid, "mla", chat_id, "max_plus"))],
+                    [InlineKeyboardButton("Short → Delete", callback_data=cb(uid, "mla", chat_id, "short_delete")),
+                     InlineKeyboardButton("Short → Warn", callback_data=cb(uid, "mla", chat_id, "short_warn"))],
+                    [InlineKeyboardButton("Long → Delete", callback_data=cb(uid, "mla", chat_id, "long_delete")),
+                     InlineKeyboardButton("Long → Warn", callback_data=cb(uid, "mla", chat_id, "long_warn"))],
+                    [InlineKeyboardButton("Reset", callback_data=cb(uid, "mla", chat_id, "reset"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
+                ])
+                txt = (
+                    "Message length\n\n"
+                    f"Minimum length: `{s['min_message_length']}`\n"
+                    f"Maximum length: `{s['max_message_length']}`\n"
+                    f"Short message action: `{s['short_message_action']}`\n"
+                    f"Long message action: `{s['long_message_action']}`\n\n"
+                    "Commands are ignored by this rule."
+                )
+                return await cq.message.edit_text(txt, reply_markup=kb)
+
+            if extra == "lc":
+                return await cq.message.edit_text(
+                    f"Log Channel\nCurrent: `{s['log_channel_id']}`",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]])
+                )
+
+        if page == "mla":
+            min_len = int(s["min_message_length"])
+            max_len = int(s["max_message_length"])
+
+            if extra == "min_minus":
+                min_len = max(0, min_len - 1)
+            elif extra == "min_plus":
+                min_len = min(1000, min_len + 1)
+            elif extra == "max_minus":
+                max_len = max(0, max_len - 5)
+            elif extra == "max_plus":
+                max_len = min(5000, max_len + 5)
+            elif extra == "short_delete":
+                update_setting(chat_id, "short_message_action", "delete")
+            elif extra == "short_warn":
+                update_setting(chat_id, "short_message_action", "warn")
+            elif extra == "long_delete":
+                update_setting(chat_id, "long_message_action", "delete")
+            elif extra == "long_warn":
+                update_setting(chat_id, "long_message_action", "warn")
+            elif extra == "reset":
+                min_len = 0
+                max_len = 0
+                update_setting(chat_id, "short_message_action", "delete")
+                update_setting(chat_id, "long_message_action", "delete")
+
+            min_len, max_len = normalize_msglen(min_len, max_len)
+            update_setting(chat_id, "min_message_length", min_len)
+            update_setting(chat_id, "max_message_length", max_len)
+
+            s2 = get_settings(chat_id)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➖ Min", callback_data=cb(uid, "mla", chat_id, "min_minus")),
+                 InlineKeyboardButton("➕ Min", callback_data=cb(uid, "mla", chat_id, "min_plus"))],
+                [InlineKeyboardButton("➖ Max", callback_data=cb(uid, "mla", chat_id, "max_minus")),
+                 InlineKeyboardButton("➕ Max", callback_data=cb(uid, "mla", chat_id, "max_plus"))],
+                [InlineKeyboardButton("Short → Delete", callback_data=cb(uid, "mla", chat_id, "short_delete")),
+                 InlineKeyboardButton("Short → Warn", callback_data=cb(uid, "mla", chat_id, "short_warn"))],
+                [InlineKeyboardButton("Long → Delete", callback_data=cb(uid, "mla", chat_id, "long_delete")),
+                 InlineKeyboardButton("Long → Warn", callback_data=cb(uid, "mla", chat_id, "long_warn"))],
+                [InlineKeyboardButton("Reset", callback_data=cb(uid, "mla", chat_id, "reset"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
+            ])
+            txt = (
+                "Message length\n\n"
+                f"Minimum length: `{s2['min_message_length']}`\n"
+                f"Maximum length: `{s2['max_message_length']}`\n"
+                f"Short message action: `{s2['short_message_action']}`\n"
+                f"Long message action: `{s2['long_message_action']}`\n\n"
+                "Commands are ignored by this rule."
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
+
+        if page == "bla":
+            if extra == "a":
+                pending_inputs[uid] = {"action": "ab", "chat_id": chat_id}
+                return await cq.answer("Send word in private chat.", show_alert=True)
+            if extra == "r":
+                pending_inputs[uid] = {"action": "rb", "chat_id": chat_id}
+                return await cq.answer("Send word in private chat.", show_alert=True)
+            if extra == "s":
+                words = [w.strip() for w in s["banned_words"].split(",") if w.strip()]
+                await cq.message.reply_text("Blacklist\n\n" + (", ".join(words) if words else "Empty."))
+                return await cq.answer("Sent")
+
+        return await cq.answer("Done")
+
+    except Exception as e:
+        logger.exception("callback error")
+        await cq.answer(f"Error: {e}", show_alert=True)
+
+
+# =========================================================
+# Startup
+# =========================================================
+async def startup_report():
+    if CFG.owner_id:
+        try:
+            await bot.send_message(CFG.owner_id, "✅ Group Guard 2.0 started.")
+        except Exception:
+            pass
+
+
+async def main():
+    init_db()
+    threading.Thread(target=run_web_server, daemon=True).start()
+
+    await bot.start()
+    me = await bot.get_me()
+    runtime["bot_username"] = me.username or ""
+    runtime["bot_id"] = me.id
+
+    logger.info(f"Started as @{runtime['bot_username']}")
+    asyncio.create_task(startup_report())
+    await idle()
+
+
+if __name__ == "__main__":
+    try:
+        loop.run_until_complete(main())
+    except KeyboardInterrupt:
+        pass
