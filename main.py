@@ -52,6 +52,8 @@ class Config:
     port: int
     secret_key: str
     maintenance_mode: bool
+    support_channel: str
+    support_group: str
 
 
 def parse_ids(raw: str) -> Set[int]:
@@ -84,6 +86,8 @@ def load_config() -> Config:
         port=int(os.environ.get("PORT", "10000")),
         secret_key=os.environ.get("SECRET_KEY", "CHANGE_THIS_SECRET"),
         maintenance_mode=env_bool("MAINTENANCE_MODE", False),
+        support_channel=os.environ.get("SUPPORT_CHANNEL", "").strip(),
+        support_group=os.environ.get("SUPPORT_GROUP", "").strip(),
     )
 
 
@@ -242,6 +246,11 @@ def init_db():
             deleting_all_messages INTEGER NOT NULL DEFAULT 0,
             deleting_self_destruct INTEGER NOT NULL DEFAULT 0,
 
+            min_message_length INTEGER NOT NULL DEFAULT 0,
+            max_message_length INTEGER NOT NULL DEFAULT 0,
+            short_message_action TEXT NOT NULL DEFAULT 'delete',
+            long_message_action TEXT NOT NULL DEFAULT 'delete',
+
             banned_words TEXT NOT NULL DEFAULT '',
             log_channel_id INTEGER NOT NULL DEFAULT 0,
             force_sub_channel TEXT NOT NULL DEFAULT ''
@@ -283,6 +292,17 @@ def init_db():
             PRIMARY KEY(chat_id, cmd)
         )
         """)
+
+        def ensure_column(name: str, ddl: str):
+            cur.execute("PRAGMA table_info(settings)")
+            cols = [r[1] for r in cur.fetchall()]
+            if name not in cols:
+                cur.execute(f"ALTER TABLE settings ADD COLUMN {ddl}")
+
+        ensure_column("min_message_length", "min_message_length INTEGER NOT NULL DEFAULT 0")
+        ensure_column("max_message_length", "max_message_length INTEGER NOT NULL DEFAULT 0")
+        ensure_column("short_message_action", "short_message_action TEXT NOT NULL DEFAULT 'delete'")
+        ensure_column("long_message_action", "long_message_action TEXT NOT NULL DEFAULT 'delete'")
 
         conn.commit()
 
@@ -374,6 +394,8 @@ def update_setting(chat_id: int, field: str, value):
         "deleting_commands", "deleting_global_silence", "deleting_edit_checks",
         "deleting_service_messages", "deleting_scheduled", "deleting_block_cancellation",
         "deleting_all_messages", "deleting_self_destruct",
+        "min_message_length", "max_message_length",
+        "short_message_action", "long_message_action",
         "banned_words", "log_channel_id", "force_sub_channel",
     }
     if field not in allowed:
@@ -1197,6 +1219,25 @@ async def setlog_cmd(client, message: Message):
         await message.reply_text(f"Failed: {e}")
 
 
+@bot.on_message(filters.command("setmsglen") & filters.group)
+async def setmsglen_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+
+    parts = message.text.split()
+    if len(parts) != 3:
+        return await message.reply_text("Usage: /setmsglen MIN MAX\nExample: /setmsglen 3 300")
+
+    try:
+        min_len = max(0, int(parts[1]))
+        max_len = max(0, int(parts[2]))
+        update_setting(message.chat.id, "min_message_length", min_len)
+        update_setting(message.chat.id, "max_message_length", max_len)
+        await message.reply_text(f"✅ Message length updated.\nMin: {min_len}\nMax: {max_len}")
+    except Exception as e:
+        await message.reply_text(f"Failed: {e}")
+
+
 @bot.on_message(filters.command("banword") & filters.group)
 async def banword_cmd(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
@@ -1315,6 +1356,30 @@ async def moderation_handler(client, message: Message):
     s = get_settings(message.chat.id)
     text = message.text or message.caption or ""
 
+    msg_len = len(text.strip()) if text else 0
+
+    if msg_len > 0 and int(s["min_message_length"]) > 0 and msg_len < int(s["min_message_length"]):
+        try:
+            await message.delete()
+            if s["short_message_action"] == "warn":
+                wc = get_warns(message.chat.id, message.from_user.id) + 1
+                set_warns(message.chat.id, message.from_user.id, wc)
+                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+        except Exception:
+            pass
+        return
+
+    if msg_len > 0 and int(s["max_message_length"]) > 0 and msg_len > int(s["max_message_length"]):
+        try:
+            await message.delete()
+            if s["long_message_action"] == "warn":
+                wc = get_warns(message.chat.id, message.from_user.id) + 1
+                set_warns(message.chat.id, message.from_user.id, wc)
+                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+        except Exception:
+            pass
+        return
+
     if s["approval_enabled"] and not is_approved(message.chat.id, message.from_user.id):
         try:
             await message.delete()
@@ -1377,7 +1442,6 @@ async def moderation_handler(client, message: Message):
                 wc = get_warns(message.chat.id, message.from_user.id) + 1
                 set_warns(message.chat.id, message.from_user.id, wc)
                 await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
-
             elif s["media_action"] == "mute":
                 await client.restrict_chat_member(message.chat.id, message.from_user.id, ChatPermissions(can_send_messages=False))
         except Exception:
@@ -1465,7 +1529,7 @@ async def moderation_handler(client, message: Message):
             pass
 
 
-@bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "warn", "unwarn", "warns", "approve", "unapprove", "reload", "mute", "unmute", "ban", "unban", "setlog", "banword", "unbanword", "save", "delnote", "setcmd"]) & filters.group, group=15)
+@bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "warn", "unwarn", "warns", "approve", "unapprove", "reload", "mute", "unmute", "ban", "unban", "setlog", "setmsglen", "banword", "unbanword", "save", "delnote", "setcmd"]) & filters.group, group=15)
 async def delete_commands_if_needed(client, message: Message):
     s = get_settings(message.chat.id)
     if s["deleting_commands"]:
@@ -1510,7 +1574,7 @@ BUILTINS = {
     "start", "help", "settings", "reload", "rules", "link",
     "warn", "unwarn", "warns", "approve", "unapprove",
     "mute", "unmute", "ban", "unban",
-    "setlog", "banword", "unbanword",
+    "setlog", "setmsglen", "banword", "unbanword",
     "save", "delnote", "setcmd",
 }
 
@@ -1605,10 +1669,25 @@ async def callback_handler(client, cq: CallbackQuery):
 
         if page == "ch":
             return await cq.message.edit_text("Channel 📢\n\nThis section is informational in this build.", reply_markup=back_kb(uid, "hmn"))
+
         if page == "su":
-            return await cq.message.edit_text("🚑 Support\n\nUse your own support group / owner contact.", reply_markup=back_kb(uid, "hmn"))
+            rows = []
+            if CFG.support_channel:
+                if CFG.support_channel.startswith("@"):
+                    rows.append([InlineKeyboardButton("📢 Support Channel", url=f"https://t.me/{CFG.support_channel.lstrip('@')}")])
+                else:
+                    rows.append([InlineKeyboardButton("📢 Support Channel", url=CFG.support_channel)])
+            if CFG.support_group:
+                if CFG.support_group.startswith("@"):
+                    rows.append([InlineKeyboardButton("👥 Support Group", url=f"https://t.me/{CFG.support_group.lstrip('@')}")])
+                else:
+                    rows.append([InlineKeyboardButton("👥 Support Group", url=CFG.support_group)])
+            rows.append([InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))])
+            return await cq.message.edit_text("🚑 Support\n\nNeed help? Use the support links below.", reply_markup=InlineKeyboardMarkup(rows))
+
         if page == "in":
             return await cq.message.edit_text("Information 💬\n\nGroup Guard 2.0 screenshot-matched control panel build.", reply_markup=back_kb(uid, "hmn"))
+
         if page == "ul":
             lang = get_user_lang(uid)
             kb = InlineKeyboardMarkup([
@@ -1617,9 +1696,11 @@ async def callback_handler(client, cq: CallbackQuery):
                 [InlineKeyboardButton("Back", callback_data=cb(uid, "hmn"))]
             ])
             return await cq.message.edit_text("🇬🇧 Languages 🇬🇧", reply_markup=kb)
+
         if page == "suL":
             set_user_lang(uid, extra if extra in {"en", "bn"} else "en")
             return await cq.answer("Updated")
+
         if page == "hmn":
             return await cq.message.edit_text(main_text(), reply_markup=main_kb(uid))
 
@@ -2028,13 +2109,87 @@ async def callback_handler(client, cq: CallbackQuery):
                     [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
                 ])
                 return await cq.message.edit_text("Banned Words", reply_markup=kb)
+
             if extra == "lc":
                 kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("Set Log Channel", callback_data=cb(uid, "otlc", chat_id, "s"))],
                     [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
                 ])
                 return await cq.message.edit_text(f"Log Channel\n\nCurrent: `{s['log_channel_id']}`", reply_markup=kb)
+
+            if extra == "ml":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➖ Min", callback_data=cb(uid, "mla", chat_id, "min_minus")),
+                     InlineKeyboardButton("➕ Min", callback_data=cb(uid, "mla", chat_id, "min_plus"))],
+                    [InlineKeyboardButton("➖ Max", callback_data=cb(uid, "mla", chat_id, "max_minus")),
+                     InlineKeyboardButton("➕ Max", callback_data=cb(uid, "mla", chat_id, "max_plus"))],
+                    [InlineKeyboardButton("Short → Delete", callback_data=cb(uid, "mla", chat_id, "short_delete")),
+                     InlineKeyboardButton("Short → Warn", callback_data=cb(uid, "mla", chat_id, "short_warn"))],
+                    [InlineKeyboardButton("Long → Delete", callback_data=cb(uid, "mla", chat_id, "long_delete")),
+                     InlineKeyboardButton("Long → Warn", callback_data=cb(uid, "mla", chat_id, "long_warn"))],
+                    [InlineKeyboardButton("Reset", callback_data=cb(uid, "mla", chat_id, "reset"))],
+                    [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
+                ])
+                txt = (
+                    "Message length\n\n"
+                    f"Minimum length: `{s['min_message_length']}`\n"
+                    f"Maximum length: `{s['max_message_length']}`\n"
+                    f"Short message action: `{s['short_message_action']}`\n"
+                    f"Long message action: `{s['long_message_action']}`\n\n"
+                    "0 means disabled."
+                )
+                return await cq.message.edit_text(txt, reply_markup=kb)
+
             return await cq.message.edit_text("This subfeature is informational in this build.", reply_markup=back_kb(uid, "ot", chat_id))
+
+        if page == "mla":
+            min_len = int(s["min_message_length"])
+            max_len = int(s["max_message_length"])
+
+            if extra == "min_minus":
+                update_setting(chat_id, "min_message_length", max(0, min_len - 1))
+            elif extra == "min_plus":
+                update_setting(chat_id, "min_message_length", min(1000, min_len + 1))
+            elif extra == "max_minus":
+                update_setting(chat_id, "max_message_length", max(0, max_len - 5))
+            elif extra == "max_plus":
+                update_setting(chat_id, "max_message_length", min(5000, max_len + 5))
+            elif extra == "short_delete":
+                update_setting(chat_id, "short_message_action", "delete")
+            elif extra == "short_warn":
+                update_setting(chat_id, "short_message_action", "warn")
+            elif extra == "long_delete":
+                update_setting(chat_id, "long_message_action", "delete")
+            elif extra == "long_warn":
+                update_setting(chat_id, "long_message_action", "warn")
+            elif extra == "reset":
+                update_setting(chat_id, "min_message_length", 0)
+                update_setting(chat_id, "max_message_length", 0)
+                update_setting(chat_id, "short_message_action", "delete")
+                update_setting(chat_id, "long_message_action", "delete")
+
+            s2 = get_settings(chat_id)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("➖ Min", callback_data=cb(uid, "mla", chat_id, "min_minus")),
+                 InlineKeyboardButton("➕ Min", callback_data=cb(uid, "mla", chat_id, "min_plus"))],
+                [InlineKeyboardButton("➖ Max", callback_data=cb(uid, "mla", chat_id, "max_minus")),
+                 InlineKeyboardButton("➕ Max", callback_data=cb(uid, "mla", chat_id, "max_plus"))],
+                [InlineKeyboardButton("Short → Delete", callback_data=cb(uid, "mla", chat_id, "short_delete")),
+                 InlineKeyboardButton("Short → Warn", callback_data=cb(uid, "mla", chat_id, "short_warn"))],
+                [InlineKeyboardButton("Long → Delete", callback_data=cb(uid, "mla", chat_id, "long_delete")),
+                 InlineKeyboardButton("Long → Warn", callback_data=cb(uid, "mla", chat_id, "long_warn"))],
+                [InlineKeyboardButton("Reset", callback_data=cb(uid, "mla", chat_id, "reset"))],
+                [InlineKeyboardButton("Back", callback_data=cb(uid, "ot", chat_id))]
+            ])
+            txt = (
+                "Message length\n\n"
+                f"Minimum length: `{s2['min_message_length']}`\n"
+                f"Maximum length: `{s2['max_message_length']}`\n"
+                f"Short message action: `{s2['short_message_action']}`\n"
+                f"Long message action: `{s2['long_message_action']}`\n\n"
+                "0 means disabled."
+            )
+            return await cq.message.edit_text(txt, reply_markup=kb)
 
         if page == "otlc":
             pending_inputs[uid] = {"action": "lc", "chat_id": chat_id}
