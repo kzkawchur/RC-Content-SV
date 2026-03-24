@@ -21,7 +21,7 @@ from pyrogram.types import (
     ChatPermissions,
     Message,
 )
-from pyrogram.enums import ChatMemberStatus, ChatType
+from pyrogram.enums import ChatMemberStatus
 
 # =========================================================
 # Logging
@@ -374,6 +374,14 @@ def get_settings(chat_id: int) -> dict:
         return dict(zip(cols, row))
 
 
+def normalize_msglen(min_len: int, max_len: int) -> Tuple[int, int]:
+    min_len = max(0, min_len)
+    max_len = max(0, max_len)
+    if max_len > 0 and min_len > max_len:
+        min_len, max_len = max_len, min_len
+    return min_len, max_len
+
+
 def update_setting(chat_id: int, field: str, value):
     allowed = {
         "title", "lang",
@@ -405,6 +413,16 @@ def update_setting(chat_id: int, field: str, value):
         cur.execute("INSERT OR IGNORE INTO settings(chat_id) VALUES(?)", (chat_id,))
         cur.execute(f"UPDATE settings SET {field} = ? WHERE chat_id = ?", (value, chat_id))
         conn.commit()
+
+
+def set_message_length_settings(chat_id: int, min_len: int, max_len: int, short_action: Optional[str] = None, long_action: Optional[str] = None):
+    min_len, max_len = normalize_msglen(min_len, max_len)
+    update_setting(chat_id, "min_message_length", min_len)
+    update_setting(chat_id, "max_message_length", max_len)
+    if short_action in {"delete", "warn"}:
+        update_setting(chat_id, "short_message_action", short_action)
+    if long_action in {"delete", "warn"}:
+        update_setting(chat_id, "long_message_action", long_action)
 
 
 def get_warns(chat_id: int, user_id: int) -> int:
@@ -461,18 +479,6 @@ def is_approved(chat_id: int, user_id: int) -> bool:
         return cur.fetchone() is not None
 
 
-def list_approved(chat_id: int, limit: int = 30) -> List[int]:
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("""
-        SELECT user_id FROM approved_users
-        WHERE chat_id = ?
-        ORDER BY approved_at DESC
-        LIMIT ?
-        """, (chat_id, limit))
-        return [r[0] for r in cur.fetchall()]
-
-
 def save_note(chat_id: int, name: str, text: str):
     with closing(db_connect()) as conn:
         cur = conn.cursor()
@@ -489,13 +495,6 @@ def delete_note(chat_id: int, name: str):
         cur = conn.cursor()
         cur.execute("DELETE FROM notes WHERE chat_id = ? AND name = ?", (chat_id, name.lower()))
         conn.commit()
-
-
-def list_notes(chat_id: int, limit: int = 50) -> List[str]:
-    with closing(db_connect()) as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT name FROM notes WHERE chat_id = ? ORDER BY name ASC LIMIT ?", (chat_id, limit))
-        return [r[0] for r in cur.fetchall()]
 
 
 def save_custom(chat_id: int, cmd: str, response: str):
@@ -519,10 +518,6 @@ def get_custom(chat_id: int, cmd: str) -> Optional[str]:
 # =========================================================
 # Helpers
 # =========================================================
-def is_root_admin(user_id: int) -> bool:
-    return user_id in CFG.admin_ids
-
-
 def bot_username() -> str:
     return runtime["bot_username"] or ""
 
@@ -643,6 +638,21 @@ async def log_to_channel(client: Client, chat_id: int, text: str):
     except Exception:
         pass
 
+
+def should_check_message_length(message: Message) -> bool:
+    if not message:
+        return False
+    if not message.from_user or message.from_user.is_bot:
+        return False
+    if message.text:
+        text = message.text.strip()
+        if text.startswith("/"):
+            return False
+        return len(text) > 0
+    if message.caption:
+        return len(message.caption.strip()) > 0
+    return False
+
 # =========================================================
 # UI text
 # =========================================================
@@ -753,11 +763,8 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
         ])
         txt = (
             "💬 Welcome Message\n"
-            "From this menu you can set a welcome\n"
-            "message that will be sent when someone joins\n"
-            "the group.\n\n"
             f"Status: {'On ✅' if s['welcome_enabled'] else 'Off ❌'}\n"
-            f"Mode: {'Send the welcome message at every join of the users in the group' if s['welcome_mode']=='always' else 'Send only at first join'}"
+            f"Mode: {'Always send' if s['welcome_mode']=='always' else 'Send only first join'}"
         )
         return await cq.message.edit_text(txt, reply_markup=kb)
 
@@ -770,13 +777,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton(f"♻️ Delete last message {'✅' if s['goodbye_delete_last'] else '✖️'}", callback_data=cb(uid, "gba", chat_id, "d"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "👋 Goodbye\n"
-            "From this menu you can set a goodbye\n"
-            "message that will be sent when someone\n"
-            "leaves the group.\n\n"
-            f"Status: {'On ✅' if s['goodbye_enabled'] else 'Off ❌'}"
-        )
+        txt = f"👋 Goodbye\nStatus: {'On ✅' if s['goodbye_enabled'] else 'Off ❌'}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "cp":
@@ -784,14 +785,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton("✅ Activate" if not s["captcha_enabled"] else "✖️ Deactivate", callback_data=cb(uid, "cpa", chat_id, "t"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "🧠 Captcha\n"
-            "By activating the captcha, when a user\n"
-            "enters the group he will not be able to send\n"
-            "messages until he has confirmed that he is not\n"
-            "a robot.\n\n"
-            f"Status: {'On ✅' if s['captcha_enabled'] else 'Off ❌'}"
-        )
+        txt = f"🧠 Captcha\nStatus: {'On ✅' if s['captcha_enabled'] else 'Off ❌'}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "ad":
@@ -801,25 +795,13 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton("👥 Staff Group", callback_data=cb(uid, "ada", chat_id, "s"))],
             [InlineKeyboardButton(f"🔔 Tag Founder {'✅' if s['admin_tag_founder'] else '❌'}", callback_data=cb(uid, "ada", chat_id, "tf"))],
             [InlineKeyboardButton(f"🔔 Tag Admins {'✅' if s['admin_tag_admins'] else '❌'}", callback_data=cb(uid, "ada", chat_id, "ta"))],
-            [InlineKeyboardButton("🛠️ Advanced settings", callback_data=cb(uid, "ada", chat_id, "adv"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "🆘 @admin command\n"
-            "@admin (or /report) is a command available to\n"
-            "users to attract the attention of the group's staff.\n\n"
-            "Status: Active\n"
-            f"Send to: {'Nobody' if s['admin_status']=='nobody' else '👑 Founder' if s['admin_status']=='founder' else '👥 Staff Group'}"
-        )
+        txt = f"🆘 @admin command\nSend to: `{s['admin_status']}`"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "md":
-        txt = (
-            "📸 Media\n\n"
-            "This build manages media globally.\n"
-            f"Status: {'On ✅' if s['media_enabled'] else 'Off ❌'}\n"
-            f"Action: {s['media_action'].title()}"
-        )
+        txt = f"📸 Media\nStatus: {'On ✅' if s['media_enabled'] else 'Off ❌'}\nAction: {s['media_action']}"
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Allow", callback_data=cb(uid, "mda", chat_id, "allow")),
              InlineKeyboardButton("❗ Warn", callback_data=cb(uid, "mda", chat_id, "warn")),
@@ -833,8 +815,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
     if page == "wp":
         row_numbers = []
         for n in [2, 3, 4, 5, 6]:
-            label = f"{n}{' ✅' if s['warns_limit']==n else ''}"
-            row_numbers.append(InlineKeyboardButton(label, callback_data=cb(uid, "wpa", chat_id, f"l{n}")))
+            row_numbers.append(InlineKeyboardButton(f"{n}{' ✅' if s['warns_limit']==n else ''}", callback_data=cb(uid, "wpa", chat_id, f"l{n}")))
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("🧾 Warned List", callback_data=cb(uid, "wpa", chat_id, "ls"))],
             [InlineKeyboardButton("✖️ Off", callback_data=cb(uid, "wpa", chat_id, "off")),
@@ -845,13 +826,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             row_numbers,
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "❗ User warnings\n"
-            "The warning system allows you to give\n"
-            "warnings to users before actually punishing them.\n\n"
-            f"Punishment: {s['warns_action'].title()}\n"
-            f"Max Warns allowed: {s['warns_limit']}"
-        )
+        txt = f"❗ Warns\nAction: {s['warns_action']}\nLimit: {s['warns_limit']}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "as":
@@ -864,9 +839,6 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
         ])
         txt = (
             "✉️ Anti-Spam\n"
-            "In this menu you can decide whether to\n"
-            "protect your groups from unnecessary links,\n"
-            "forwards, and quotes.\n\n"
             f"Telegram links: {bool_icon(bool(s['antispam_tg_links']))}\n"
             f"Forwarding: {bool_icon(bool(s['antispam_forwarding']))}\n"
             f"Quote: {bool_icon(bool(s['antispam_quote']))}\n"
@@ -886,13 +858,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton("🗑️ Delete Messages", callback_data=cb(uid, "afa", chat_id, "delete"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "🗣️ Antiflood\n"
-            "From this menu you can set a punishment for\n"
-            "those who send many messages in a short time.\n\n"
-            f"Currently the antiflood is triggered when {s['antiflood_messages']} messages are sent within {s['antiflood_seconds']} seconds.\n\n"
-            f"Punishment: {s['antiflood_action'].title()}"
-        )
+        txt = f"🗣️ Anti-Flood\nMessages: {s['antiflood_messages']}\nSeconds: {s['antiflood_seconds']}\nAction: {s['antiflood_action']}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "al":
@@ -905,12 +871,10 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
         ])
         txt = (
             "🕉️ Alphabets\n"
-            "Select punishment for any user who send\n"
-            "messages written in certain alphabets.\n\n"
-            f"Arabic — Status: {'On' if s['alphabet_arabic'] else 'Off'}\n"
-            f"Cyrillic — Status: {'On' if s['alphabet_cyrillic'] else 'Off'}\n"
-            f"Chinese — Status: {'On' if s['alphabet_chinese'] else 'Off'}\n"
-            f"Latin — Status: {'On' if s['alphabet_latin'] else 'Off'}"
+            f"Arabic: {bool_icon(bool(s['alphabet_arabic']))}\n"
+            f"Cyrillic: {bool_icon(bool(s['alphabet_cyrillic']))}\n"
+            f"Chinese: {bool_icon(bool(s['alphabet_chinese']))}\n"
+            f"Latin: {bool_icon(bool(s['alphabet_latin']))}"
         )
         return await cq.message.edit_text(txt, reply_markup=kb)
 
@@ -923,21 +887,9 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
         txt = (
-            "OBLIGATION OF...\n"
-            "• Surname: Off\n"
-            "• Username: Off\n"
-            "• Profile picture: Off\n"
-            "• Channel obligation: Off\n"
-            "• Obligation to add: Off\n\n"
-            "BLOCK...\n"
-            "• Arabic name: Off\n"
-            "• Chinese name: Off\n"
-            "• Russian Name: Off\n"
-            "• Spam name: Off\n\n"
-            "📜 Check at the join\n"
-            f"Status: {'Active ✅' if s['check_at_join'] else 'Off ✖️'}\n\n"
-            "🗑️ Delete Messages\n"
-            f"Status: {'Active ✅' if s['checks_delete_messages'] else 'Off ✖️'}"
+            "🔦 Checks\n"
+            f"Check at join: {bool_icon(bool(s['check_at_join']))}\n"
+            f"Delete messages: {bool_icon(bool(s['checks_delete_messages']))}"
         )
         return await cq.message.edit_text(txt, reply_markup=kb)
 
@@ -947,12 +899,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
              InlineKeyboardButton("🤫 Global Silence", callback_data=cb(uid, "nga", chat_id, "s"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "🌘 Night mode\n"
-            "Select the actions you want to limit every\n"
-            "night.\n\n"
-            f"Status: {'On ✅' if s['night_enabled'] else '✖️ Off'}"
-        )
+        txt = f"🌘 Night mode\nStatus: {'On ✅' if s['night_enabled'] else 'Off ❌'}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "ap":
@@ -962,12 +909,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
              InlineKeyboardButton("✔️ Turn on", callback_data=cb(uid, "apa", chat_id, "on"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        txt = (
-            "📬 Approval mode\n"
-            "Through this menu you can decide to delegate\n"
-            "the management of group approvals to the bot.\n\n"
-            f"Status:\n• Auto-approval: {'Activated' if s['approval_enabled'] else 'Deactivated'}"
-        )
+        txt = f"📬 Approval mode\nStatus: {'Activated' if s['approval_enabled'] else 'Deactivated'}"
         return await cq.message.edit_text(txt, reply_markup=kb)
 
     if page == "dl":
@@ -982,7 +924,7 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
             [InlineKeyboardButton("♻️ Messages self-destruction", callback_data=cb(uid, "dla", chat_id, "d"))],
             [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
         ])
-        return await cq.message.edit_text("🗑️ Deleting Messages\nWhat messages do you want the Bot to delete?", reply_markup=kb)
+        return await cq.message.edit_text("🗑️ Deleting Messages", reply_markup=kb)
 
     if page == "ot":
         kb = InlineKeyboardMarkup([
@@ -1007,44 +949,6 @@ async def render_settings_page(cq: CallbackQuery, uid: int, chat_id: int, page: 
 # =========================================================
 # Commands
 # =========================================================
-@bot.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message: Message):
-    upsert_user(message.from_user.id, message.from_user.username, message.from_user.first_name)
-
-    parts = message.text.split(maxsplit=1)
-    if len(parts) > 1 and parts[1].startswith("settings_"):
-        try:
-            chat_id = int(parts[1].split("_", 1)[1])
-            if await is_group_admin(client, chat_id, message.from_user.id):
-                return await message.reply_text(settings_home_text(chat_id), reply_markup=settings_home_kb(message.from_user.id, chat_id))
-        except Exception:
-            pass
-
-    await message.reply_text(main_text(), reply_markup=main_kb(message.from_user.id))
-
-
-@bot.on_message(filters.command("help") & filters.private)
-async def help_private(client, message: Message):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "hb")),
-         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "ha"))],
-        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "he")),
-         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "hp"))],
-    ])
-    await message.reply_text("Welcome to the help menu!", reply_markup=kb)
-
-
-@bot.on_message(filters.command("help") & filters.group)
-async def help_group(client, message: Message):
-    kb = InlineKeyboardMarkup([
-        [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(message.from_user.id, "hb")),
-         InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(message.from_user.id, "ha"))],
-        [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(message.from_user.id, "he")),
-         InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(message.from_user.id, "hp"))],
-    ])
-    await message.reply_text("Welcome to the help menu!", reply_markup=kb)
-
-
 @bot.on_message(filters.command("reload") & filters.group)
 async def reload_cmd(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
@@ -1080,6 +984,54 @@ async def link_cmd(client, message: Message):
     await message.reply_text(s["group_link"])
 
 
+@bot.on_message(filters.command("msglen") & filters.group)
+async def msglen_cmd(client, message: Message):
+    s = get_settings(message.chat.id)
+    await message.reply_text(
+        f"Message length settings\n\n"
+        f"Min: {s['min_message_length']}\n"
+        f"Max: {s['max_message_length']}\n"
+        f"Short action: {s['short_message_action']}\n"
+        f"Long action: {s['long_message_action']}"
+    )
+
+
+@bot.on_message(filters.command("setmsglen") & filters.group)
+async def setmsglen_cmd(client, message: Message):
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        return await message.reply_text("Admin only.")
+
+    parts = message.text.split()
+    if len(parts) < 3 or len(parts) > 5:
+        return await message.reply_text(
+            "Usage: /setmsglen MIN MAX [short_action] [long_action]\n"
+            "Example: /setmsglen 3 300 delete warn"
+        )
+
+    try:
+        min_len = int(parts[1])
+        max_len = int(parts[2])
+        short_action = parts[3].lower() if len(parts) >= 4 else None
+        long_action = parts[4].lower() if len(parts) >= 5 else None
+
+        if short_action and short_action not in {"delete", "warn"}:
+            return await message.reply_text("short_action must be delete or warn")
+        if long_action and long_action not in {"delete", "warn"}:
+            return await message.reply_text("long_action must be delete or warn")
+
+        set_message_length_settings(message.chat.id, min_len, max_len, short_action, long_action)
+        s = get_settings(message.chat.id)
+        await message.reply_text(
+            f"✅ Message length updated.\n"
+            f"Min: {s['min_message_length']}\n"
+            f"Max: {s['max_message_length']}\n"
+            f"Short action: {s['short_message_action']}\n"
+            f"Long action: {s['long_message_action']}"
+        )
+    except Exception as e:
+        await message.reply_text(f"Failed: {e}")
+
+
 @bot.on_message(filters.command("warn") & filters.group)
 async def warn_cmd(client, message: Message):
     if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
@@ -1104,7 +1056,6 @@ async def unwarn_cmd(client, message: Message):
     target = message.reply_to_message.from_user
     wc = max(0, get_warns(message.chat.id, target.id) - 1)
     set_warns(message.chat.id, target.id, wc)
-    await log_to_channel(client, message.chat.id, f"Action: unwarn | by={message.from_user.id} | target={target.id}")
     await message.reply_text(f"✅ Warns: {wc}")
 
 
@@ -1122,7 +1073,6 @@ async def approve_cmd(client, message: Message):
     if not message.reply_to_message or not message.reply_to_message.from_user:
         return await message.reply_text("Reply to a user.")
     approve_user(message.chat.id, message.reply_to_message.from_user.id)
-    await log_to_channel(client, message.chat.id, f"Action: approve | by={message.from_user.id} | target={message.reply_to_message.from_user.id}")
     await message.reply_text("✅ Approved.")
 
 
@@ -1133,7 +1083,6 @@ async def unapprove_cmd(client, message: Message):
     if not message.reply_to_message or not message.reply_to_message.from_user:
         return await message.reply_text("Reply to a user.")
     unapprove_user(message.chat.id, message.reply_to_message.from_user.id)
-    await log_to_channel(client, message.chat.id, f"Action: unapprove | by={message.from_user.id} | target={message.reply_to_message.from_user.id}")
     await message.reply_text("✅ Unapproved.")
 
 
@@ -1146,7 +1095,6 @@ async def mute_cmd(client, message: Message):
     target = message.reply_to_message.from_user
     try:
         await client.restrict_chat_member(message.chat.id, target.id, ChatPermissions(can_send_messages=False))
-        await log_to_channel(client, message.chat.id, f"Action: mute | by={message.from_user.id} | target={target.id}")
         await message.reply_text("🔇 Muted.")
     except Exception as e:
         await message.reply_text(f"Mute failed: {e}")
@@ -1169,7 +1117,6 @@ async def unmute_cmd(client, message: Message):
                 can_invite_users=True,
             ),
         )
-        await log_to_channel(client, message.chat.id, f"Action: unmute | by={message.from_user.id} | target={target.id}")
         await message.reply_text("🔊 Unmuted.")
     except Exception as e:
         await message.reply_text(f"Unmute failed: {e}")
@@ -1184,7 +1131,6 @@ async def ban_cmd(client, message: Message):
     target = message.reply_to_message.from_user
     try:
         await client.ban_chat_member(message.chat.id, target.id)
-        await log_to_channel(client, message.chat.id, f"Action: ban | by={message.from_user.id} | target={target.id}")
         await message.reply_text("🚫 Banned.")
     except Exception as e:
         await message.reply_text(f"Ban failed: {e}")
@@ -1199,7 +1145,6 @@ async def unban_cmd(client, message: Message):
         return await message.reply_text("Usage: /unban user_id")
     try:
         await client.unban_chat_member(message.chat.id, int(parts[1]))
-        await log_to_channel(client, message.chat.id, f"Action: unban | by={message.from_user.id} | target={parts[1]}")
         await message.reply_text("✅ Unbanned.")
     except Exception as e:
         await message.reply_text(f"Unban failed: {e}")
@@ -1215,25 +1160,6 @@ async def setlog_cmd(client, message: Message):
     try:
         update_setting(message.chat.id, "log_channel_id", int(parts[1]))
         await message.reply_text("✅ Log channel updated.")
-    except Exception as e:
-        await message.reply_text(f"Failed: {e}")
-
-
-@bot.on_message(filters.command("setmsglen") & filters.group)
-async def setmsglen_cmd(client, message: Message):
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        return await message.reply_text("Admin only.")
-
-    parts = message.text.split()
-    if len(parts) != 3:
-        return await message.reply_text("Usage: /setmsglen MIN MAX\nExample: /setmsglen 3 300")
-
-    try:
-        min_len = max(0, int(parts[1]))
-        max_len = max(0, int(parts[2]))
-        update_setting(message.chat.id, "min_message_length", min_len)
-        update_setting(message.chat.id, "max_message_length", max_len)
-        await message.reply_text(f"✅ Message length updated.\nMin: {min_len}\nMax: {max_len}")
     except Exception as e:
         await message.reply_text(f"Failed: {e}")
 
@@ -1356,29 +1282,36 @@ async def moderation_handler(client, message: Message):
     s = get_settings(message.chat.id)
     text = message.text or message.caption or ""
 
-    msg_len = len(text.strip()) if text else 0
+    # Improved message length logic
+    if should_check_message_length(message):
+        msg_len = len(text.strip())
+        min_len = int(s["min_message_length"])
+        max_len = int(s["max_message_length"])
 
-    if msg_len > 0 and int(s["min_message_length"]) > 0 and msg_len < int(s["min_message_length"]):
-        try:
-            await message.delete()
-            if s["short_message_action"] == "warn":
-                wc = get_warns(message.chat.id, message.from_user.id) + 1
-                set_warns(message.chat.id, message.from_user.id, wc)
-                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
-        except Exception:
-            pass
-        return
+        if min_len > 0 and max_len > 0 and min_len > max_len:
+            min_len, max_len = max_len, min_len
 
-    if msg_len > 0 and int(s["max_message_length"]) > 0 and msg_len > int(s["max_message_length"]):
-        try:
-            await message.delete()
-            if s["long_message_action"] == "warn":
-                wc = get_warns(message.chat.id, message.from_user.id) + 1
-                set_warns(message.chat.id, message.from_user.id, wc)
-                await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
-        except Exception:
-            pass
-        return
+        if min_len > 0 and msg_len < min_len:
+            try:
+                await message.delete()
+                if s["short_message_action"] == "warn":
+                    wc = get_warns(message.chat.id, message.from_user.id) + 1
+                    set_warns(message.chat.id, message.from_user.id, wc)
+                    await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            except Exception:
+                pass
+            return
+
+        if max_len > 0 and msg_len > max_len:
+            try:
+                await message.delete()
+                if s["long_message_action"] == "warn":
+                    wc = get_warns(message.chat.id, message.from_user.id) + 1
+                    set_warns(message.chat.id, message.from_user.id, wc)
+                    await apply_warn_action(client, message.chat.id, message.from_user.id, s, wc)
+            except Exception:
+                pass
+            return
 
     if s["approval_enabled"] and not is_approved(message.chat.id, message.from_user.id):
         try:
@@ -1529,7 +1462,7 @@ async def moderation_handler(client, message: Message):
             pass
 
 
-@bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "warn", "unwarn", "warns", "approve", "unapprove", "reload", "mute", "unmute", "ban", "unban", "setlog", "setmsglen", "banword", "unbanword", "save", "delnote", "setcmd"]) & filters.group, group=15)
+@bot.on_message(filters.command(["start", "help", "settings", "rules", "link", "msglen", "setmsglen", "warn", "unwarn", "warns", "approve", "unapprove", "reload", "mute", "unmute", "ban", "unban", "setlog", "banword", "unbanword", "save", "delnote", "setcmd"]) & filters.group, group=15)
 async def delete_commands_if_needed(client, message: Message):
     s = get_settings(message.chat.id)
     if s["deleting_commands"]:
@@ -1572,9 +1505,10 @@ async def service_delete_handler(client, message: Message):
 # =========================================================
 BUILTINS = {
     "start", "help", "settings", "reload", "rules", "link",
+    "msglen", "setmsglen",
     "warn", "unwarn", "warns", "approve", "unapprove",
     "mute", "unmute", "ban", "unban",
-    "setlog", "setmsglen", "banword", "unbanword",
+    "setlog", "banword", "unbanword",
     "save", "delnote", "setcmd",
 }
 
@@ -1686,7 +1620,7 @@ async def callback_handler(client, cq: CallbackQuery):
             return await cq.message.edit_text("🚑 Support\n\nNeed help? Use the support links below.", reply_markup=InlineKeyboardMarkup(rows))
 
         if page == "in":
-            return await cq.message.edit_text("Information 💬\n\nGroup Guard 2.0 screenshot-matched control panel build.", reply_markup=back_kb(uid, "hmn"))
+            return await cq.message.edit_text("Information 💬\n\nGroup Guard 2.0 control panel build.", reply_markup=back_kb(uid, "hmn"))
 
         if page == "ul":
             lang = get_user_lang(uid)
@@ -1704,119 +1638,10 @@ async def callback_handler(client, cq: CallbackQuery):
         if page == "hmn":
             return await cq.message.edit_text(main_text(), reply_markup=main_kb(uid))
 
-        if page == "hb":
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
-            txt = (
-                "Base Commands\n\n"
-                "👮 Available to Admins&Moderators\n"
-                "🕵️ Available to Admins\n\n"
-                "👮 /reload updates the Admins list and their privileges\n\n"
-                "🕵️ /settings lets you manage all the Bot settings in a group\n\n"
-                "👮 /ban lets you ban a user from the group\n"
-                "without giving him the possibility to join again using the link of the group\n\n"
-                "👮 /mute puts a user in read-only mode.\n\n"
-                "👮 /kick bans a user from the group.\n\n"
-                "👮 /unban lets you remove a user from blacklist.\n\n"
-                "👮 /info gives information about a user\n"
-                "👮 /infopvt sends infos in private chat\n\n"
-                "◻️ /staff gives the complete List of group Staff"
-            )
-            return await cq.message.edit_text(txt, reply_markup=kb)
-
-        if page == "ha":
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
-            txt = (
-                "Advanced Commands\n\n"
-                "🕵️ Available to Admins\n"
-                "👮 Available to Admins&Moderators\n"
-                "🧹 Available to Admins&Cleaners\n\n"
-                "WARN MANAGEMENT\n"
-                "👮 /warn adds a warn to the user\n"
-                "👮 /unwarn removes a warn to the user\n"
-                "👮 /warns lets you see and manage user Warns\n"
-                "🕵️ /delwarn deletes the message and add a warn to the user\n\n"
-                "🧹 /del deletes the selected message\n"
-                "🧹 /logdel deletes the selected message and sends it to the Log Channel"
-            )
-            return await cq.message.edit_text(txt, reply_markup=kb)
-
-        if page == "he":
-            kb = InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]])
-            txt = (
-                "Experts Commands\n\n"
-                "👥 Available to all users\n"
-                "👮 Available to Admins&Moderators\n"
-                "🕵️ Available to Admins\n\n"
-                "👥 /geturl gives direct message link\n\n"
-                "🕵️ /inactives [days]\n\n"
-                "Pinned Messages:\n"
-                "/pin /editpin /delpin /repin /pinned\n\n"
-                "/list /list roles /graphic /trend"
-            )
-            return await cq.message.edit_text(txt, reply_markup=kb)
-
-        if page == "hp":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("Set up Staff group", callback_data=cb(uid, "ps", 0, "staff"))],
-                [InlineKeyboardButton("👾 How to create a Clone", callback_data=cb(uid, "ps", 0, "clone"))],
-                [InlineKeyboardButton("Users Roles", callback_data=cb(uid, "ps", 0, "roles"))],
-                [InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hmu"))]
-            ])
-            txt = (
-                "Pro Guides\n"
-                "In this menu you will find some guides for very\n"
-                "advanced Group Guard 2.0 functions."
-            )
-            return await cq.message.edit_text(txt, reply_markup=kb)
-
-        if page == "ps":
-            return await cq.message.edit_text(f"{extra.title()}\n\nGuide placeholder.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Back to Help", callback_data=cb(uid, "hp"))]]))
-
-        if page == "hmu":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("👮🏻‍♂️ Basic commands", callback_data=cb(uid, "hb")),
-                 InlineKeyboardButton("Advanced 👮🏻", callback_data=cb(uid, "ha"))],
-                [InlineKeyboardButton("🕵🏻 Experts", callback_data=cb(uid, "he")),
-                 InlineKeyboardButton("Pro Guides 🧝🏻", callback_data=cb(uid, "hp"))],
-            ])
-            return await cq.message.edit_text("Welcome to the help menu!", reply_markup=kb)
-
         if chat_id and not await is_group_admin(client, chat_id, uid):
             return await cq.answer("You are not admin in this group.", show_alert=True)
 
         s = get_settings(chat_id)
-
-        if page == "rg":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("✍🏻 Customize message", callback_data=cb(uid, "rga", chat_id, "c"))],
-                [InlineKeyboardButton("📍 Commands Permissions", callback_data=cb(uid, "rga", chat_id, "p"))],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-            ])
-            txt = (
-                "📜 Group's regulations\n"
-                "From this menu you can manage the group's\n"
-                "regulations, that will be shown with the\n"
-                "command /rules.\n\n"
-                "To edit who can use the /rules command, go to\n"
-                "the \"Commands permissions\" section."
-            )
-            return await cq.message.edit_text(txt, reply_markup=kb)
-
-        if page == "rga":
-            if extra == "c":
-                pending_inputs[uid] = {"action": "sr", "chat_id": chat_id}
-                return await cq.answer("Send new rules text in private chat.", show_alert=True)
-            if extra == "p":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='all' else ''}All users", callback_data=cb(uid, "rgp", chat_id, "all"))],
-                    [InlineKeyboardButton(f"{'✅ ' if s['rules_cmd_permission']=='admins' else ''}Admins only", callback_data=cb(uid, "rgp", chat_id, "admins"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "rg", chat_id))]
-                ])
-                return await cq.message.edit_text("Commands Permissions", reply_markup=kb)
-
-        if page == "rgp":
-            update_setting(chat_id, "rules_cmd_permission", extra)
-            return await cq.answer("Updated")
 
         if page == "we":
             return await render_settings_page(cq, uid, chat_id, "we")
@@ -1875,8 +1700,6 @@ async def callback_handler(client, cq: CallbackQuery):
                 update_setting(chat_id, "admin_tag_founder", 0 if s["admin_tag_founder"] else 1)
             elif extra == "ta":
                 update_setting(chat_id, "admin_tag_admins", 0 if s["admin_tag_admins"] else 1)
-            elif extra == "adv":
-                return await cq.message.edit_text("Advanced settings\n\nThis section is informational in this build.", reply_markup=back_kb(uid, "ad", chat_id))
             return await render_settings_page(cq, uid, chat_id, "ad")
 
         if page == "md":
@@ -1904,28 +1727,7 @@ async def callback_handler(client, cq: CallbackQuery):
                 update_setting(chat_id, "warns_action", extra)
             elif extra.startswith("l"):
                 update_setting(chat_id, "warns_limit", int(extra[1:]))
-            elif extra == "dur":
-                kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("10m", callback_data=cb(uid, "wpm", chat_id, "10")),
-                     InlineKeyboardButton("30m", callback_data=cb(uid, "wpm", chat_id, "30")),
-                     InlineKeyboardButton("60m", callback_data=cb(uid, "wpm", chat_id, "60"))],
-                    [InlineKeyboardButton("120m", callback_data=cb(uid, "wpm", chat_id, "120")),
-                     InlineKeyboardButton("240m", callback_data=cb(uid, "wpm", chat_id, "240"))],
-                    [InlineKeyboardButton("Back", callback_data=cb(uid, "wp", chat_id))]
-                ])
-                return await cq.message.edit_text("Set mute duration", reply_markup=kb)
             return await render_settings_page(cq, uid, chat_id, "wp")
-
-        if page == "wpm":
-            update_setting(chat_id, "warns_mute_minutes", int(extra))
-            return await render_settings_page(cq, uid, chat_id, "wp")
-
-        if page == "tg":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🪪 Buy the PRO", url="https://t.me")],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-            ])
-            return await cq.message.edit_text("🔔 Tag alert\n\nAvailable only for PRO groups.", reply_markup=kb)
 
         if page == "as":
             return await render_settings_page(cq, uid, chat_id, "as")
@@ -1975,9 +1777,6 @@ async def callback_handler(client, cq: CallbackQuery):
         if page == "ck":
             return await render_settings_page(cq, uid, chat_id, "ck")
 
-        if page == "cki":
-            return await cq.message.edit_text(("OBLIGATIONS" if extra == "o" else "NAME BLOCKS") + "\n\nInformational subpanel.", reply_markup=back_kb(uid, "ck", chat_id))
-
         if page == "cka":
             if extra == "j":
                 update_setting(chat_id, "check_at_join", 0 if s["check_at_join"] else 1)
@@ -1991,8 +1790,6 @@ async def callback_handler(client, cq: CallbackQuery):
                 [InlineKeyboardButton("🤖 Bot block", callback_data=cb(uid, "bls", chat_id, "bot"))],
                 [InlineKeyboardButton("🧑 Join block", callback_data=cb(uid, "bls", chat_id, "j"))],
                 [InlineKeyboardButton("🚪 Leave block", callback_data=cb(uid, "bls", chat_id, "l"))],
-                [InlineKeyboardButton("🏃 Join-Leave block", callback_data=cb(uid, "bls", chat_id, "jl"))],
-                [InlineKeyboardButton("Multiple joins bloc", callback_data=cb(uid, "bls", chat_id, "m"))],
                 [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
             return await cq.message.edit_text("🔐 Blocks", reply_markup=kb)
@@ -2006,7 +1803,7 @@ async def callback_handler(client, cq: CallbackQuery):
                     [InlineKeyboardButton("Back", callback_data=cb(uid, "bl", chat_id))]
                 ])
                 return await cq.message.edit_text("Blacklist", reply_markup=kb)
-            return await cq.message.edit_text("This block subfeature is not deeply configurable in this build.", reply_markup=back_kb(uid, "bl", chat_id))
+            return await cq.message.edit_text("This subfeature is informational in this build.", reply_markup=back_kb(uid, "bl", chat_id))
 
         if page == "bla":
             if extra == "a":
@@ -2019,13 +1816,6 @@ async def callback_handler(client, cq: CallbackQuery):
                 words = [w.strip() for w in s["banned_words"].split(",") if w.strip()]
                 await cq.message.reply_text("Blacklist\n\n" + (", ".join(words) if words else "Empty."))
                 return await cq.answer("Sent")
-
-        if page == "pn":
-            kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🪪 Buy the PRO", url="https://t.me")],
-                [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
-            ])
-            return await cq.message.edit_text("🔞 Porn\n\nAvailable only for PRO groups.", reply_markup=kb)
 
         if page == "ng":
             return await render_settings_page(cq, uid, chat_id, "ng")
@@ -2043,12 +1833,7 @@ async def callback_handler(client, cq: CallbackQuery):
                 [InlineKeyboardButton("✍🏻 Set", callback_data=cb(uid, "gla", chat_id, "s"))],
                 [InlineKeyboardButton("Back", callback_data=cb(uid, "sh", chat_id))]
             ])
-            txt = (
-                "🔗 Group link\n"
-                "Here you can set the link of the group, which\n"
-                "will be visible with the command /link.\n\n"
-                f"Status: {'Activated' if s['link_enabled'] and s['group_link'] else 'Deactivated'}"
-            )
+            txt = f"🔗 Group link\nStatus: {'Activated' if s['link_enabled'] and s['group_link'] else 'Deactivated'}"
             return await cq.message.edit_text(txt, reply_markup=kb)
 
         if page == "gla":
@@ -2147,13 +1932,13 @@ async def callback_handler(client, cq: CallbackQuery):
             max_len = int(s["max_message_length"])
 
             if extra == "min_minus":
-                update_setting(chat_id, "min_message_length", max(0, min_len - 1))
+                min_len = max(0, min_len - 1)
             elif extra == "min_plus":
-                update_setting(chat_id, "min_message_length", min(1000, min_len + 1))
+                min_len = min(1000, min_len + 1)
             elif extra == "max_minus":
-                update_setting(chat_id, "max_message_length", max(0, max_len - 5))
+                max_len = max(0, max_len - 5)
             elif extra == "max_plus":
-                update_setting(chat_id, "max_message_length", min(5000, max_len + 5))
+                max_len = min(5000, max_len + 5)
             elif extra == "short_delete":
                 update_setting(chat_id, "short_message_action", "delete")
             elif extra == "short_warn":
@@ -2163,10 +1948,14 @@ async def callback_handler(client, cq: CallbackQuery):
             elif extra == "long_warn":
                 update_setting(chat_id, "long_message_action", "warn")
             elif extra == "reset":
-                update_setting(chat_id, "min_message_length", 0)
-                update_setting(chat_id, "max_message_length", 0)
+                min_len = 0
+                max_len = 0
                 update_setting(chat_id, "short_message_action", "delete")
                 update_setting(chat_id, "long_message_action", "delete")
+
+            min_len, max_len = normalize_msglen(min_len, max_len)
+            update_setting(chat_id, "min_message_length", min_len)
+            update_setting(chat_id, "max_message_length", max_len)
 
             s2 = get_settings(chat_id)
             kb = InlineKeyboardMarkup([
