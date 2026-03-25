@@ -101,7 +101,6 @@ def is_group_chat(update: Update) -> bool:
 # -----------------------------
 def build_ydl_opts() -> dict:
     return {
-        "format": "bestaudio/best",
         "quiet": True,
         "noplaylist": True,
         "skip_download": True,
@@ -114,11 +113,11 @@ def build_ydl_opts() -> dict:
         "http_headers": {
             "User-Agent": YT_USER_AGENT
         },
-        "youtube_include_dash_manifest": False,
+        "youtube_include_dash_manifest": True,
         "youtube_include_hls_manifest": True,
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web"],
+                "player_client": ["android", "ios", "web"],
                 "player_skip": ["configs"],
             }
         },
@@ -142,38 +141,53 @@ def extract_audio_info(query: str) -> dict:
             info = entries[0]
 
         title = info.get("title") or "Unknown Title"
-        webpage_url = info.get("webpage_url") or info.get("original_url") or info.get("url")
+        webpage_url = (
+            info.get("webpage_url")
+            or info.get("original_url")
+            or info.get("url")
+        )
 
+        # Refresh using canonical page when possible
         if webpage_url and webpage_url != info.get("url"):
-            info = ydl.extract_info(webpage_url, download=False)
+            try:
+                info = ydl.extract_info(webpage_url, download=False)
+            except Exception:
+                pass
 
-        stream_url = None
+        formats = info.get("formats") or []
+        candidates = []
 
-        if info.get("url"):
-            stream_url = info.get("url")
+        for f in formats:
+            url = f.get("url")
+            acodec = f.get("acodec")
+            vcodec = f.get("vcodec")
+            protocol = f.get("protocol") or ""
+            ext = f.get("ext") or ""
+            abr = f.get("abr") or 0
+            asr = f.get("asr") or 0
 
-        if not stream_url:
-            formats = info.get("formats") or []
-            audio_formats = []
+            if not url:
+                continue
+            if acodec in (None, "none"):
+                continue
 
-            for f in formats:
-                acodec = f.get("acodec")
-                if acodec and acodec != "none":
-                    score = (
-                        (f.get("abr") or 0),
-                        (f.get("asr") or 0),
-                        (f.get("filesize") or 0),
-                    )
-                    audio_formats.append((score, f))
+            audio_only = 1 if vcodec == "none" else 0
+            ext_score = 2 if ext in ("m4a", "webm", "mp4") else 1
+            proto_score = 2 if protocol in ("https", "http", "m3u8_native", "m3u8") else 1
 
-            if audio_formats:
-                audio_formats.sort(key=lambda x: x[0], reverse=True)
-                stream_url = audio_formats[0][1].get("url")
+            score = (audio_only, ext_score, proto_score, abr, asr)
+            candidates.append((score, url))
 
-        webpage_url = info.get("webpage_url") or webpage_url
+        # Fallback: direct info url if available
+        direct_url = info.get("url")
+        if direct_url and info.get("acodec") not in (None, "none"):
+            candidates.append(((1, 1, 1, info.get("abr") or 0, info.get("asr") or 0), direct_url))
 
-        if not stream_url:
-            raise ValueError("Could not extract playable audio stream URL.")
+        if not candidates:
+            raise ValueError("Could not extract a playable audio stream URL.")
+
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        stream_url = candidates[0][1]
 
         return {
             "title": title,
