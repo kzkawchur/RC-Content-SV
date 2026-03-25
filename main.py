@@ -1,6 +1,5 @@
 import asyncio
 
-# Fix for Pyrogram startup on newer Python versions
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -17,7 +16,6 @@ import pyrogram.errors as pyro_errors
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
 
-# Compatibility shim for py-tgcalls -> pyrogram error import mismatch
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
@@ -25,18 +23,12 @@ from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import AudioQuality, MediaStream
 import yt_dlp
 
-# =========================
-# Logging
-# =========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("MusicBot")
 
-# =========================
-# Environment Variables
-# =========================
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -53,9 +45,6 @@ YT_USER_AGENT = os.environ.get(
     "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 
-# =========================
-# Flask Keep Alive Server
-# =========================
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -69,9 +58,6 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# =========================
-# Telegram Clients
-# =========================
 bot = Client(
     "music-bot",
     api_id=API_ID,
@@ -85,17 +71,11 @@ user = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
-    no_updates=True,
 )
 
 call_py = PyTgCalls(user)
-
-# Keep track of currently playing per chat
 ACTIVE_STREAMS = {}
 
-# =========================
-# yt-dlp helpers
-# =========================
 def is_url(text: str) -> bool:
     try:
         parsed = urlparse(text.strip())
@@ -121,14 +101,6 @@ def build_ydl_opts():
     }
 
 def extract_audio_info(query: str):
-    """
-    Returns:
-        {
-            "title": str,
-            "webpage_url": str,
-            "stream_url": str
-        }
-    """
     search_term = query.strip()
     if not is_url(search_term):
         search_term = f"ytsearch1:{search_term}"
@@ -148,7 +120,6 @@ def extract_audio_info(query: str):
         title = info.get("title") or "Unknown Title"
         webpage_url = info.get("webpage_url") or info.get("url")
 
-        # Re-extract direct media URL for better playback stability
         if webpage_url and webpage_url != info.get("url"):
             info = ydl.extract_info(webpage_url, download=False)
 
@@ -164,20 +135,33 @@ def extract_audio_info(query: str):
             "stream_url": stream_url,
         }
 
-# =========================
-# Command Handlers
-# =========================
+@bot.on_message(filters.all)
+async def debug_all_messages(_, message: Message):
+    try:
+        text = message.text or message.caption or "<non-text>"
+        logger.info(
+            "RECEIVED | chat_id=%s | chat_type=%s | from_user=%s | text=%s",
+            message.chat.id,
+            message.chat.type,
+            getattr(message.from_user, "id", None),
+            text
+        )
+    except Exception:
+        logger.exception("Debug logger failed")
+
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
-    text = (
+    await message.reply_text(
         "🎵 **Telegram Music Bot is alive!**\n\n"
         "**Commands:**\n"
         "`/play <YouTube link or search>`\n"
         "`/stop`\n\n"
-        "Bot and user account must both be in the group.\n"
-        "Voice chat must be started first."
+        "Group-এ use করার আগে:\n"
+        "1. Voice chat start করো\n"
+        "2. Bot-কে admin দাও\n"
+        "3. Bot privacy off করো\n"
+        "4. User account-টাকেও group-এ রাখো"
     )
-    await message.reply_text(text)
 
 @bot.on_message(filters.command("play") & filters.group)
 async def play_cmd(_, message: Message):
@@ -191,34 +175,30 @@ async def play_cmd(_, message: Message):
 
     try:
         info = await asyncio.to_thread(extract_audio_info, query)
-        title = info["title"]
-        stream_url = info["stream_url"]
-        webpage_url = info["webpage_url"]
 
-        await status.edit_text("⏳ Starting stream in voice chat...")
-
-        # Stop previous stream if any
         try:
             await call_py.leave_call(chat_id)
         except Exception:
             pass
 
+        await status.edit_text("⏳ Starting stream in voice chat...")
+
         await call_py.play(
             chat_id,
             MediaStream(
-                stream_url,
+                info["stream_url"],
                 audio_quality=AudioQuality.LOW,
             ),
         )
 
         ACTIVE_STREAMS[chat_id] = {
-            "title": title,
-            "url": webpage_url,
+            "title": info["title"],
+            "url": info["webpage_url"],
         }
 
         await status.edit_text(
-            f"▶️ **Now Playing:** {title}\n"
-            f"🔗 {webpage_url}"
+            f"▶️ **Now Playing:** {info['title']}\n"
+            f"🔗 {info['webpage_url']}"
         )
 
     except FloodWait as e:
@@ -230,7 +210,6 @@ async def play_cmd(_, message: Message):
 @bot.on_message(filters.command("stop") & filters.group)
 async def stop_cmd(_, message: Message):
     chat_id = message.chat.id
-
     try:
         await call_py.leave_call(chat_id)
         ACTIVE_STREAMS.pop(chat_id, None)
@@ -239,9 +218,6 @@ async def stop_cmd(_, message: Message):
         logger.exception("Stop command failed")
         await message.reply_text(f"❌ Failed to stop.\n`{e}`")
 
-# =========================
-# Startup
-# =========================
 async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
