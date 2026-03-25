@@ -1,15 +1,25 @@
-FROM python:3.9-slim-buster
+FROM python:3.11-slim
 
-RUN apt-get update && apt-get upgrade -y && \
-    apt-get install -y ffmpeg opus-tools python3-pip python3-dev gcc g++ make cmake
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 WORKDIR /app
-COPY . /app/
 
-RUN pip3 install --no-cache-dir -U pip
-# এখানে force-reinstall ব্যবহার করা হয়েছে যাতে কোনো পুরোনো ক্যাশ ঝামেলা না করে
-RUN pip3 install --no-cache-dir -r requirements.txt
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    build-essential \
+    python3-dev \
+    cmake \
+    git \
+    && rm -rf /var/lib/apt/lists/*
 
-ENV PYTHONUNBUFFERED=1
+COPY requirements.txt .
+RUN pip install --upgrade pip setuptools wheel && \
+    pip install -r requirements.txt
 
-CMD ["python3", "main.py"]
+COPY . .
+
+EXPOSE 8080
+
+CMD ["python", "main.py"]
