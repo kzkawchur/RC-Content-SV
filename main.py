@@ -2,7 +2,6 @@ import asyncio
 import logging
 import os
 import re
-import shutil
 import sqlite3
 import threading
 import time
@@ -222,6 +221,7 @@ async def cleanup_chat_file(chat_id: int):
     if path and os.path.exists(path):
         try:
             os.remove(path)
+            logger.info("Removed temp file: %s", path)
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
 
@@ -240,7 +240,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/stop\n"
         "/listsongs\n"
         "/searchsong <keyword>\n"
-        "/delsong <name>\n\n"
+        "/delsong <name>\n"
+        "/nowplaying\n\n"
         "How to use:\n"
         "1. Send or forward an audio file to me in private chat\n"
         "2. Reply to that file with /addsong <name>\n"
@@ -367,18 +368,16 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         try:
             await call_py.leave_call(chat_id)
-            await cleanup_chat_file(chat_id)
         except Exception:
             pass
+
+        await cleanup_chat_file(chat_id)
 
         await status.edit_text("Starting voice chat stream...")
 
         await call_py.play(
             chat_id,
-            MediaStream(
-                str(local_path),
-                audio_quality=AudioQuality.LOW,
-            ),
+            MediaStream(str(local_path)),
         )
 
         ACTIVE_STREAMS[chat_id] = {
