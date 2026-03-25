@@ -1,5 +1,7 @@
+
 pyrogram
-pytgcalls[wayland]
+pytgcalls
+ntgcalls
 yt-dlp
 TgCrypto
 flask
