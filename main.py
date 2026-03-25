@@ -71,6 +71,7 @@ user = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
+    no_updates=True,
 )
 
 call_py = PyTgCalls(user)
@@ -135,20 +136,6 @@ def extract_audio_info(query: str):
             "stream_url": stream_url,
         }
 
-@bot.on_message(filters.all)
-async def debug_all_messages(_, message: Message):
-    try:
-        text = message.text or message.caption or "<non-text>"
-        logger.info(
-            "RECEIVED | chat_id=%s | chat_type=%s | from_user=%s | text=%s",
-            message.chat.id,
-            message.chat.type,
-            getattr(message.from_user, "id", None),
-            text
-        )
-    except Exception:
-        logger.exception("Debug logger failed")
-
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
     await message.reply_text(
@@ -156,11 +143,11 @@ async def start_cmd(_, message: Message):
         "**Commands:**\n"
         "`/play <YouTube link or search>`\n"
         "`/stop`\n\n"
-        "Group-এ use করার আগে:\n"
-        "1. Voice chat start করো\n"
-        "2. Bot-কে admin দাও\n"
-        "3. Bot privacy off করো\n"
-        "4. User account-টাকেও group-এ রাখো"
+        "Before using in group:\n"
+        "1. Start voice chat\n"
+        "2. Make bot admin\n"
+        "3. Turn bot privacy OFF in BotFather\n"
+        "4. Add the user account to the group"
     )
 
 @bot.on_message(filters.command("play") & filters.group)
