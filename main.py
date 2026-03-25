@@ -13,7 +13,7 @@ from flask import Flask
 from pyrogram import Client as PyroClient
 import pyrogram.errors as pyro_errors
 from pytgcalls import PyTgCalls
-from pytgcalls.types import AudioQuality, MediaStream
+from pytgcalls.types import MediaStream
 from telegram import BotCommand, Update
 from telegram.ext import (
     Application,
