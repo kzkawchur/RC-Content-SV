@@ -152,35 +152,36 @@ async def debug_incoming(_, message: Message):
 
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
-    try:
-        await message.reply_text(
-            "🎵 Bot is alive.\n\n"
-            "Commands:\n"
-            "/ping\n"
-            "/play <song name or youtube link>\n"
-            "/stop"
-        )
-    except Exception:
-        logger.exception("start_cmd failed")
+    await message.reply_text(
+        "🎵 Bot is alive.\n\n"
+        "Commands:\n"
+        "/ping\n"
+        "/id\n"
+        "/play <song name or youtube link>\n"
+        "/stop"
+    )
 
 @bot.on_message(filters.command("ping"))
 async def ping_cmd(_, message: Message):
-    try:
-        await message.reply_text("pong")
-    except Exception:
-        logger.exception("ping_cmd failed")
+    await message.reply_text("pong")
+
+@bot.on_message(filters.command("id"))
+async def id_cmd(_, message: Message):
+    await message.reply_text(
+        f"chat_id: `{message.chat.id}`\nchat_type: `{message.chat.type}`"
+    )
 
 @bot.on_message(filters.command("play") & filters.group)
 async def play_cmd(_, message: Message):
+    if len(message.command) < 2:
+        await message.reply_text("Usage:\n/play <YouTube link or search>")
+        return
+
+    query = message.text.split(None, 1)[1].strip()
+    chat_id = message.chat.id
+    status = await message.reply_text("🔎 Searching YouTube...")
+
     try:
-        if len(message.command) < 2:
-            await message.reply_text("Usage:\n/play <YouTube link or search>")
-            return
-
-        query = message.text.split(None, 1)[1].strip()
-        chat_id = message.chat.id
-        status = await message.reply_text("🔎 Searching YouTube...")
-
         info = await asyncio.to_thread(extract_audio_info, query)
 
         try:
@@ -206,6 +207,7 @@ async def play_cmd(_, message: Message):
         await status.edit_text(
             f"▶️ Now Playing: {info['title']}\n{info['webpage_url']}"
         )
+
     except FloodWait as e:
         await message.reply_text(f"Flood wait: {e.value}s")
     except Exception as e:
@@ -230,6 +232,13 @@ async def main():
 
     await bot.start()
     logger.info("Bot client started")
+
+    # important: remove webhook so polling can receive updates
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook deleted successfully")
+    except Exception:
+        logger.exception("Failed to delete webhook")
 
     await user.start()
     logger.info("User client started")
