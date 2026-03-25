@@ -20,6 +20,7 @@ from telegram.ext import (
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioQuality, MediaStream
 
+# Compatibility shim for py-tgcalls + pyrogram
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
@@ -47,11 +48,14 @@ YT_USER_AGENT = os.environ.get(
 RAW_COOKIES_FILE = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
 RUNTIME_COOKIES_FILE = "/tmp/cookies.txt"
 
+# -----------------------------
+# Flask keep-alive
+# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
 def home():
-    return "Stable Telegram Music Bot is running!"
+    return "Telegram Music Bot is running!"
 
 @flask_app.get("/health")
 def health():
@@ -60,6 +64,9 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
+# -----------------------------
+# Utility helpers
+# -----------------------------
 def delete_webhook():
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
@@ -78,19 +85,6 @@ def prepare_cookies_file():
     except Exception:
         logger.exception("Failed to prepare cookies file")
 
-voice_user = PyroClient(
-    "voice-user",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING,
-    no_updates=True,
-)
-
-call_py = PyTgCalls(voice_user)
-ACTIVE_STREAMS: dict[int, dict[str, str]] = {}
-
-tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-
 def is_url(text: str) -> bool:
     try:
         p = urlparse(text.strip())
@@ -98,6 +92,13 @@ def is_url(text: str) -> bool:
     except Exception:
         return False
 
+def is_group_chat(update: Update) -> bool:
+    chat = update.effective_chat
+    return bool(chat and chat.type in ("group", "supergroup"))
+
+# -----------------------------
+# yt-dlp
+# -----------------------------
 def build_ydl_opts() -> dict:
     return {
         "format": "bestaudio/best",
@@ -112,6 +113,14 @@ def build_ydl_opts() -> dict:
         "cookiefile": RUNTIME_COOKIES_FILE if os.path.exists(RUNTIME_COOKIES_FILE) else None,
         "http_headers": {
             "User-Agent": YT_USER_AGENT
+        },
+        "youtube_include_dash_manifest": False,
+        "youtube_include_hls_manifest": True,
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["android", "web"],
+                "player_skip": ["configs"],
+            }
         },
     }
 
@@ -133,16 +142,38 @@ def extract_audio_info(query: str) -> dict:
             info = entries[0]
 
         title = info.get("title") or "Unknown Title"
-        webpage_url = info.get("webpage_url") or info.get("url")
+        webpage_url = info.get("webpage_url") or info.get("original_url") or info.get("url")
 
         if webpage_url and webpage_url != info.get("url"):
             info = ydl.extract_info(webpage_url, download=False)
 
-        stream_url = info.get("url")
+        stream_url = None
+
+        if info.get("url"):
+            stream_url = info.get("url")
+
+        if not stream_url:
+            formats = info.get("formats") or []
+            audio_formats = []
+
+            for f in formats:
+                acodec = f.get("acodec")
+                if acodec and acodec != "none":
+                    score = (
+                        (f.get("abr") or 0),
+                        (f.get("asr") or 0),
+                        (f.get("filesize") or 0),
+                    )
+                    audio_formats.append((score, f))
+
+            if audio_formats:
+                audio_formats.sort(key=lambda x: x[0], reverse=True)
+                stream_url = audio_formats[0][1].get("url")
+
         webpage_url = info.get("webpage_url") or webpage_url
 
         if not stream_url:
-            raise ValueError("Could not extract audio stream URL.")
+            raise ValueError("Could not extract playable audio stream URL.")
 
         return {
             "title": title,
@@ -150,21 +181,36 @@ def extract_audio_info(query: str) -> dict:
             "stream_url": stream_url,
         }
 
-def is_group_chat(update: Update) -> bool:
-    chat = update.effective_chat
-    return bool(chat and chat.type in ("group", "supergroup"))
+# -----------------------------
+# Voice side
+# -----------------------------
+voice_user = PyroClient(
+    "voice-user",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING,
+    no_updates=True,
+)
+
+call_py = PyTgCalls(voice_user)
+ACTIVE_STREAMS: dict[int, dict[str, str]] = {}
+
+# -----------------------------
+# Bot side
+# -----------------------------
+tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "🎵 Bot is alive.\n\n"
-        "Commands:\n"
+        "Hello! I am your Telegram Music Bot.\n\n"
+        "Available commands:\n"
         "/ping\n"
-        "/play <song name or youtube link>\n"
+        "/play <song name or YouTube link>\n"
         "/stop\n\n"
-        "Group-এ use করার আগে:\n"
-        "1) Voice chat start করো\n"
-        "2) Bot-কে admin দাও\n"
-        "3) User account-টাকেও group-এ রাখো"
+        "Before using /play in a group:\n"
+        "1. Start a voice chat first\n"
+        "2. Make the bot an admin\n"
+        "3. Make sure the user session account is also in the group"
     )
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -172,16 +218,20 @@ async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_group_chat(update):
-        await update.effective_message.reply_text("`/play` শুধু group/supergroup-এ use করো।", parse_mode="Markdown")
+        await update.effective_message.reply_text(
+            "The /play command can only be used in a group or supergroup."
+        )
         return
 
     if not context.args:
-        await update.effective_message.reply_text("Usage:\n/play <YouTube link or search>")
+        await update.effective_message.reply_text(
+            "Usage:\n/play <song name or YouTube link>"
+        )
         return
 
     chat_id = update.effective_chat.id
     query = " ".join(context.args).strip()
-    status = await update.effective_message.reply_text("🔎 Searching YouTube...")
+    status = await update.effective_message.reply_text("Searching YouTube...")
 
     try:
         info = await asyncio.to_thread(extract_audio_info, query)
@@ -191,7 +241,7 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
-        await status.edit_text("⏳ Starting stream in voice chat...")
+        await status.edit_text("Starting stream in voice chat...")
 
         await call_py.play(
             chat_id,
@@ -207,16 +257,18 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         }
 
         await status.edit_text(
-            f"▶️ Now Playing: {info['title']}\n{info['webpage_url']}"
+            f"Now playing: {info['title']}\n{info['webpage_url']}"
         )
 
     except Exception as e:
         logger.exception("play_cmd failed")
-        await status.edit_text(f"❌ Play failed:\n{e}")
+        await status.edit_text(f"Play failed:\n{e}")
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_group_chat(update):
-        await update.effective_message.reply_text("`/stop` শুধু group/supergroup-এ use করো।", parse_mode="Markdown")
+        await update.effective_message.reply_text(
+            "The /stop command can only be used in a group or supergroup."
+        )
         return
 
     chat_id = update.effective_chat.id
@@ -224,19 +276,22 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         await call_py.leave_call(chat_id)
         ACTIVE_STREAMS.pop(chat_id, None)
-        await update.effective_message.reply_text("⏹️ Stopped.")
+        await update.effective_message.reply_text("Stopped the stream.")
     except Exception as e:
         logger.exception("stop_cmd failed")
-        await update.effective_message.reply_text(f"❌ Stop failed:\n{e}")
+        await update.effective_message.reply_text(f"Stop failed:\n{e}")
 
 async def setup_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("start", "Start the bot"),
         BotCommand("ping", "Health check"),
         BotCommand("play", "Play music in voice chat"),
-        BotCommand("stop", "Stop current stream"),
+        BotCommand("stop", "Stop the current stream"),
     ])
 
+# -----------------------------
+# Main
+# -----------------------------
 async def main() -> None:
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -269,7 +324,7 @@ async def main() -> None:
 
         me_bot = await tg_app.bot.get_me()
         logger.info("Bot logged in as: @%s", me_bot.username)
-        logger.info("Stable bot fully running")
+        logger.info("Music bot is fully running")
 
         await asyncio.Event().wait()
 
