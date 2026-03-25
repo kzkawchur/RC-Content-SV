@@ -4,3 +4,4 @@ tgcrypto==1.2.5
 py-tgcalls[pyrogram]==2.2.11
 yt-dlp==2026.3.17
 uvloop==0.21.0; platform_system != "Windows"
+requests==2.32.3
