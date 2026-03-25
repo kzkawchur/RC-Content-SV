@@ -10,6 +10,7 @@ import os
 import threading
 from urllib.parse import urlparse
 
+import requests
 from flask import Flask
 from pyrogram import Client, filters
 import pyrogram.errors as pyro_errors
@@ -57,6 +58,14 @@ def health():
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
+
+def delete_webhook_via_bot_api():
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+        r = requests.get(url, params={"drop_pending_updates": "true"}, timeout=20)
+        logger.info("deleteWebhook response: %s", r.text)
+    except Exception:
+        logger.exception("Failed to delete webhook via Bot API")
 
 bot = Client(
     "music-bot",
@@ -230,15 +239,10 @@ async def main():
     flask_thread.start()
     logger.info("Flask keep-alive server started on port %s", PORT)
 
+    delete_webhook_via_bot_api()
+
     await bot.start()
     logger.info("Bot client started")
-
-    # important: remove webhook so polling can receive updates
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Webhook deleted successfully")
-    except Exception:
-        logger.exception("Failed to delete webhook")
 
     await user.start()
     logger.info("User client started")
