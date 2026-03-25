@@ -20,7 +20,6 @@ from telegram.ext import (
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioQuality, MediaStream
 
-# Compatibility shim for py-tgcalls + pyrogram
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
@@ -28,7 +27,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("MUSO_DOCKER")
+logger = logging.getLogger("MUSO_V3")
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -48,25 +47,19 @@ YT_USER_AGENT = os.environ.get(
 RAW_COOKIES_FILE = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
 RUNTIME_COOKIES_FILE = "/tmp/cookies.txt"
 
-# -----------------------------
-# Flask keep-alive
-# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
 def home():
-    return "MUSO Docker Bot is running!"
+    return "MUSO V3 is running!"
 
 @flask_app.get("/health")
 def health():
-    return {"status": "ok", "mode": "docker"}
+    return {"status": "ok", "version": "MUSO_V3"}
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def delete_webhook():
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
@@ -96,9 +89,6 @@ def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type in ("group", "supergroup"))
 
-# -----------------------------
-# yt-dlp
-# -----------------------------
 def build_ydl_opts() -> dict:
     return {
         "quiet": True,
@@ -115,7 +105,7 @@ def build_ydl_opts() -> dict:
         },
         "extractor_args": {
             "youtube": {
-                "player_client": ["android", "web", "ios"],
+                "player_client": ["android"],
                 "player_skip": ["configs"],
             }
         },
@@ -145,37 +135,19 @@ def extract_audio_info(query: str) -> dict:
         formats = info.get("formats") or []
         stream_url = None
 
-        # Prefer audio-only formats first
-        preferred = []
-        fallback = []
-
         for f in formats:
-            url = f.get("url")
-            if not url:
+            if not f.get("url"):
                 continue
-
-            acodec = f.get("acodec")
-            vcodec = f.get("vcodec")
-            if acodec in (None, "none"):
+            if f.get("acodec") in (None, "none"):
                 continue
+            stream_url = f["url"]
+            break
 
-            if vcodec == "none":
-                preferred.append(url)
-            else:
-                fallback.append(url)
-
-        if preferred:
-            stream_url = preferred[0]
-        elif fallback:
-            stream_url = fallback[0]
-        elif info.get("url") and info.get("acodec") not in (None, "none"):
+        if not stream_url and info.get("url") and info.get("acodec") not in (None, "none"):
             stream_url = info["url"]
 
         if not stream_url:
-            raise ValueError(
-                "Could not extract a playable audio stream from this YouTube result. "
-                "Try another link or search."
-            )
+            raise ValueError("MUSO V3 could not extract a playable audio stream.")
 
         return {
             "title": title,
@@ -183,9 +155,6 @@ def extract_audio_info(query: str) -> dict:
             "stream_url": stream_url,
         }
 
-# -----------------------------
-# Voice side
-# -----------------------------
 voice_user = PyroClient(
     "voice-user",
     api_id=API_ID,
@@ -195,32 +164,24 @@ voice_user = PyroClient(
 )
 
 call_py = PyTgCalls(voice_user)
-
-# -----------------------------
-# Bot side
-# -----------------------------
 tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Hello! I am MUSO Docker Bot.\n\n"
+        "MUSO V3 is online.\n\n"
         "Commands:\n"
         "/ping\n"
         "/play <song name or YouTube link>\n"
-        "/stop\n\n"
-        "Before using /play in a group:\n"
-        "1. Start a voice chat first\n"
-        "2. Make the bot an admin\n"
-        "3. Make sure the user session account is also in the group"
+        "/stop"
     )
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("pong - MUSO Docker")
+    await update.effective_message.reply_text("pong - MUSO V3")
 
 async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_group_chat(update):
         await update.effective_message.reply_text(
-            "The /play command can only be used in a group or supergroup."
+            "The /play command only works in groups."
         )
         return
 
@@ -232,7 +193,7 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     chat_id = update.effective_chat.id
     query = " ".join(context.args).strip()
-    status = await update.effective_message.reply_text("Searching YouTube...")
+    status = await update.effective_message.reply_text("MUSO V3: Searching...")
 
     try:
         info = await asyncio.to_thread(extract_audio_info, query)
@@ -242,7 +203,7 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
-        await status.edit_text("Starting stream in voice chat...")
+        await status.edit_text("MUSO V3: Starting voice chat stream...")
 
         await call_py.play(
             chat_id,
@@ -253,26 +214,26 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
         await status.edit_text(
-            f"Now playing:\n{info['title']}\n{info['webpage_url']}"
+            f"MUSO V3: Now playing\n{info['title']}\n{info['webpage_url']}"
         )
 
     except Exception as e:
         logger.exception("play_cmd failed")
-        await status.edit_text(f"Play failed:\n{e}")
+        await status.edit_text(f"MUSO V3 play failed:\n{e}")
 
 async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_group_chat(update):
         await update.effective_message.reply_text(
-            "The /stop command can only be used in a group or supergroup."
+            "The /stop command only works in groups."
         )
         return
 
     try:
         await call_py.leave_call(update.effective_chat.id)
-        await update.effective_message.reply_text("Stopped the stream.")
+        await update.effective_message.reply_text("MUSO V3 stopped the stream.")
     except Exception as e:
         logger.exception("stop_cmd failed")
-        await update.effective_message.reply_text(f"Stop failed:\n{e}")
+        await update.effective_message.reply_text(f"MUSO V3 stop failed:\n{e}")
 
 async def setup_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands([
@@ -282,9 +243,6 @@ async def setup_bot_commands(app: Application) -> None:
         BotCommand("stop", "Stop the current stream"),
     ])
 
-# -----------------------------
-# Main
-# -----------------------------
 async def main() -> None:
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -314,7 +272,7 @@ async def main() -> None:
 
         me_bot = await tg_app.bot.get_me()
         logger.info("Bot logged in as: @%s", me_bot.username)
-        logger.info("MUSO Docker fully running")
+        logger.info("MUSO V3 fully running")
 
         await asyncio.Event().wait()
 
