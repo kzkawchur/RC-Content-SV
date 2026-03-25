@@ -1,6 +1,6 @@
 import asyncio
 
-# Fix for Pyrogram on Python 3.14+/Render startup
+# Pyrogram startup fix
 try:
     asyncio.get_event_loop()
 except RuntimeError:
@@ -13,28 +13,31 @@ from urllib.parse import urlparse
 
 from flask import Flask
 from pyrogram import Client, filters
+import pyrogram.errors as pyro_errors
 from pyrogram.errors import FloodWait
 from pyrogram.types import Message
+
+# Compatibility shim for py-tgcalls -> pyrogram error import mismatch
+if not hasattr(pyro_errors, "GroupcallForbidden"):
+    pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
+
 from pytgcalls import PyTgCalls, idle
 from pytgcalls.types import AudioQuality, MediaStream
 import yt_dlp
 
-# =========================
-# Logging
-# =========================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
 logger = logging.getLogger("MusicBot")
 
-# =========================
-# Environment Variables
-# =========================
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+SESSION_STRING = os.environ.get("SESSION_STRING") or os.environ.get("STRING_SESSION")
+
+if not SESSION_STRING:
+    raise RuntimeError("Missing SESSION_STRING or STRING_SESSION")
 
 PORT = int(os.environ.get("PORT", 8080))
 COOKIES_FILE = os.environ.get("COOKIES_FILE", "cookies.txt")
@@ -44,9 +47,6 @@ YT_USER_AGENT = os.environ.get(
     "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 )
 
-# =========================
-# Flask Keep Alive Server
-# =========================
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -60,9 +60,6 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# =========================
-# Telegram Clients
-# =========================
 bot = Client(
     "music-bot",
     api_id=API_ID,
@@ -80,13 +77,8 @@ user = Client(
 )
 
 call_py = PyTgCalls(user)
-
-# Keep track of currently playing source per chat
 ACTIVE_STREAMS = {}
 
-# =========================
-# yt-dlp helpers
-# =========================
 def is_url(text: str) -> bool:
     try:
         parsed = urlparse(text.strip())
@@ -95,7 +87,7 @@ def is_url(text: str) -> bool:
         return False
 
 def build_ydl_opts():
-    opts = {
+    return {
         "format": "bestaudio/best",
         "quiet": True,
         "noplaylist": True,
@@ -110,24 +102,13 @@ def build_ydl_opts():
             "User-Agent": YT_USER_AGENT
         },
     }
-    return opts
 
 def extract_audio_info(query: str):
-    """
-    Returns:
-        {
-            "title": str,
-            "webpage_url": str,
-            "stream_url": str
-        }
-    """
     search_term = query.strip()
     if not is_url(search_term):
         search_term = f"ytsearch1:{search_term}"
 
-    ydl_opts = build_ydl_opts()
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(build_ydl_opts()) as ydl:
         info = ydl.extract_info(search_term, download=False)
 
         if not info:
@@ -142,7 +123,6 @@ def extract_audio_info(query: str):
         title = info.get("title") or "Unknown Title"
         webpage_url = info.get("webpage_url") or info.get("url")
 
-        # Re-extract direct media URL for better playback stability
         if webpage_url and webpage_url != info.get("url"):
             info = ydl.extract_info(webpage_url, download=False)
 
@@ -158,12 +138,9 @@ def extract_audio_info(query: str):
             "stream_url": stream_url,
         }
 
-# =========================
-# Command Handlers
-# =========================
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
-    text = (
+    await message.reply_text(
         "🎵 **Telegram Music Bot is alive!**\n\n"
         "**Commands:**\n"
         "`/play <YouTube link or search>`\n"
@@ -171,7 +148,6 @@ async def start_cmd(_, message: Message):
         "Bot and user account must both be in the group.\n"
         "Voice chat must be started first."
     )
-    await message.reply_text(text)
 
 @bot.on_message(filters.command("play") & (filters.group | filters.supergroup))
 async def play_cmd(_, message: Message):
@@ -181,62 +157,53 @@ async def play_cmd(_, message: Message):
 
     query = message.text.split(None, 1)[1].strip()
     chat_id = message.chat.id
-
     status = await message.reply_text("🔎 Searching YouTube...")
 
     try:
         info = await asyncio.to_thread(extract_audio_info, query)
-        title = info["title"]
-        stream_url = info["stream_url"]
-        webpage_url = info["webpage_url"]
 
-        await status.edit_text("⏳ Starting stream in voice chat...")
-
-        # Stop previous stream in this chat if any
         try:
             await call_py.leave_call(chat_id)
         except Exception:
             pass
 
+        await status.edit_text("⏳ Starting stream in voice chat...")
+
         await call_py.play(
             chat_id,
             MediaStream(
-                stream_url,
+                info["stream_url"],
                 audio_quality=AudioQuality.LOW,
             ),
         )
 
         ACTIVE_STREAMS[chat_id] = {
-            "title": title,
-            "url": webpage_url,
+            "title": info["title"],
+            "url": info["webpage_url"],
         }
 
         await status.edit_text(
-            f"▶️ **Now Playing:** {title}\n"
-            f"🔗 {webpage_url}"
+            f"▶️ **Now Playing:** {info['title']}\n"
+            f"🔗 {info['webpage_url']}"
         )
 
     except FloodWait as e:
         await status.edit_text(f"⏳ Flood wait: {e.value} seconds.")
     except Exception as e:
         logger.exception("Play command failed")
-        await status.edit_text(f"❌ Failed to play.\n`{str(e)}`")
+        await status.edit_text(f"❌ Failed to play.\n`{e}`")
 
 @bot.on_message(filters.command("stop") & (filters.group | filters.supergroup))
 async def stop_cmd(_, message: Message):
     chat_id = message.chat.id
-
     try:
         await call_py.leave_call(chat_id)
         ACTIVE_STREAMS.pop(chat_id, None)
         await message.reply_text("⏹️ Stopped streaming and left the voice chat.")
     except Exception as e:
         logger.exception("Stop command failed")
-        await message.reply_text(f"❌ Failed to stop.\n`{str(e)}`")
+        await message.reply_text(f"❌ Failed to stop.\n`{e}`")
 
-# =========================
-# Startup
-# =========================
 async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
@@ -257,7 +224,6 @@ async def main():
     logger.info("Bot logged in as: @%s", me_bot.username)
     logger.info("User logged in as: %s", me_user.first_name)
 
-    logger.info("Music bot is fully running.")
     await idle()
 
 if __name__ == "__main__":
