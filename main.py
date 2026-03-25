@@ -20,6 +20,7 @@ from telegram.ext import (
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioQuality, MediaStream
 
+# Compatibility shim for py-tgcalls + pyrogram
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
@@ -27,7 +28,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("MUSO_SIMPLE")
+logger = logging.getLogger("MUSO_DOCKER")
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -54,11 +55,11 @@ flask_app = Flask(__name__)
 
 @flask_app.get("/")
 def home():
-    return "MUSO Simple Bot is running!"
+    return "MUSO Docker Bot is running!"
 
 @flask_app.get("/health")
 def health():
-    return {"status": "ok", "mode": "simple"}
+    return {"status": "ok", "mode": "docker"}
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
@@ -95,14 +96,6 @@ def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type in ("group", "supergroup"))
 
-def is_youtube_url(text: str) -> bool:
-    try:
-        p = urlparse(text.strip())
-        host = (p.netloc or "").lower()
-        return "youtube.com" in host or "youtu.be" in host
-    except Exception:
-        return False
-
 # -----------------------------
 # yt-dlp
 # -----------------------------
@@ -112,6 +105,7 @@ def build_ydl_opts() -> dict:
         "noplaylist": True,
         "skip_download": True,
         "extract_flat": False,
+        "default_search": "ytsearch1",
         "nocheckcertificate": True,
         "geo_bypass": True,
         "geo_bypass_country": "US",
@@ -121,40 +115,66 @@ def build_ydl_opts() -> dict:
         },
         "extractor_args": {
             "youtube": {
-                "player_client": ["android"],
+                "player_client": ["android", "web", "ios"],
                 "player_skip": ["configs"],
             }
         },
+        "format": "bestaudio[acodec!=none]/best[acodec!=none]/best",
     }
 
-def extract_audio_info(youtube_url: str) -> dict:
+def extract_audio_info(query: str) -> dict:
+    search_term = query.strip()
+    if not is_url(search_term):
+        search_term = f"ytsearch1:{search_term}"
+
     with yt_dlp.YoutubeDL(build_ydl_opts()) as ydl:
-        info = ydl.extract_info(youtube_url, download=False)
+        info = ydl.extract_info(search_term, download=False)
 
         if not info:
-            raise ValueError("No media information found.")
+            raise ValueError("No results found.")
+
+        if "entries" in info:
+            entries = info.get("entries") or []
+            if not entries:
+                raise ValueError("No results found.")
+            info = entries[0]
 
         title = info.get("title") or "Unknown Title"
-        webpage_url = info.get("webpage_url") or info.get("original_url") or youtube_url
+        webpage_url = info.get("webpage_url") or info.get("original_url") or query
 
         formats = info.get("formats") or []
         stream_url = None
 
-        for f in formats:
-            if not f.get("url"):
-                continue
-            if f.get("acodec") in (None, "none"):
-                continue
-            stream_url = f["url"]
-            break
+        # Prefer audio-only formats first
+        preferred = []
+        fallback = []
 
-        if not stream_url and info.get("url") and info.get("acodec") not in (None, "none"):
+        for f in formats:
+            url = f.get("url")
+            if not url:
+                continue
+
+            acodec = f.get("acodec")
+            vcodec = f.get("vcodec")
+            if acodec in (None, "none"):
+                continue
+
+            if vcodec == "none":
+                preferred.append(url)
+            else:
+                fallback.append(url)
+
+        if preferred:
+            stream_url = preferred[0]
+        elif fallback:
+            stream_url = fallback[0]
+        elif info.get("url") and info.get("acodec") not in (None, "none"):
             stream_url = info["url"]
 
         if not stream_url:
             raise ValueError(
-                "Could not extract playable audio from this YouTube link. "
-                "Try another direct YouTube video link."
+                "Could not extract a playable audio stream from this YouTube result. "
+                "Try another link or search."
             )
 
         return {
@@ -183,20 +203,19 @@ tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Hello! I am MUSO Simple.\n\n"
+        "Hello! I am MUSO Docker Bot.\n\n"
         "Commands:\n"
         "/ping\n"
-        "/play <direct YouTube link>\n"
+        "/play <song name or YouTube link>\n"
         "/stop\n\n"
-        "Important:\n"
-        "- /play currently supports direct YouTube links only\n"
-        "- Start a voice chat before using /play\n"
-        "- Make the bot an admin\n"
-        "- Make sure the user session account is also in the group"
+        "Before using /play in a group:\n"
+        "1. Start a voice chat first\n"
+        "2. Make the bot an admin\n"
+        "3. Make sure the user session account is also in the group"
     )
 
 async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("pong - MUSO Simple")
+    await update.effective_message.reply_text("pong - MUSO Docker")
 
 async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_group_chat(update):
@@ -207,21 +226,13 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     if not context.args:
         await update.effective_message.reply_text(
-            "Usage:\n/play <direct YouTube link>"
-        )
-        return
-
-    query = " ".join(context.args).strip()
-    if not is_url(query) or not is_youtube_url(query):
-        await update.effective_message.reply_text(
-            "Please send a direct YouTube video link.\n\n"
-            "Example:\n"
-            "/play https://youtu.be/xxxxxxxxxxx"
+            "Usage:\n/play <song name or YouTube link>"
         )
         return
 
     chat_id = update.effective_chat.id
-    status = await update.effective_message.reply_text("Checking YouTube link...")
+    query = " ".join(context.args).strip()
+    status = await update.effective_message.reply_text("Searching YouTube...")
 
     try:
         info = await asyncio.to_thread(extract_audio_info, query)
@@ -231,7 +242,7 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             pass
 
-        await status.edit_text("Starting voice chat stream...")
+        await status.edit_text("Starting stream in voice chat...")
 
         await call_py.play(
             chat_id,
@@ -267,7 +278,7 @@ async def setup_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("start", "Start the bot"),
         BotCommand("ping", "Health check"),
-        BotCommand("play", "Play direct YouTube link"),
+        BotCommand("play", "Play music in voice chat"),
         BotCommand("stop", "Stop the current stream"),
     ])
 
@@ -303,7 +314,7 @@ async def main() -> None:
 
         me_bot = await tg_app.bot.get_me()
         logger.info("Bot logged in as: @%s", me_bot.username)
-        logger.info("MUSO Simple fully running")
+        logger.info("MUSO Docker fully running")
 
         await asyncio.Event().wait()
 
