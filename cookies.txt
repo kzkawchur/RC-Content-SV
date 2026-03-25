@@ -1,17 +1,12 @@
 # Netscape HTTP Cookie File
-# This is a template file.
-# Replace these example lines with real YouTube cookies exported from your browser.
-# Do NOT share your real cookies publicly.
-#
-# Format:
-# domain<TAB>include_subdomains<TAB>path<TAB>secure<TAB>expiry<TAB>name<TAB>value
-#
-# Example only:
+# Replace the example values below with your real exported YouTube cookies.
+# Do NOT upload your real cookies to a public GitHub repo.
+
 .youtube.com	TRUE	/	TRUE	2147483647	VISITOR_INFO1_LIVE	example_value_here
 .youtube.com	TRUE	/	TRUE	2147483647	PREF	tz=Asia.Dhaka
 .youtube.com	TRUE	/	TRUE	2147483647	YSC	example_session_value
-.youtube.com	TRUE	/	TRUE	2147483647	SID	your_real_cookie_goes_here
-.youtube.com	TRUE	/	TRUE	2147483647	HSID	your_real_cookie_goes_here
-.youtube.com	TRUE	/	TRUE	2147483647	SSID	your_real_cookie_goes_here
-.youtube.com	TRUE	/	TRUE	2147483647	APISID	your_real_cookie_goes_here
-.youtube.com	TRUE	/	TRUE	2147483647	SAPISID	your_real_cookie_goes_here
+.youtube.com	TRUE	/	TRUE	2147483647	SID	your_real_cookie_here
+.youtube.com	TRUE	/	TRUE	2147483647	HSID	your_real_cookie_here
+.youtube.com	TRUE	/	TRUE	2147483647	SSID	your_real_cookie_here
+.youtube.com	TRUE	/	TRUE	2147483647	APISID	your_real_cookie_here
+.youtube.com	TRUE	/	TRUE	2147483647	SAPISID	your_real_cookie_here
