@@ -1,3 +1,5 @@
-pyrofork
-tgcrypto
+pyrogram
+pytgcalls[wayland]
+yt-dlp
+TgCrypto
 flask
