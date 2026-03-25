@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 import threading
 from urllib.parse import urlparse
 
@@ -19,24 +20,15 @@ from telegram.ext import (
 from pytgcalls import PyTgCalls
 from pytgcalls.types import AudioQuality, MediaStream
 
-# -----------------------------
-# Compatibility shim
-# -----------------------------
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
-# -----------------------------
-# Logging
-# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("StableMusicBot")
 
-# -----------------------------
-# Environment
-# -----------------------------
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -46,16 +38,15 @@ if not SESSION_STRING:
     raise RuntimeError("Missing SESSION_STRING or STRING_SESSION")
 
 PORT = int(os.environ.get("PORT", 8080))
-COOKIES_FILE = os.environ.get("COOKIES_FILE", "cookies.txt")
 YT_USER_AGENT = os.environ.get(
     "YT_USER_AGENT",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
 )
 
-# -----------------------------
-# Flask keep-alive
-# -----------------------------
+RAW_COOKIES_FILE = os.environ.get("COOKIES_FILE", "/etc/secrets/cookies.txt")
+RUNTIME_COOKIES_FILE = "/tmp/cookies.txt"
+
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -69,9 +60,24 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# -----------------------------
-# Voice side: Pyrogram user + PyTgCalls
-# -----------------------------
+def delete_webhook():
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+        r = requests.get(url, params={"drop_pending_updates": "true"}, timeout=20)
+        logger.info("deleteWebhook response: %s", r.text)
+    except Exception:
+        logger.exception("Failed to delete webhook")
+
+def prepare_cookies_file():
+    try:
+        if os.path.exists(RAW_COOKIES_FILE):
+            shutil.copyfile(RAW_COOKIES_FILE, RUNTIME_COOKIES_FILE)
+            logger.info("Copied cookies file to writable path: %s", RUNTIME_COOKIES_FILE)
+        else:
+            logger.warning("Cookies source file not found: %s", RAW_COOKIES_FILE)
+    except Exception:
+        logger.exception("Failed to prepare cookies file")
+
 voice_user = PyroClient(
     "voice-user",
     api_id=API_ID,
@@ -83,21 +89,7 @@ voice_user = PyroClient(
 call_py = PyTgCalls(voice_user)
 ACTIVE_STREAMS: dict[int, dict[str, str]] = {}
 
-# -----------------------------
-# Bot side: python-telegram-bot
-# -----------------------------
 tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def delete_webhook():
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
-        r = requests.get(url, params={"drop_pending_updates": "true"}, timeout=20)
-        logger.info("deleteWebhook response: %s", r.text)
-    except Exception:
-        logger.exception("Failed to delete webhook")
 
 def is_url(text: str) -> bool:
     try:
@@ -117,7 +109,7 @@ def build_ydl_opts() -> dict:
         "nocheckcertificate": True,
         "geo_bypass": True,
         "geo_bypass_country": "US",
-        "cookiefile": COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
+        "cookiefile": RUNTIME_COOKIES_FILE if os.path.exists(RUNTIME_COOKIES_FILE) else None,
         "http_headers": {
             "User-Agent": YT_USER_AGENT
         },
@@ -143,7 +135,6 @@ def extract_audio_info(query: str) -> dict:
         title = info.get("title") or "Unknown Title"
         webpage_url = info.get("webpage_url") or info.get("url")
 
-        # Re-extract canonical page for more stable direct URL
         if webpage_url and webpage_url != info.get("url"):
             info = ydl.extract_info(webpage_url, download=False)
 
@@ -163,9 +154,6 @@ def is_group_chat(update: Update) -> bool:
     chat = update.effective_chat
     return bool(chat and chat.type in ("group", "supergroup"))
 
-# -----------------------------
-# Command handlers
-# -----------------------------
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
         "🎵 Bot is alive.\n\n"
@@ -241,9 +229,6 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.exception("stop_cmd failed")
         await update.effective_message.reply_text(f"❌ Stop failed:\n{e}")
 
-# -----------------------------
-# Startup / shutdown
-# -----------------------------
 async def setup_bot_commands(app: Application) -> None:
     await app.bot.set_my_commands([
         BotCommand("start", "Start the bot"),
@@ -258,6 +243,7 @@ async def main() -> None:
     logger.info("Flask started on port %s", PORT)
 
     delete_webhook()
+    prepare_cookies_file()
 
     tg_app.add_handler(CommandHandler("start", start_cmd))
     tg_app.add_handler(CommandHandler("ping", ping_cmd))
@@ -285,7 +271,6 @@ async def main() -> None:
         logger.info("Bot logged in as: @%s", me_bot.username)
         logger.info("Stable bot fully running")
 
-        # Keep process alive
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
