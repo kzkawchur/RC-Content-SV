@@ -21,24 +21,15 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# -----------------------------
-# Compatibility shim
-# -----------------------------
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
-# -----------------------------
-# Logging
-# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("LibraryMusicBot")
 
-# -----------------------------
-# Env
-# -----------------------------
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -52,9 +43,6 @@ DB_PATH = os.environ.get("DB_PATH", "music_library.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/music_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------
-# Flask keep-alive
-# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -68,9 +56,6 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# -----------------------------
-# DB
-# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -144,9 +129,6 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def delete_webhook():
     import requests
     try:
@@ -198,9 +180,6 @@ def replied_audio_message(update: Update):
         return rep.document, "document"
     return None
 
-# -----------------------------
-# Voice side
-# -----------------------------
 voice_user = PyroClient(
     "voice-user",
     api_id=API_ID,
@@ -210,7 +189,6 @@ voice_user = PyroClient(
 )
 
 call_py = PyTgCalls(voice_user)
-
 ACTIVE_STREAMS: dict[int, dict] = {}
 
 async def cleanup_chat_file(chat_id: int):
@@ -225,9 +203,6 @@ async def cleanup_chat_file(chat_id: int):
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
 
-# -----------------------------
-# Bot side
-# -----------------------------
 tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -375,10 +350,7 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         await status.edit_text("Starting voice chat stream...")
 
-        await call_py.play(
-            chat_id,
-            MediaStream(str(local_path)),
-        )
+        await call_py.play(chat_id, MediaStream(str(local_path)))
 
         ACTIVE_STREAMS[chat_id] = {
             "name": row["name"],
@@ -441,9 +413,6 @@ async def setup_bot_commands(app: Application) -> None:
         BotCommand("nowplaying", "Show current song"),
     ])
 
-# -----------------------------
-# Main
-# -----------------------------
 async def main() -> None:
     init_db()
 
