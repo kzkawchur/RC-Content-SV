@@ -1,0 +1,5 @@
+# Netscape HTTP Cookie File
+# This is a generated file!  Do not edit.
+# ইউটিউব থেকে কপি করা কুকিগুলো এখানে পেস্ট করুন...
+.youtube.com	TRUE	/	TRUE	1735689600	GPS	1
+.youtube.com	TRUE	/	TRUE	1735689600	VISITOR_INFO1_LIVE	abcdefghijk
