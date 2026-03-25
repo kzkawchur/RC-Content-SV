@@ -3,6 +3,5 @@ python-telegram-bot>=22,<23
 pyrogram==2.0.106
 tgcrypto==1.2.5
 py-tgcalls[pyrogram]==2.2.11
-yt-dlp
 requests==2.32.3
 uvloop==0.21.0; platform_system != "Windows"
