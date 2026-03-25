@@ -1,6 +1,5 @@
-pyrogram
-pytgcalls==2.0.0
-ntgcalls
-yt-dlp
-TgCrypto
-flask
+Flask==3.1.0
+pyrogram==2.0.106
+tgcrypto==1.2.5
+py-tgcalls[pyrogram]==2.2.11
+yt-dlp==2026.3.24
