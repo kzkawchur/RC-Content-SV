@@ -16,15 +16,24 @@ from pyrogram.types import BotCommand, Message
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
 
+# -----------------------------
+# Compatibility shim
+# -----------------------------
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
+# -----------------------------
+# Logging
+# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("LibraryMusicBot")
 
+# -----------------------------
+# Env
+# -----------------------------
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -38,6 +47,9 @@ DB_PATH = os.environ.get("DB_PATH", "music_library.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/music_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# -----------------------------
+# Flask keep-alive
+# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -46,11 +58,14 @@ def home():
 
 @flask_app.get("/health")
 def health():
-    return {"status": "ok", "mode": "library-pyrogram-debug"}
+    return {"status": "ok", "mode": "library-pyrogram"}
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
+# -----------------------------
+# Telegram webhook cleanup
+# -----------------------------
 def delete_webhook():
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
@@ -59,6 +74,9 @@ def delete_webhook():
     except Exception:
         logger.exception("Failed to delete webhook")
 
+# -----------------------------
+# DB
+# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -132,6 +150,9 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def is_private_chat(message: Message) -> bool:
     return bool(message.chat and message.chat.type == "private")
 
@@ -192,6 +213,9 @@ def split_long_text(text: str, limit: int = 3500):
         parts.append(text)
     return parts
 
+# -----------------------------
+# Clients
+# -----------------------------
 bot = Client(
     "bot-client",
     api_id=API_ID,
@@ -210,6 +234,9 @@ user = Client(
 call_py = PyTgCalls(user)
 ACTIVE_STREAMS: dict[int, dict] = {}
 
+# -----------------------------
+# Temp cleanup
+# -----------------------------
 async def cleanup_chat_file(chat_id: int):
     info = ACTIVE_STREAMS.get(chat_id)
     if not info:
@@ -223,6 +250,9 @@ async def cleanup_chat_file(chat_id: int):
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
 
+# -----------------------------
+# Debug handlers
+# -----------------------------
 @bot.on_message(filters.private & ~filters.service)
 async def debug_private(client: Client, message: Message):
     logger.info("DEBUG PRIVATE: chat_id=%s text=%s", message.chat.id, message.text)
@@ -230,10 +260,13 @@ async def debug_private(client: Client, message: Message):
         return
     await message.reply_text("debug private ok")
 
-@bot.on_message((filters.group | filters.supergroup) & ~filters.service)
+@bot.on_message(filters.group & ~filters.service)
 async def debug_group(client: Client, message: Message):
     logger.info("DEBUG GROUP: chat_id=%s text=%s", message.chat.id, message.text)
 
+# -----------------------------
+# Bot commands
+# -----------------------------
 @bot.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     await message.reply_text(
@@ -429,6 +462,9 @@ async def stop_cmd(client: Client, message: Message):
 
     await message.reply_text("Stopped the stream.")
 
+# -----------------------------
+# Main
+# -----------------------------
 async def main():
     init_db()
 
