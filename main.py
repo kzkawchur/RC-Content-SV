@@ -9,27 +9,30 @@ from pathlib import Path
 from typing import Optional
 
 from flask import Flask
-from pyrogram import Client as PyroClient
+from pyrogram import Client, filters, idle
 import pyrogram.errors as pyro_errors
+from pyrogram.types import BotCommand, Message
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
-from telegram import BotCommand, Update
-from telegram.ext import (
-    Application,
-    ApplicationBuilder,
-    CommandHandler,
-    ContextTypes,
-)
 
+# -----------------------------
+# Compatibility shim
+# -----------------------------
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
+# -----------------------------
+# Logging
+# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("LibraryMusicBot")
 
+# -----------------------------
+# Env
+# -----------------------------
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -43,6 +46,9 @@ DB_PATH = os.environ.get("DB_PATH", "music_library.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/music_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
+# -----------------------------
+# Flask keep-alive
+# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -51,11 +57,14 @@ def home():
 
 @flask_app.get("/health")
 def health():
-    return {"status": "ok", "mode": "library"}
+    return {"status": "ok", "mode": "library-pyrogram"}
 
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
+# -----------------------------
+# DB
+# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -129,22 +138,14 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
-def delete_webhook():
-    import requests
-    try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
-        r = requests.get(url, params={"drop_pending_updates": "true"}, timeout=20)
-        logger.info("deleteWebhook response: %s", r.text)
-    except Exception:
-        logger.exception("Failed to delete webhook")
+# -----------------------------
+# Helpers
+# -----------------------------
+def is_private_chat(message: Message) -> bool:
+    return bool(message.chat and message.chat.type == "private")
 
-def is_group_chat(update: Update) -> bool:
-    chat = update.effective_chat
-    return bool(chat and chat.type in ("group", "supergroup"))
-
-def is_private_chat(update: Update) -> bool:
-    chat = update.effective_chat
-    return bool(chat and chat.type == "private")
+def is_group_chat(message: Message) -> bool:
+    return bool(message.chat and message.chat.type in ("group", "supergroup"))
 
 def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str:
     if original_name and "." in original_name:
@@ -165,36 +166,70 @@ def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str
             return ".m4a"
         if "flac" in mime_type:
             return ".flac"
+        if "video/" in mime_type:
+            return ".mp4"
 
     return ".mp3"
 
-def replied_audio_message(update: Update):
-    msg = update.effective_message
-    if not msg or not msg.reply_to_message:
+def replied_media(message: Message):
+    if not message.reply_to_message:
         return None
 
-    rep = msg.reply_to_message
+    rep = message.reply_to_message
+
     if rep.audio:
         return rep.audio, "audio"
-    if rep.document and rep.document.mime_type and rep.document.mime_type.startswith("audio/"):
-        return rep.document, "document"
+    if rep.voice:
+        return rep.voice, "voice"
+    if rep.video:
+        return rep.video, "video"
+    if rep.document and rep.document.mime_type:
+        if rep.document.mime_type.startswith("audio/") or rep.document.mime_type.startswith("video/"):
+            return rep.document, "document"
+
     return None
 
-voice_user = PyroClient(
-    "voice-user",
+def split_long_text(text: str, limit: int = 3500):
+    parts = []
+    while len(text) > limit:
+        cut = text.rfind("\n", 0, limit)
+        if cut == -1:
+            cut = limit
+        parts.append(text[:cut])
+        text = text[cut:].lstrip()
+    if text:
+        parts.append(text)
+    return parts
+
+# -----------------------------
+# Clients
+# -----------------------------
+bot = Client(
+    "bot-client",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+)
+
+user = Client(
+    "user-client",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=SESSION_STRING,
     no_updates=True,
 )
 
-call_py = PyTgCalls(voice_user)
+call_py = PyTgCalls(user)
 ACTIVE_STREAMS: dict[int, dict] = {}
 
+# -----------------------------
+# Temp cleanup
+# -----------------------------
 async def cleanup_chat_file(chat_id: int):
     info = ACTIVE_STREAMS.get(chat_id)
     if not info:
         return
+
     path = info.get("local_path")
     if path and os.path.exists(path):
         try:
@@ -203,14 +238,16 @@ async def cleanup_chat_file(chat_id: int):
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
 
-tg_app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text(
+# -----------------------------
+# Bot commands
+# -----------------------------
+@bot.on_message(filters.command("start"))
+async def start_cmd(client: Client, message: Message):
+    await message.reply_text(
         "Hello! I am your Telegram Library Music Bot.\n\n"
-        "Main commands:\n"
+        "Commands:\n"
         "/ping\n"
-        "/addsong <name>  (reply to an audio file in private chat)\n"
+        "/addsong <name>  (reply to an audio/video file in private chat)\n"
         "/play <name>\n"
         "/stop\n"
         "/listsongs\n"
@@ -218,7 +255,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/delsong <name>\n"
         "/nowplaying\n\n"
         "How to use:\n"
-        "1. Send or forward an audio file to me in private chat\n"
+        "1. Send or forward an audio/video file to me in private chat\n"
         "2. Reply to that file with /addsong <name>\n"
         "3. In your group, start voice chat and use /play <name>\n\n"
         "Requirements for group playback:\n"
@@ -227,119 +264,132 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "- The user session account must be inside the group"
     )
 
-async def ping_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.effective_message.reply_text("pong")
+@bot.on_message(filters.command("ping"))
+async def ping_cmd(client: Client, message: Message):
+    await message.reply_text("pong")
 
-async def addsong_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_private_chat(update):
-        await update.effective_message.reply_text(
-            "Use /addsong only in private chat with the bot."
+@bot.on_message(filters.command("addsong"))
+async def addsong_cmd(client: Client, message: Message):
+    if not is_private_chat(message):
+        await message.reply_text("Use /addsong only in private chat with the bot.")
+        return
+
+    if len(message.command) < 2:
+        await message.reply_text(
+            "Usage:\n/addsong <name>\n\nReply to an audio or video file with this command."
         )
         return
 
-    if not context.args:
-        await update.effective_message.reply_text(
-            "Usage:\n/addsong <name>\n\nReply to an audio file with this command."
-        )
-        return
-
-    replied = replied_audio_message(update)
+    replied = replied_media(message)
     if not replied:
-        await update.effective_message.reply_text(
-            "Reply to an audio file or audio document with /addsong <name>."
+        await message.reply_text(
+            "Reply to an audio, voice, video, or audio/video document with /addsong <name>."
         )
         return
 
     media, media_type = replied
-    song_name = " ".join(context.args).strip()
+    song_name = " ".join(message.command[1:]).strip()
+
     if not song_name:
-        await update.effective_message.reply_text("Please provide a valid song name.")
+        await message.reply_text("Please provide a valid song name.")
         return
 
     file_id = media.file_id
     original_name = getattr(media, "file_name", None)
     mime_type = getattr(media, "mime_type", None)
-    added_by = update.effective_user.id if update.effective_user else None
+    added_by = message.from_user.id if message.from_user else None
 
     add_song_to_db(song_name, file_id, original_name, mime_type, added_by)
 
-    await update.effective_message.reply_text(
+    await message.reply_text(
         f"Saved successfully.\nName: {normalize_name(song_name)}\nType: {media_type}"
     )
 
-async def listsongs_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    rows = list_songs(limit=50)
+@bot.on_message(filters.command("listsongs"))
+async def listsongs_cmd(client: Client, message: Message):
+    rows = list_songs(limit=100)
+
     if not rows:
-        await update.effective_message.reply_text("No songs saved yet.")
+        await message.reply_text("No songs saved yet.")
         return
 
     text = "Saved songs:\n\n" + "\n".join(f"- {row['name']}" for row in rows)
-    await update.effective_message.reply_text(text)
+    for part in split_long_text(text):
+        await message.reply_text(part)
 
-async def searchsong_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not context.args:
-        await update.effective_message.reply_text("Usage:\n/searchsong <keyword>")
+@bot.on_message(filters.command("searchsong"))
+async def searchsong_cmd(client: Client, message: Message):
+    if len(message.command) < 2:
+        await message.reply_text("Usage:\n/searchsong <keyword>")
         return
 
-    keyword = " ".join(context.args).strip()
-    rows = search_songs(keyword)
+    keyword = " ".join(message.command[1:]).strip()
+    rows = search_songs(keyword, limit=20)
+
     if not rows:
-        await update.effective_message.reply_text("No matching songs found.")
+        await message.reply_text("No matching songs found.")
         return
 
     text = "Search results:\n\n" + "\n".join(f"- {row['name']}" for row in rows)
-    await update.effective_message.reply_text(text)
+    await message.reply_text(text)
 
-async def delsong_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_private_chat(update):
-        await update.effective_message.reply_text(
-            "Use /delsong only in private chat."
-        )
+@bot.on_message(filters.command("delsong"))
+async def delsong_cmd(client: Client, message: Message):
+    if not is_private_chat(message):
+        await message.reply_text("Use /delsong only in private chat.")
         return
 
-    if not context.args:
-        await update.effective_message.reply_text("Usage:\n/delsong <name>")
+    if len(message.command) < 2:
+        await message.reply_text("Usage:\n/delsong <name>")
         return
 
-    name = " ".join(context.args).strip()
+    name = " ".join(message.command[1:]).strip()
     ok = delete_song(name)
+
     if ok:
-        await update.effective_message.reply_text(f"Deleted: {normalize_name(name)}")
+        await message.reply_text(f"Deleted: {normalize_name(name)}")
     else:
-        await update.effective_message.reply_text("Song not found.")
+        await message.reply_text("Song not found.")
 
-async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.effective_message.reply_text(
-            "The /play command can only be used in a group or supergroup."
-        )
+@bot.on_message(filters.command("nowplaying") & ~filters.private)
+async def nowplaying_cmd(client: Client, message: Message):
+    info = ACTIVE_STREAMS.get(message.chat.id)
+    if not info:
+        await message.reply_text("Nothing is playing right now.")
         return
 
-    if not context.args:
-        await update.effective_message.reply_text("Usage:\n/play <saved song name>")
+    await message.reply_text(f"Now playing: {info['name']}")
+
+@bot.on_message(filters.command("play") & ~filters.private)
+async def play_cmd(client: Client, message: Message):
+    if not is_group_chat(message):
+        await message.reply_text("The /play command can only be used in a group or supergroup.")
         return
 
-    name = " ".join(context.args).strip()
+    if len(message.command) < 2:
+        await message.reply_text("Usage:\n/play <saved song name>")
+        return
+
+    name = " ".join(message.command[1:]).strip()
     row = get_song(name)
 
     if not row:
         similar = search_songs(name, limit=5)
         if similar:
             text = "Song not found. Similar songs:\n\n" + "\n".join(f"- {r['name']}" for r in similar)
-            await update.effective_message.reply_text(text)
+            await message.reply_text(text)
         else:
-            await update.effective_message.reply_text("Song not found in library.")
+            await message.reply_text("Song not found in library.")
         return
 
-    chat_id = update.effective_chat.id
-    status = await update.effective_message.reply_text(f"Preparing: {row['name']}")
+    chat_id = message.chat.id
+    status = await message.reply_text(f"Preparing: {row['name']}")
 
     ext = safe_file_ext(row["original_name"], row["mime_type"])
     local_path = TMP_DIR / f"{chat_id}_{int(time.time())}{ext}"
 
     try:
-        file_obj = await context.bot.get_file(row["file_id"])
-        await file_obj.download_to_drive(custom_path=str(local_path))
+        await bot.download_media(row["file_id"], file_name=str(local_path))
 
         try:
             await call_py.leave_call(chat_id)
@@ -368,14 +418,13 @@ async def play_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             pass
         await status.edit_text(f"Play failed:\n{e}")
 
-async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.effective_message.reply_text(
-            "The /stop command can only be used in a group or supergroup."
-        )
+@bot.on_message(filters.command("stop") & ~filters.private)
+async def stop_cmd(client: Client, message: Message):
+    if not is_group_chat(message):
+        await message.reply_text("The /stop command can only be used in a group or supergroup.")
         return
 
-    chat_id = update.effective_chat.id
+    chat_id = message.chat.id
 
     try:
         await call_py.leave_call(chat_id)
@@ -384,73 +433,54 @@ async def stop_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await cleanup_chat_file(chat_id)
     ACTIVE_STREAMS.pop(chat_id, None)
-    await update.effective_message.reply_text("Stopped the stream.")
 
-async def nowplaying_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_group_chat(update):
-        await update.effective_message.reply_text(
-            "The /nowplaying command can only be used in a group or supergroup."
-        )
-        return
+    await message.reply_text("Stopped the stream.")
 
-    info = ACTIVE_STREAMS.get(update.effective_chat.id)
-    if not info:
-        await update.effective_message.reply_text("Nothing is playing right now.")
-        return
-
-    await update.effective_message.reply_text(f"Now playing: {info['name']}")
-
-async def setup_bot_commands(app: Application) -> None:
-    await app.bot.set_my_commands([
-        BotCommand("start", "Start the bot"),
-        BotCommand("ping", "Health check"),
-        BotCommand("addsong", "Reply to an audio file and save it"),
-        BotCommand("play", "Play a saved song in voice chat"),
-        BotCommand("stop", "Stop the current stream"),
-        BotCommand("listsongs", "Show saved songs"),
-        BotCommand("searchsong", "Search saved songs"),
-        BotCommand("delsong", "Delete a saved song"),
-        BotCommand("nowplaying", "Show current song"),
-    ])
-
-async def main() -> None:
+# -----------------------------
+# Main
+# -----------------------------
+async def main():
     init_db()
 
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask started on port %s", PORT)
 
-    delete_webhook()
-
-    tg_app.add_handler(CommandHandler("start", start_cmd))
-    tg_app.add_handler(CommandHandler("ping", ping_cmd))
-    tg_app.add_handler(CommandHandler("addsong", addsong_cmd))
-    tg_app.add_handler(CommandHandler("listsongs", listsongs_cmd))
-    tg_app.add_handler(CommandHandler("searchsong", searchsong_cmd))
-    tg_app.add_handler(CommandHandler("delsong", delsong_cmd))
-    tg_app.add_handler(CommandHandler("play", play_cmd))
-    tg_app.add_handler(CommandHandler("stop", stop_cmd))
-    tg_app.add_handler(CommandHandler("nowplaying", nowplaying_cmd))
-
-    await voice_user.start()
-    logger.info("Voice user started")
+    await user.start()
+    logger.info("User client started")
 
     await call_py.start()
     logger.info("PyTgCalls started")
 
-    async with tg_app:
-        await setup_bot_commands(tg_app)
-        await tg_app.start()
-        await tg_app.updater.start_polling(
-            drop_pending_updates=True,
-            allowed_updates=["message"],
-        )
+    await bot.start()
+    logger.info("Bot client started")
 
-        me_bot = await tg_app.bot.get_me()
-        logger.info("Bot logged in as: @%s", me_bot.username)
-        logger.info("Library Music Bot fully running")
+    try:
+        await bot.set_bot_commands([
+            BotCommand("start", "Start the bot"),
+            BotCommand("ping", "Health check"),
+            BotCommand("addsong", "Reply to media and save it"),
+            BotCommand("play", "Play a saved song in voice chat"),
+            BotCommand("stop", "Stop the current stream"),
+            BotCommand("listsongs", "Show saved songs"),
+            BotCommand("searchsong", "Search saved songs"),
+            BotCommand("delsong", "Delete a saved song"),
+            BotCommand("nowplaying", "Show current song"),
+        ])
+    except Exception:
+        logger.exception("Failed to set bot commands")
 
-        await asyncio.Event().wait()
+    me_bot = await bot.get_me()
+    me_user = await user.get_me()
+    logger.info("Bot logged in as: @%s", me_bot.username)
+    logger.info("User logged in as: %s", me_user.first_name)
+    logger.info("Library Music Bot fully running")
+
+    await idle()
+
+    await bot.stop()
+    await call_py.stop()
+    await user.stop()
 
 if __name__ == "__main__":
     asyncio.run(main())
