@@ -136,31 +136,51 @@ def extract_audio_info(query: str):
             "stream_url": stream_url,
         }
 
+@bot.on_message(filters.incoming)
+async def debug_incoming(_, message: Message):
+    try:
+        text = message.text or message.caption or "<non-text>"
+        logger.info(
+            "RECEIVED | chat_id=%s | chat_type=%s | from_user=%s | text=%s",
+            message.chat.id,
+            message.chat.type,
+            getattr(message.from_user, "id", None),
+            text
+        )
+    except Exception:
+        logger.exception("Debug incoming logger failed")
+
 @bot.on_message(filters.command("start"))
 async def start_cmd(_, message: Message):
-    await message.reply_text(
-        "🎵 **Telegram Music Bot is alive!**\n\n"
-        "**Commands:**\n"
-        "`/play <YouTube link or search>`\n"
-        "`/stop`\n\n"
-        "Before using in group:\n"
-        "1. Start voice chat\n"
-        "2. Make bot admin\n"
-        "3. Turn bot privacy OFF in BotFather\n"
-        "4. Add the user account to the group"
-    )
+    try:
+        await message.reply_text(
+            "🎵 Bot is alive.\n\n"
+            "Commands:\n"
+            "/ping\n"
+            "/play <song name or youtube link>\n"
+            "/stop"
+        )
+    except Exception:
+        logger.exception("start_cmd failed")
+
+@bot.on_message(filters.command("ping"))
+async def ping_cmd(_, message: Message):
+    try:
+        await message.reply_text("pong")
+    except Exception:
+        logger.exception("ping_cmd failed")
 
 @bot.on_message(filters.command("play") & filters.group)
 async def play_cmd(_, message: Message):
-    if len(message.command) < 2:
-        await message.reply_text("Usage:\n`/play <YouTube link or search>`")
-        return
-
-    query = message.text.split(None, 1)[1].strip()
-    chat_id = message.chat.id
-    status = await message.reply_text("🔎 Searching YouTube...")
-
     try:
+        if len(message.command) < 2:
+            await message.reply_text("Usage:\n/play <YouTube link or search>")
+            return
+
+        query = message.text.split(None, 1)[1].strip()
+        chat_id = message.chat.id
+        status = await message.reply_text("🔎 Searching YouTube...")
+
         info = await asyncio.to_thread(extract_audio_info, query)
 
         try:
@@ -184,26 +204,24 @@ async def play_cmd(_, message: Message):
         }
 
         await status.edit_text(
-            f"▶️ **Now Playing:** {info['title']}\n"
-            f"🔗 {info['webpage_url']}"
+            f"▶️ Now Playing: {info['title']}\n{info['webpage_url']}"
         )
-
     except FloodWait as e:
-        await status.edit_text(f"⏳ Flood wait: {e.value} seconds.")
+        await message.reply_text(f"Flood wait: {e.value}s")
     except Exception as e:
-        logger.exception("Play command failed")
-        await status.edit_text(f"❌ Failed to play.\n`{e}`")
+        logger.exception("play_cmd failed")
+        await message.reply_text(f"❌ Play failed:\n{e}")
 
 @bot.on_message(filters.command("stop") & filters.group)
 async def stop_cmd(_, message: Message):
-    chat_id = message.chat.id
     try:
+        chat_id = message.chat.id
         await call_py.leave_call(chat_id)
         ACTIVE_STREAMS.pop(chat_id, None)
-        await message.reply_text("⏹️ Stopped streaming and left the voice chat.")
+        await message.reply_text("⏹️ Stopped.")
     except Exception as e:
-        logger.exception("Stop command failed")
-        await message.reply_text(f"❌ Failed to stop.\n`{e}`")
+        logger.exception("stop_cmd failed")
+        await message.reply_text(f"❌ Stop failed:\n{e}")
 
 async def main():
     flask_thread = threading.Thread(target=run_flask, daemon=True)
