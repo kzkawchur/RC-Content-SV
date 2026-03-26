@@ -33,8 +33,9 @@ DB_PATH = os.environ.get("DB_PATH", "maya_welcome_bot.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/maya_welcome_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-VOICE_NAME = os.environ.get("VOICE_NAME", "bn-BD-NabanitaNeural")
-VOICE_RATE = os.environ.get("VOICE_RATE", "-6%")
+VOICE_NAME_BN = os.environ.get("VOICE_NAME_BN", "bn-BD-NabanitaNeural")
+VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-JennyNeural")
+VOICE_RATE = os.environ.get("VOICE_RATE", "-2%")
 VOICE_PITCH = os.environ.get("VOICE_PITCH", "+0Hz")
 VOICE_VOLUME = os.environ.get("VOICE_VOLUME", "+0%")
 
@@ -51,6 +52,8 @@ SUPER_ADMINS = {
 }
 
 BOT_NAME = os.environ.get("BOT_NAME", "Maya")
+SUPPORT_GROUP_NAME = os.environ.get("SUPPORT_GROUP_NAME", "Support Group")
+SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "").strip()
 
 flask_app = Flask(__name__)
 
@@ -79,6 +82,7 @@ def init_db() -> None:
                 title TEXT,
                 activated INTEGER NOT NULL DEFAULT 0,
                 activated_by INTEGER,
+                language TEXT NOT NULL DEFAULT 'bn',
                 custom_welcome TEXT,
                 voice_enabled INTEGER NOT NULL DEFAULT 1,
                 delete_service INTEGER NOT NULL DEFAULT 1,
@@ -132,6 +136,13 @@ def get_group(chat_id: int) -> Optional[sqlite3.Row]:
     with db_connect() as conn:
         return conn.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,)).fetchone()
 
+def get_group_lang(chat_id: int) -> str:
+    row = get_group(chat_id)
+    if not row:
+        return "bn"
+    lang = (row["language"] or "bn").strip().lower()
+    return lang if lang in {"bn", "en"} else "bn"
+
 def activate_group(chat_id: int, title: str, activated_by: int) -> None:
     now_ts = int(time.time())
     with db_connect() as conn:
@@ -150,7 +161,16 @@ def activate_group(chat_id: int, title: str, activated_by: int) -> None:
         conn.commit()
 
 def set_group_value(chat_id: int, field: str, value) -> None:
-    allowed = {"custom_welcome", "voice_enabled", "delete_service", "last_primary_msg_id", "last_voice_msg_id", "updated_at", "title"}
+    allowed = {
+        "custom_welcome",
+        "voice_enabled",
+        "delete_service",
+        "last_primary_msg_id",
+        "last_voice_msg_id",
+        "updated_at",
+        "title",
+        "language",
+    }
     if field not in allowed:
         raise ValueError("Invalid field")
     with db_connect() as conn:
@@ -167,20 +187,25 @@ def generate_secret_code(length: int = 6) -> str:
     return "".join(random.choice(alphabet) for _ in range(length))
 
 def create_activation_code(issued_by: int) -> tuple[str, int]:
-    code = generate_secret_code()
     expires_at = int(time.time()) + SECRET_CODE_TTL_SECONDS
     now_ts = int(time.time())
-    with db_connect() as conn:
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO activation_codes
-            (code, issued_by, expires_at, used, used_by, used_in_chat, created_at)
-            VALUES (?, ?, ?, 0, NULL, NULL, ?)
-            """,
-            (code, issued_by, expires_at, now_ts),
-        )
-        conn.commit()
-    return code, expires_at
+    for _ in range(20):
+        code = generate_secret_code()
+        try:
+            with db_connect() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO activation_codes
+                    (code, issued_by, expires_at, used, used_by, used_in_chat, created_at)
+                    VALUES (?, ?, ?, 0, NULL, NULL, ?)
+                    """,
+                    (code, issued_by, expires_at, now_ts),
+                )
+                conn.commit()
+                return code, expires_at
+        except sqlite3.IntegrityError:
+            continue
+    raise RuntimeError("Could not generate unique code")
 
 def consume_activation_code(code: str, used_by: int, used_in_chat: int) -> bool:
     now_ts = int(time.time())
@@ -242,6 +267,140 @@ app = Client(
 
 chat_last_welcome_ts: dict[int, float] = {}
 
+MESSAGES = {
+    "bn": {
+        "start_private": [
+            "আমি {bot} 🌸\n\nPrivate commands:\n/getcode - owner/admin code নেবে\n/ping - bot alive check\n/myid - তোমার user id\n/broadcast <text> - owner broadcast\n/support - support info\n\nGroup setup:\n1. আমাকে group-এ add করো\n2. আমাকে Delete Messages permission দাও\n3. bot admin personal chat-এ /getcode দেবে\n4. group-এ যে কেউ /activate CODE দেবে\n5. admin চাইলে /lang bn বা /lang en দেবে",
+        ],
+        "start_group": [
+            "{bot} is here.\nএই group-এ use করতে:\n1. Bot admin personal chat-এ /getcode নেবে\n2. Group-এ যে কেউ /activate CODE দেবে",
+        ],
+        "owner_only_code": [
+            "Only bot owner/admin can get activation code.",
+            "এই command শুধু bot admin ব্যবহার করতে পারবে।",
+        ],
+        "support_hint": [
+            "কোড দরকার হলে support-এ যোগাযোগ করো: {support}",
+            "Activation code লাগলে support group-এ যোগাযোগ করো: {support}",
+        ],
+        "code_msg": [
+            "🔐 Secret activation code: `{code}`\n\nএই code group-এ যে কেউ use করতে পারবে.\nGroup-এ লিখবে:\n`/activate {code}`\n\nCode {mins} মিনিট valid থাকবে.",
+        ],
+        "activate_group_only": [
+            "Use /activate শুধু group-এ.",
+        ],
+        "activate_usage": [
+            "Usage:\n/activate YOURCODE",
+        ],
+        "invalid_code": [
+            "Invalid, expired, or already used code.",
+            "কোড ভুল, expired, বা already used.",
+        ],
+        "activated": [
+            "✅ {bot} activated successfully.\n\nএখন আমি:\n- join/leave service message delete করব\n- সুন্দর cover welcome পাঠাব\n- sweet voice welcome দেব\n- spam control maintain করব",
+            "✅ {bot} এখন এই group-এ active.\nআমি join/leave message delete করব, সুন্দর welcome দেব, আর spam কম রাখব।",
+        ],
+        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
+        "voice_set": ["Voice welcome: {value}"],
+        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
+        "deleteservice_set": ["Delete service message: {value}"],
+        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
+        "lang_set": ["Language changed to বাংলা.", "ঠিক আছে, এখন থেকে আমি বাংলায় কথা বলব।"],
+        "lang_set_en": ["Language changed to English.", "Okay, I will speak in English now."],
+        "only_group_admin": [
+            "Only group admins can use this command.",
+            "এই command শুধু group admin ব্যবহার করতে পারবে।",
+        ],
+        "not_activated": [
+            "এই group এখনো activated না. আগে /activate CODE দাও.",
+        ],
+        "welcome_saved": ["Custom welcome text saved successfully."],
+        "welcome_reset": ["Custom welcome reset done."],
+        "status": [
+            "Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nTimezone: {tz}\nPhase now: {phase}"
+        ],
+        "broadcast_owner_only": ["Broadcast is owner-only."],
+        "broadcast_usage": ["Usage:\n/broadcast your message"],
+        "broadcast_none": ["No activated groups found."],
+        "broadcast_start": ["Broadcast started to {count} groups..."],
+        "broadcast_done": ["Broadcast finished.\n\nSuccess: {ok}\nFailed: {fail}"],
+        "test_voice_caption": ["🎤 {bot} test voice"],
+        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
+        "ping": ["pong | {tz} | {time}"],
+        "myid": ["Your user ID: {user_id}"],
+        "support": ["Support: {support}"],
+    },
+    "en": {
+        "start_private": [
+            "I am {bot} 🌸\n\nPrivate commands:\n/getcode - bot admin gets activation code\n/ping - bot alive check\n/myid - show your user id\n/broadcast <text> - owner broadcast\n/support - support info\n\nGroup setup:\n1. Add me to the group\n2. Give me Delete Messages permission\n3. A bot admin uses /getcode in personal chat\n4. Anyone in the group can use /activate CODE\n5. A group admin can use /lang bn or /lang en",
+        ],
+        "start_group": [
+            "{bot} is here.\nTo use me in this group:\n1. A bot admin gets a code in private chat with /getcode\n2. Anyone in the group can use /activate CODE",
+        ],
+        "owner_only_code": [
+            "Only bot owner/admin can get activation code.",
+        ],
+        "support_hint": [
+            "Need an activation code? Contact support: {support}",
+        ],
+        "code_msg": [
+            "🔐 Secret activation code: `{code}`\n\nAnyone in the target group can use it.\nIn group, send:\n`/activate {code}`\n\nThe code will stay valid for {mins} minutes.",
+        ],
+        "activate_group_only": ["Use /activate only in a group."],
+        "activate_usage": ["Usage:\n/activate YOURCODE"],
+        "invalid_code": ["Invalid, expired, or already used code."],
+        "activated": [
+            "✅ {bot} activated successfully.\n\nNow I will:\n- delete join/leave service messages\n- send a nice welcome cover\n- send a sweet welcome voice\n- keep spam low",
+            "✅ {bot} is now active in this group.",
+        ],
+        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
+        "voice_set": ["Voice welcome: {value}"],
+        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
+        "deleteservice_set": ["Delete service message: {value}"],
+        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
+        "lang_set": ["Language changed to Bangla."],
+        "lang_set_en": ["Language changed to English.", "Okay, I will speak in English now."],
+        "only_group_admin": ["Only group admins can use this command."],
+        "not_activated": ["This group is not activated yet. Use /activate CODE first."],
+        "welcome_saved": ["Custom welcome text saved successfully."],
+        "welcome_reset": ["Custom welcome has been reset."],
+        "status": [
+            "Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nTimezone: {tz}\nCurrent phase: {phase}"
+        ],
+        "broadcast_owner_only": ["Broadcast is owner-only."],
+        "broadcast_usage": ["Usage:\n/broadcast your message"],
+        "broadcast_none": ["No activated groups found."],
+        "broadcast_start": ["Broadcast started to {count} groups..."],
+        "broadcast_done": ["Broadcast finished.\n\nSuccess: {ok}\nFailed: {fail}"],
+        "test_voice_caption": ["🎤 {bot} test voice"],
+        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
+        "ping": ["pong | {tz} | {time}"],
+        "myid": ["Your user ID: {user_id}"],
+        "support": ["Support: {support}"],
+    },
+}
+
+def support_text() -> str:
+    if SUPPORT_GROUP_URL and SUPPORT_GROUP_NAME:
+        return f"{SUPPORT_GROUP_NAME} | {SUPPORT_GROUP_URL}"
+    if SUPPORT_GROUP_URL:
+        return SUPPORT_GROUP_URL
+    return SUPPORT_GROUP_NAME
+
+def msg_text(lang: str, key: str, **kwargs) -> str:
+    base_lang = lang if lang in MESSAGES else "bn"
+    variants = MESSAGES[base_lang].get(key) or MESSAGES["bn"].get(key) or [key]
+    return random.choice(variants).format(
+        bot=BOT_NAME,
+        support=support_text(),
+        **kwargs,
+    )
+
+def chat_type_name(chat) -> str:
+    if not chat:
+        return ""
+    return getattr(chat.type, "value", str(chat.type)).lower()
+
 def clean_name(name: str) -> str:
     if not name:
         return "বন্ধু"
@@ -264,9 +423,12 @@ def get_day_phase() -> str:
         return "evening"
     return "night"
 
-def build_welcome_copy(first_name: str, mention_name: str, group_title: str, custom_text: Optional[str]) -> tuple[str, str]:
+def voice_name_for_lang(lang: str) -> str:
+    return VOICE_NAME_EN if lang == "en" else VOICE_NAME_BN
+
+def build_welcome_copy(lang: str, first_name: str, mention_name: str, group_title: str, custom_text: Optional[str]) -> tuple[str, str]:
     phase = get_day_phase()
-    safe_group = group_title or "আমাদের গ্রুপ"
+    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
 
     if custom_text:
         text_welcome = (
@@ -276,45 +438,86 @@ def build_welcome_copy(first_name: str, mention_name: str, group_title: str, cus
             .replace("{phase}", phase)
         )
     else:
-        templates = {
-            "morning": [
-                f"🌼 শুভ সকাল {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
-                f"✨ {mention_name}, সকালের মিষ্টি শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
-            ],
-            "day": [
-                f"🌸 স্বাগতম {mention_name}!\n{safe_group} এ তোমাকে পেয়ে খুব ভালো লাগছে।",
-                f"💫 হ্যালো {mention_name}!\n{safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
-            ],
-            "evening": [
-                f"🌙 শুভ সন্ধ্যা {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
-                f"✨ {mention_name}, সন্ধ্যার সুন্দর শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
-            ],
-            "night": [
-                f"🌌 শুভ রাত্রি {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
-                f"💙 {mention_name}, রাতের শান্ত শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
-            ],
-        }
+        if lang == "en":
+            templates = {
+                "morning": [
+                    f"🌼 Good morning {mention_name}!\nWelcome to {safe_group}.",
+                    f"✨ {mention_name}, warm morning wishes and welcome to {safe_group}.",
+                ],
+                "day": [
+                    f"🌸 Welcome {mention_name}!\nWe are happy to have you in {safe_group}.",
+                    f"💫 Hello {mention_name}!\nA warm welcome to {safe_group}.",
+                ],
+                "evening": [
+                    f"🌙 Good evening {mention_name}!\nWelcome to {safe_group}.",
+                    f"✨ {mention_name}, lovely evening wishes and welcome to {safe_group}.",
+                ],
+                "night": [
+                    f"🌌 Good night {mention_name}!\nWelcome to {safe_group}.",
+                    f"💙 {mention_name}, peaceful night wishes and welcome to {safe_group}.",
+                ],
+            }
+            voice_templates = {
+                "morning": [
+                    f"{first_name}, good morning. A warm welcome to {safe_group}.",
+                    f"Hello {first_name}, welcome to {safe_group}. We are glad to have you here.",
+                ],
+                "day": [
+                    f"{first_name}, welcome to {safe_group}. We are really happy to have you here.",
+                    f"Hello {first_name}, a warm welcome to {safe_group}.",
+                ],
+                "evening": [
+                    f"{first_name}, good evening. Welcome to {safe_group}. Hope you enjoy your time here.",
+                    f"Hello {first_name}, evening wishes and welcome to {safe_group}.",
+                ],
+                "night": [
+                    f"{first_name}, good night. A warm welcome to {safe_group}.",
+                    f"Hello {first_name}, welcome to {safe_group}. Glad to have you here.",
+                ],
+            }
+        else:
+            templates = {
+                "morning": [
+                    f"🌼 শুভ সকাল {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
+                    f"✨ {mention_name}, সকালের মিষ্টি শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+                "day": [
+                    f"🌸 স্বাগতম {mention_name}!\n{safe_group} এ তোমাকে পেয়ে খুব ভালো লাগছে।",
+                    f"💫 হ্যালো {mention_name}!\n{safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
+                ],
+                "evening": [
+                    f"🌙 শুভ সন্ধ্যা {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
+                    f"✨ {mention_name}, সন্ধ্যার সুন্দর শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+                "night": [
+                    f"🌌 শুভ রাত্রি {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।",
+                    f"💙 {mention_name}, রাতের শান্ত শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+            }
+            voice_templates = {
+                "morning": [
+                    f"{first_name}, শুভ সকাল। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
+                    f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+                "day": [
+                    f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে ভালো লাগছে।",
+                    f"হ্যালো {first_name}, {safe_group} এ তোমাকে পেয়ে সত্যিই ভালো লাগছে। স্বাগতম।",
+                ],
+                "evening": [
+                    f"{first_name}, শুভ সন্ধ্যা। {safe_group} এ তোমাকে স্বাগতম। আশা করি এখানে ভালো সময় কাটাবে।",
+                    f"হ্যালো {first_name}, সন্ধ্যার মিষ্টি শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+                "night": [
+                    f"{first_name}, শুভ রাত্রি। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
+                    f"হ্যালো {first_name}, রাতের শান্ত শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
+                ],
+            }
         text_welcome = random.choice(templates[phase])
 
-    voice_templates = {
-        "morning": [
-            f"{first_name}, শুভ সকাল। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
-            f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
-        ],
-        "day": [
-            f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে ভালো লাগছে।",
-            f"হ্যালো {first_name}, {safe_group} এ তোমাকে পেয়ে সত্যিই ভালো লাগছে। স্বাগতম।",
-        ],
-        "evening": [
-            f"{first_name}, শুভ সন্ধ্যা। {safe_group} এ তোমাকে স্বাগতম। আশা করি এখানে ভালো সময় কাটাবে।",
-            f"হ্যালো {first_name}, সন্ধ্যার মিষ্টি শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
-        ],
-        "night": [
-            f"{first_name}, শুভ রাত্রি। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
-            f"হ্যালো {first_name}, রাতের শান্ত শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
-        ],
-    }
-    voice_text = random.choice(voice_templates[phase])
+    voice_text = random.choice(voice_templates[phase]) if not custom_text else (
+        f"Hello {first_name}, welcome to {safe_group}." if lang == "en"
+        else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।"
+    )
     return text_welcome, voice_text
 
 def is_super_admin(user_id: Optional[int]) -> bool:
@@ -352,19 +555,19 @@ async def delete_previous_welcome(client: Client, chat_id: int) -> None:
             try:
                 await client.delete_messages(chat_id, int(mid))
             except Exception:
-                logger.exception("Failed deleting previous welcome message %s in chat %s", mid, chat_id)
+                pass
 
 async def schedule_delete_message(client: Client, chat_id: int, message_id: int, delay: int) -> None:
     try:
         await asyncio.sleep(delay)
         await client.delete_messages(chat_id, message_id)
     except Exception:
-        logger.exception("Failed auto-deleting message %s in chat %s", message_id, chat_id)
+        pass
 
-async def make_voice_file(text: str, output_path: Path) -> None:
+async def make_voice_file(text: str, lang: str, output_path: Path) -> None:
     communicate = edge_tts.Communicate(
         text=text,
-        voice=VOICE_NAME,
+        voice=voice_name_for_lang(lang),
         rate=VOICE_RATE,
         pitch=VOICE_PITCH,
         volume=VOICE_VOLUME,
@@ -419,13 +622,19 @@ def build_cover_bytes(first_name: str, group_title: str) -> BytesIO:
 @app.on_message(filters.service)
 async def service_handler(client: Client, message: Message):
     chat = message.chat
-    if not chat or chat.type not in ("group", "supergroup"):
+    if not chat:
+        return
+
+    chat_type = chat_type_name(chat)
+    if chat_type not in ("group", "supergroup"):
         return
 
     ensure_group(chat.id, chat.title or "")
     group = get_group(chat.id)
     if not group or int(group["activated"]) != 1:
         return
+
+    lang = get_group_lang(chat.id)
 
     if int(group["delete_service"]) == 1:
         try:
@@ -457,9 +666,10 @@ async def service_handler(client: Client, message: Message):
         await delete_previous_welcome(client, chat.id)
 
         text_welcome, voice_text = build_welcome_copy(
+            lang=lang,
             first_name=first_name,
             mention_name=mention_name,
-            group_title=chat.title or "আমাদের গ্রুপ",
+            group_title=chat.title or ("our group" if lang == "en" else "আমাদের গ্রুপ"),
             custom_text=group["custom_welcome"],
         )
 
@@ -476,11 +686,11 @@ async def service_handler(client: Client, message: Message):
             )
 
             if int(group["voice_enabled"]) == 1:
-                await make_voice_file(voice_text, voice_path)
+                await make_voice_file(voice_text, lang, voice_path)
                 voice_message = await client.send_voice(
                     chat_id=chat.id,
                     voice=str(voice_path),
-                    caption=f"🎤 {BOT_NAME} welcome voice",
+                    caption=msg_text(lang, "welcome_voice_caption"),
                 )
 
             mark_welcomed(chat.id, user_id)
@@ -500,65 +710,66 @@ async def service_handler(client: Client, message: Message):
                 if voice_path.exists():
                     voice_path.unlink()
             except Exception:
-                logger.exception("Failed removing temp voice file")
+                pass
 
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
-    if message.chat.type == "private":
-        await message.reply_text(
-            f"আমি {BOT_NAME} 🌸\n\n"
-            "Private commands:\n"
-            "/getcode - owner code নেবে\n"
-            "/ping - bot alive check\n"
-            "/broadcast <text> - owner broadcast\n"
-            "/myid - তোমার user id\n\n"
-            "Group setup:\n"
-            "1. আমাকে group-এ add করো\n"
-            "2. আমাকে Delete Messages permission দাও\n"
-            "3. owner personal chat-এ /getcode দেবে\n"
-            "4. group-এ যে কেউ /activate CODE দিতে পারবে"
-        )
+    lang = "bn"
+    ctype = chat_type_name(message.chat)
+    if ctype in ("group", "supergroup"):
+        ensure_group(message.chat.id, message.chat.title or "")
+        lang = get_group_lang(message.chat.id)
+        await message.reply_text(msg_text(lang, "start_group"))
     else:
-        await message.reply_text(
-            f"{BOT_NAME} is here.\n"
-            "এই group-এ use করতে:\n"
-            "1. Owner personal chat-এ /getcode নেবে\n"
-            "2. Group-এ যে কেউ /activate CODE দেবে"
-        )
+        await message.reply_text(msg_text(lang, "start_private"))
+
+@app.on_message(filters.command("support"))
+async def support_cmd(_, message: Message):
+    lang = "bn"
+    ctype = chat_type_name(message.chat)
+    if ctype in ("group", "supergroup"):
+        lang = get_group_lang(message.chat.id)
+    await message.reply_text(msg_text(lang, "support"))
 
 @app.on_message(filters.command("ping"))
 async def ping_cmd(_, message: Message):
+    lang = "bn"
+    ctype = chat_type_name(message.chat)
+    if ctype in ("group", "supergroup"):
+        lang = get_group_lang(message.chat.id)
     now_local = get_local_time().strftime("%I:%M %p")
-    await message.reply_text(f"pong | {TIMEZONE_NAME} | {now_local}")
+    await message.reply_text(msg_text(lang, "ping", tz=TIMEZONE_NAME, time=now_local))
 
 @app.on_message(filters.command("myid"))
 async def myid_cmd(_, message: Message):
     user_id = message.from_user.id if message.from_user else 0
-    await message.reply_text(f"Your user ID: {user_id}")
+    await message.reply_text(msg_text("en", "myid", user_id=user_id))
 
 @app.on_message(filters.command("getcode") & filters.private)
 async def getcode_cmd(_, message: Message):
     if not message.from_user or not is_super_admin(message.from_user.id):
-        await message.reply_text("Only bot owner/admin can get activation code.")
+        text = msg_text("en", "owner_only_code")
+        if SUPPORT_GROUP_URL or SUPPORT_GROUP_NAME:
+            text += "\n\n" + msg_text("bn", "support_hint")
+        await message.reply_text(text)
         return
 
     code, expires_at = create_activation_code(message.from_user.id)
     mins = max(1, SECRET_CODE_TTL_SECONDS // 60)
-    await message.reply_text(
-        f"🔐 Secret activation code: `{code}`\n\n"
-        f"এই code group-এ যে কেউ use করতে পারবে.\n"
-        f"Group-এ লিখবে:\n`/activate {code}`\n\n"
-        f"Code {mins} মিনিট valid থাকবে."
-    )
+    await message.reply_text(msg_text("bn", "code_msg", code=code, mins=mins))
 
 @app.on_message(filters.command("activate"))
 async def activate_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
-        await message.reply_text("Use /activate শুধু group-এ.")
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
+        await message.reply_text(msg_text("bn", "activate_group_only"))
         return
 
+    ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
     if len(message.command) < 2:
-        await message.reply_text("Usage:\n/activate YOURCODE")
+        await message.reply_text(msg_text(lang, "activate_usage"))
         return
 
     code = message.command[1].strip().upper()
@@ -568,157 +779,209 @@ async def activate_cmd(client: Client, message: Message):
         used_in_chat=message.chat.id,
     )
     if not ok:
-        await message.reply_text("Invalid, expired, or already used code.")
+        await message.reply_text(msg_text(lang, "invalid_code"))
         return
 
-    ensure_group(message.chat.id, message.chat.title or "")
     activate_group(
         message.chat.id,
         message.chat.title or "",
         message.from_user.id if message.from_user else 0,
     )
 
-    await message.reply_text(
-        f"✅ {BOT_NAME} activated successfully.\n\n"
-        "এখন আমি:\n"
-        "- join/leave service message delete করব\n"
-        "- সুন্দর cover welcome পাঠাব\n"
-        "- sweet voice welcome দেব\n"
-        "- spam control maintain করব"
-    )
+    await message.reply_text(msg_text(lang, "activated"))
 
-@app.on_message(filters.command("voice"))
-async def voice_toggle_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
-        await message.reply_text("Use /voice in group.")
-        return
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text("Only group admins can use this command.")
+@app.on_message(filters.command("lang"))
+async def lang_cmd(client: Client, message: Message):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
+        await message.reply_text(msg_text("en", "lang_usage"))
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
+    current_lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(current_lang, "only_group_admin"))
+        return
+
+    if len(message.command) < 2:
+        await message.reply_text(msg_text(current_lang, "lang_usage"))
+        return
+
+    new_lang = message.command[1].strip().lower()
+    if new_lang not in {"bn", "en"}:
+        await message.reply_text(msg_text(current_lang, "lang_usage"))
+        return
+
+    set_group_value(message.chat.id, "language", new_lang)
+    await message.reply_text(msg_text(new_lang, "lang_set_en" if new_lang == "en" else "lang_set"))
+
+@app.on_message(filters.command("voice"))
+async def voice_toggle_cmd(client: Client, message: Message):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
+        await message.reply_text("Use /voice in group.")
+        return
+
+    ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(lang, "only_group_admin"))
+        return
+
     group = get_group(message.chat.id)
     if not group or int(group["activated"]) != 1:
-        await message.reply_text("এই group এখনো activated না. আগে /activate CODE দাও.")
+        await message.reply_text(msg_text(lang, "not_activated"))
         return
 
     if len(message.command) < 2:
         current = "ON" if int(group["voice_enabled"]) == 1 else "OFF"
-        await message.reply_text(f"Usage:\n/voice on\n/voice off\n\nCurrent: {current}")
+        await message.reply_text(msg_text(lang, "voice_usage", current=current))
         return
 
     value = message.command[1].strip().lower()
     if value not in ("on", "off"):
-        await message.reply_text("Usage:\n/voice on\n/voice off")
+        current = "ON" if int(group["voice_enabled"]) == 1 else "OFF"
+        await message.reply_text(msg_text(lang, "voice_usage", current=current))
         return
 
     set_group_value(message.chat.id, "voice_enabled", 1 if value == "on" else 0)
-    await message.reply_text(f"Voice welcome: {value.upper()}")
+    await message.reply_text(msg_text(lang, "voice_set", value=value.upper()))
 
 @app.on_message(filters.command("deleteservice"))
 async def deleteservice_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
         await message.reply_text("Use /deleteservice in group.")
-        return
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text("Only group admins can use this command.")
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(lang, "only_group_admin"))
+        return
+
     group = get_group(message.chat.id)
     if not group or int(group["activated"]) != 1:
-        await message.reply_text("এই group এখনো activated না. আগে /activate CODE দাও.")
+        await message.reply_text(msg_text(lang, "not_activated"))
         return
 
     if len(message.command) < 2:
         current = "ON" if int(group["delete_service"]) == 1 else "OFF"
-        await message.reply_text(f"Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}")
+        await message.reply_text(msg_text(lang, "deleteservice_usage", current=current))
         return
 
     value = message.command[1].strip().lower()
     if value not in ("on", "off"):
-        await message.reply_text("Usage:\n/deleteservice on\n/deleteservice off")
+        current = "ON" if int(group["delete_service"]) == 1 else "OFF"
+        await message.reply_text(msg_text(lang, "deleteservice_usage", current=current))
         return
 
     set_group_value(message.chat.id, "delete_service", 1 if value == "on" else 0)
-    await message.reply_text(f"Delete service message: {value.upper()}")
+    await message.reply_text(msg_text(lang, "deleteservice_set", value=value.upper()))
 
 @app.on_message(filters.command("setwelcome"))
 async def setwelcome_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
         await message.reply_text("Use /setwelcome in group.")
-        return
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text("Only group admins can use this command.")
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(lang, "only_group_admin"))
+        return
+
     group = get_group(message.chat.id)
     if not group or int(group["activated"]) != 1:
-        await message.reply_text("এই group এখনো activated না. আগে /activate CODE দাও.")
+        await message.reply_text(msg_text(lang, "not_activated"))
         return
 
     text = message.text or ""
     parts = text.split(" ", 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text(
+        usage = (
             "Usage:\n/setwelcome your text\n\n"
             "Available placeholders:\n"
             "{name} = user mention\n"
             "{group} = group title\n"
             "{phase} = morning/day/evening/night"
         )
+        await message.reply_text(usage)
         return
 
     custom_text = parts[1].strip()[:600]
     set_group_value(message.chat.id, "custom_welcome", custom_text)
-    await message.reply_text("Custom welcome text saved successfully.")
+    await message.reply_text(msg_text(lang, "welcome_saved"))
 
 @app.on_message(filters.command("resetwelcome"))
 async def resetwelcome_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
         await message.reply_text("Use /resetwelcome in group.")
-        return
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text("Only group admins can use this command.")
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(lang, "only_group_admin"))
+        return
+
     set_group_value(message.chat.id, "custom_welcome", None)
-    await message.reply_text("Custom welcome reset done.")
+    await message.reply_text(msg_text(lang, "welcome_reset"))
 
 @app.on_message(filters.command("status"))
 async def status_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup"):
+    chat_type = chat_type_name(message.chat)
+    if chat_type not in ("group", "supergroup"):
         await message.reply_text("Use /status in group.")
-        return
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text("Only group admins can use this command.")
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
+    lang = get_group_lang(message.chat.id)
+
+    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
+        await message.reply_text(msg_text(lang, "only_group_admin"))
+        return
+
     group = get_group(message.chat.id)
     if not group:
         await message.reply_text("No group config found.")
         return
 
     await message.reply_text(
-        f"Bot name: {BOT_NAME}\n"
-        f"Activated: {'YES' if int(group['activated']) == 1 else 'NO'}\n"
-        f"Voice welcome: {'ON' if int(group['voice_enabled']) == 1 else 'OFF'}\n"
-        f"Delete service message: {'ON' if int(group['delete_service']) == 1 else 'OFF'}\n"
-        f"Timezone: {TIMEZONE_NAME}\n"
-        f"Phase now: {get_day_phase()}"
+        msg_text(
+            lang,
+            "status",
+            activated="YES" if int(group["activated"]) == 1 else "NO",
+            lang_name="Bangla" if get_group_lang(message.chat.id) == "bn" else "English",
+            voice="ON" if int(group["voice_enabled"]) == 1 else "OFF",
+            delete_service="ON" if int(group["delete_service"]) == 1 else "OFF",
+            tz=TIMEZONE_NAME,
+            phase=get_day_phase(),
+        )
     )
 
 @app.on_message(filters.command("testwelcome"))
 async def testwelcome_cmd(client: Client, message: Message):
-    first_name = clean_name(message.from_user.first_name if message.from_user else "বন্ধু")
+    chat_type = chat_type_name(message.chat)
+    lang = "bn"
+    if chat_type in ("group", "supergroup"):
+        ensure_group(message.chat.id, message.chat.title or "")
+        lang = get_group_lang(message.chat.id)
+
+    first_name = clean_name(message.from_user.first_name if message.from_user else ("Friend" if lang == "en" else "বন্ধু"))
     mention_name = message.from_user.mention(first_name) if message.from_user else first_name
     text_welcome, voice_text = build_welcome_copy(
+        lang=lang,
         first_name=first_name,
         mention_name=mention_name,
-        group_title=message.chat.title if message.chat and message.chat.title else "আমাদের গ্রুপ",
+        group_title=message.chat.title if message.chat and message.chat.title else ("our group" if lang == "en" else "আমাদের গ্রুপ"),
         custom_text=None,
     )
 
@@ -732,11 +995,11 @@ async def testwelcome_cmd(client: Client, message: Message):
     voice_path = TMP_DIR / f"test_{message.chat.id}_{int(time.time())}.mp3"
     voice_message = None
     try:
-        await make_voice_file(voice_text, voice_path)
+        await make_voice_file(voice_text, lang, voice_path)
         voice_message = await client.send_voice(
             chat_id=message.chat.id,
             voice=str(voice_path),
-            caption=f"🎤 {BOT_NAME} test voice",
+            caption=msg_text(lang, "test_voice_caption"),
         )
     except Exception:
         logger.exception("Failed sending test welcome voice")
@@ -745,7 +1008,7 @@ async def testwelcome_cmd(client: Client, message: Message):
             if voice_path.exists():
                 voice_path.unlink()
         except Exception:
-            logger.exception("Failed removing temp test file")
+            pass
 
     asyncio.create_task(schedule_delete_message(client, message.chat.id, primary_message.id, WELCOME_DELETE_AFTER))
     if voice_message:
@@ -754,24 +1017,24 @@ async def testwelcome_cmd(client: Client, message: Message):
 @app.on_message(filters.command("broadcast") & filters.private)
 async def broadcast_cmd(client: Client, message: Message):
     if not message.from_user or not is_super_admin(message.from_user.id):
-        await message.reply_text("Broadcast is owner-only.")
+        await message.reply_text(msg_text("en", "broadcast_owner_only"))
         return
 
     text = message.text or ""
     parts = text.split(" ", 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text("Usage:\n/broadcast your message")
+        await message.reply_text(msg_text("en", "broadcast_usage"))
         return
 
     broadcast_text = parts[1].strip()
     group_ids = get_activated_groups()
     if not group_ids:
-        await message.reply_text("No activated groups found.")
+        await message.reply_text(msg_text("en", "broadcast_none"))
         return
 
     ok_count = 0
     fail_count = 0
-    status = await message.reply_text(f"Broadcast started to {len(group_ids)} groups...")
+    status = await message.reply_text(msg_text("en", "broadcast_start", count=len(group_ids)))
 
     for gid in group_ids:
         try:
@@ -781,9 +1044,7 @@ async def broadcast_cmd(client: Client, message: Message):
             fail_count += 1
             logger.exception("Broadcast failed to group %s", gid)
 
-    await status.edit_text(
-        f"Broadcast finished.\n\nSuccess: {ok_count}\nFailed: {fail_count}"
-    )
+    await status.edit_text(msg_text("en", "broadcast_done", ok=ok_count, fail=fail_count))
 
 def main():
     init_db()
