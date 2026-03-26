@@ -1,6 +1,2 @@
 Flask==3.1.0
-pyrogram==2.0.106
-tgcrypto==1.2.5
-py-tgcalls[pyrogram]==2.2.11
 requests==2.32.3
-uvloop==0.21.0; platform_system != "Windows"
