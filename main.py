@@ -13,7 +13,6 @@ from flask import Flask, jsonify, request
 
 import pyrogram.errors as pyro_errors
 
-# PyTgCalls compatibility shim for some pyrogram versions
 if not hasattr(pyro_errors, "GroupcallForbidden"):
     pyro_errors.GroupcallForbidden = pyro_errors.Forbidden
 
@@ -57,7 +56,7 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__)
 
 # -----------------------------
-# Bot API helpers
+# Telegram Bot API helpers
 # -----------------------------
 def tg_get(method: str, params: dict[str, Any] | None = None) -> requests.Response:
     url = f"{API_BASE}/{method}"
@@ -313,14 +312,8 @@ def extract_replied_media(reply_msg: dict) -> tuple[Optional[dict], Optional[str
 # -----------------------------
 # Voice / PyTgCalls
 # -----------------------------
-user = Client(
-    "voice-user",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING,
-    no_updates=True,
-)
-call_py = PyTgCalls(user)
+user = None
+call_py = None
 
 VOICE_LOOP = asyncio.new_event_loop()
 VOICE_READY = threading.Event()
@@ -339,6 +332,17 @@ async def cleanup_chat_file(chat_id: int) -> None:
             logger.exception("Failed to remove temp file: %s", path)
 
 async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, status_message_id: int) -> None:
+    global call_py
+
+    if call_py is None:
+        await asyncio.to_thread(
+            edit_message,
+            status_chat_id,
+            status_message_id,
+            "Voice engine is not ready.",
+        )
+        return
+
     row = get_song(song_name)
     if not row:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Song not found in library.")
@@ -377,6 +381,11 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Play failed:\n{e}")
 
 async def stop_current_stream(chat_id: int) -> None:
+    global call_py
+
+    if call_py is None:
+        return
+
     try:
         await call_py.leave_call(chat_id)
     except Exception:
@@ -386,6 +395,18 @@ async def stop_current_stream(chat_id: int) -> None:
     ACTIVE_STREAMS.pop(chat_id, None)
 
 async def voice_boot() -> None:
+    global user, call_py
+
+    user = Client(
+        "voice-user",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+        no_updates=True,
+    )
+
+    call_py = PyTgCalls(user)
+
     await user.start()
     logger.info("User client started")
 
@@ -394,6 +415,7 @@ async def voice_boot() -> None:
 
     me = await user.get_me()
     logger.info("User logged in as: %s", me.first_name)
+
     VOICE_READY.set()
 
 def run_voice_loop() -> None:
@@ -459,7 +481,6 @@ def telegram_webhook():
 
     cmd, arg_text = parse_command(text)
 
-    # /start
     if cmd == "start":
         send_message(
             chat_id,
@@ -482,12 +503,10 @@ def telegram_webhook():
         )
         return jsonify({"ok": True})
 
-    # /ping
     if cmd == "ping":
         send_message(chat_id, "pong", reply_to_message_id=message_id)
         return jsonify({"ok": True})
 
-    # Private commands
     if chat_type == "private":
         if cmd == "addsong":
             if not arg_text:
@@ -555,7 +574,6 @@ def telegram_webhook():
                 send_message(chat_id, "Song not found.", reply_to_message_id=message_id)
             return jsonify({"ok": True})
 
-    # Group commands
     if chat_type in ("group", "supergroup"):
         if cmd == "nowplaying":
             info = ACTIVE_STREAMS.get(chat_id)
@@ -591,7 +609,6 @@ def telegram_webhook():
             send_message(chat_id, "Stopped the stream.", reply_to_message_id=message_id)
             return jsonify({"ok": True})
 
-    # Optional private echo for quick test
     if chat_type == "private" and text and not cmd:
         send_message(chat_id, f"got: {text}", reply_to_message_id=message_id)
         return jsonify({"ok": True})
