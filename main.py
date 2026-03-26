@@ -331,10 +331,20 @@ async def cleanup_chat_file(chat_id: int) -> None:
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
 
-async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, status_message_id: int) -> None:
-    global call_py
+async def resolve_voice_chat_id(chat_id: int) -> int:
+    global user
 
-    if call_py is None:
+    if user is None:
+        raise RuntimeError("Voice session is not ready")
+
+    resolved_chat = await user.get_chat(chat_id)
+    logger.info("Resolved voice peer successfully: raw=%s resolved=%s", chat_id, resolved_chat.id)
+    return resolved_chat.id
+
+async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, status_message_id: int) -> None:
+    global user, call_py
+
+    if user is None or call_py is None:
         await asyncio.to_thread(
             edit_message,
             status_chat_id,
@@ -343,13 +353,30 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
         )
         return
 
+    try:
+        chat_id = await resolve_voice_chat_id(chat_id)
+    except Exception as e:
+        logger.exception("Failed to resolve peer")
+        await asyncio.to_thread(
+            edit_message,
+            status_chat_id,
+            status_message_id,
+            f"Play failed:\nCould not resolve this group for the session account.\n{e}",
+        )
+        return
+
     row = get_song(song_name)
     if not row:
-        await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Song not found in library.")
+        await asyncio.to_thread(
+            edit_message,
+            status_chat_id,
+            status_message_id,
+            "Song not found in library.",
+        )
         return
 
     ext = safe_file_ext(row["original_name"], row["mime_type"])
-    local_path = TMP_DIR / f"{chat_id}_{int(time.time())}{ext}"
+    local_path = TMP_DIR / f"{abs(chat_id)}_{int(time.time())}{ext}"
 
     try:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Preparing: {row['name']}")
@@ -378,13 +405,23 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
                 local_path.unlink(missing_ok=True)
         except Exception:
             pass
-        await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Play failed:\n{e}")
+        await asyncio.to_thread(
+            edit_message,
+            status_chat_id,
+            status_message_id,
+            f"Play failed:\n{e}",
+        )
 
 async def stop_current_stream(chat_id: int) -> None:
-    global call_py
+    global user, call_py
 
-    if call_py is None:
+    if user is None or call_py is None:
         return
+
+    try:
+        chat_id = await resolve_voice_chat_id(chat_id)
+    except Exception:
+        logger.exception("Failed to resolve peer for stop")
 
     try:
         await call_py.leave_call(chat_id)
