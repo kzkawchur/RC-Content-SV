@@ -45,6 +45,7 @@ JOIN_COOLDOWN_SECONDS = int(os.environ.get("JOIN_COOLDOWN_SECONDS", "15"))
 REJOIN_IGNORE_SECONDS = int(os.environ.get("REJOIN_IGNORE_SECONDS", "300"))
 SECRET_CODE_TTL_SECONDS = int(os.environ.get("SECRET_CODE_TTL_SECONDS", "600"))
 WELCOME_DEDUP_SECONDS = int(os.environ.get("WELCOME_DEDUP_SECONDS", "8"))
+CODE_MODE_DEFAULT = os.environ.get("CODE_MODE_DEFAULT", "on").strip().lower()
 
 SUPER_ADMINS = {
     int(x.strip())
@@ -108,6 +109,15 @@ def init_db() -> None:
         )
         conn.execute(
             '''
+            CREATE TABLE IF NOT EXISTS app_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            '''
+        )
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS join_memory (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
@@ -115,6 +125,11 @@ def init_db() -> None:
                 PRIMARY KEY (chat_id, user_id)
             )
             '''
+        )
+        now_ts = int(time.time())
+        conn.execute(
+            "INSERT OR IGNORE INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)",
+            ("code_mode", CODE_MODE_DEFAULT, now_ts),
         )
         conn.commit()
 
@@ -182,6 +197,28 @@ def get_activated_groups() -> list[int]:
     with db_connect() as conn:
         rows = conn.execute("SELECT chat_id FROM groups WHERE activated = 1").fetchall()
         return [int(r["chat_id"]) for r in rows]
+
+def get_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    with db_connect() as conn:
+        row = conn.execute("SELECT value FROM app_settings WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else default
+
+def set_setting(key: str, value: str) -> None:
+    now_ts = int(time.time())
+    with db_connect() as conn:
+        conn.execute(
+            '''
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+            ''',
+            (key, value, now_ts),
+        )
+        conn.commit()
+
+def is_code_mode_on() -> bool:
+    raw = str(get_setting("code_mode", CODE_MODE_DEFAULT) or CODE_MODE_DEFAULT).strip().lower()
+    return raw in {"1", "true", "on", "yes", "enable", "enabled"}
 
 def generate_secret_code(length: int = 6) -> str:
     alphabet = string.ascii_uppercase + string.digits
@@ -289,6 +326,25 @@ MESSAGES = {
             "🔐 Secret activation code: `{code}`\n\nএই code group-এ যে কেউ use করতে পারবে.\nGroup-এ লিখবে:\n`/activate {code}`\n\nCode {mins} মিনিট valid থাকবে.",
             "🔐 তোমার activation code: `{code}`\n\nTarget group-এ যে কেউ এই code use করতে পারবে:\n`/activate {code}`\n\nValidity: {mins} মিনিট.",
         ],
+        "code_mode_status": [
+            "Code mode is now: {mode}",
+            "বর্তমান code mode: {mode}",
+        ],
+        "code_mode_usage": [
+            "Usage:\n/codemode on\n/codemode off\n/codemode status",
+        ],
+        "code_mode_set": [
+            "Code mode changed to: {mode}",
+            "Code mode এখন {mode}",
+        ],
+        "code_mode_owner_only": [
+            "এই command শুধু bot admin ব্যবহার করতে পারবে।",
+            "Only bot owner/admin can use this command.",
+        ],
+        "code_not_needed": [
+            "Code mode OFF. এই group-এ শুধু /activate দিলেই হবে।",
+            "Code mode is OFF. Just use /activate in the group.",
+        ],
         "activate_group_only": ["Use /activate শুধু group-এ."],
         "activate_usage": ["Usage:\n/activate YOURCODE"],
         "invalid_code": [
@@ -310,7 +366,7 @@ MESSAGES = {
         "not_activated": ["এই group এখনো activated না. আগে /activate CODE দাও."],
         "welcome_saved": ["Custom welcome text saved successfully.", "Custom welcome text save হয়ে গেছে।"],
         "welcome_reset": ["Custom welcome reset done.", "Custom welcome reset করা হয়েছে।"],
-        "status": ["Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nTimezone: {tz}\nPhase now: {phase}"],
+        "status": ["Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nCode mode: {code_mode}\nTimezone: {tz}\nPhase now: {phase}"],
         "broadcast_owner_only": ["Broadcast is owner-only."],
         "broadcast_usage": ["Usage:\n/broadcast your message"],
         "broadcast_none": ["No activated groups found."],
@@ -337,6 +393,24 @@ MESSAGES = {
             "🔐 Secret activation code: `{code}`\n\nAnyone in the target group can use it.\nIn group, send:\n`/activate {code}`\n\nThe code will stay valid for {mins} minutes.",
             "🔐 Your activation code is `{code}`\n\nAny member of the target group can activate with:\n`/activate {code}`\n\nValid for {mins} minutes.",
         ],
+        "code_mode_status": [
+            "Current code mode: {mode}",
+            "Code mode is now: {mode}",
+        ],
+        "code_mode_usage": [
+            "Usage:\n/codemode on\n/codemode off\n/codemode status",
+        ],
+        "code_mode_set": [
+            "Code mode changed to: {mode}",
+            "Code mode is now {mode}",
+        ],
+        "code_mode_owner_only": [
+            "Only bot owner/admin can use this command.",
+        ],
+        "code_not_needed": [
+            "Code mode is OFF. Just use /activate in the group.",
+            "No code is needed right now. Use /activate in the group.",
+        ],
         "activate_group_only": ["Use /activate only in a group."],
         "activate_usage": ["Usage:\n/activate YOURCODE"],
         "invalid_code": ["Invalid, expired, or already used code."],
@@ -355,7 +429,7 @@ MESSAGES = {
         "not_activated": ["This group is not activated yet. Use /activate CODE first."],
         "welcome_saved": ["Custom welcome text saved successfully.", "Your custom welcome text has been saved."],
         "welcome_reset": ["Custom welcome has been reset."],
-        "status": ["Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nTimezone: {tz}\nCurrent phase: {phase}"],
+        "status": ["Bot name: {bot}\nActivated: {activated}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nCode mode: {code_mode}\nTimezone: {tz}\nCurrent phase: {phase}"],
         "broadcast_owner_only": ["Broadcast is owner-only."],
         "broadcast_usage": ["Usage:\n/broadcast your message"],
         "broadcast_none": ["No activated groups found."],
@@ -685,6 +759,9 @@ async def getcode_cmd(_, message: Message):
             text += "\n\n" + msg_text("bn", "support_hint")
         await message.reply_text(text)
         return
+    if not is_code_mode_on():
+        await message.reply_text(msg_text("bn", "code_not_needed"))
+        return
     code, _ = create_activation_code(message.from_user.id)
     await message.reply_text(msg_text("bn", "code_msg", code=code, mins=max(1, SECRET_CODE_TTL_SECONDS // 60)))
 
@@ -695,15 +772,39 @@ async def activate_cmd(client: Client, message: Message):
         return
     ensure_group(message.chat.id, message.chat.title or "")
     lang = get_group_lang(message.chat.id)
-    if len(message.command) < 2:
-        await message.reply_text(msg_text(lang, "activate_usage"))
-        return
-    code = message.command[1].strip().upper()
-    if not consume_activation_code(code, message.from_user.id if message.from_user else 0, message.chat.id):
-        await message.reply_text(msg_text(lang, "invalid_code"))
-        return
+    if is_code_mode_on():
+        if len(message.command) < 2:
+            await message.reply_text(msg_text(lang, "activate_usage"))
+            return
+        code = message.command[1].strip().upper()
+        if not consume_activation_code(code, message.from_user.id if message.from_user else 0, message.chat.id):
+            await message.reply_text(msg_text(lang, "invalid_code"))
+            return
     activate_group(message.chat.id, message.chat.title or "", message.from_user.id if message.from_user else 0)
     await message.reply_text(msg_text(lang, "activated"))
+
+@app.on_message(filters.command("codemode") & filters.private)
+async def codemode_cmd(_, message: Message):
+    if not message.from_user or not is_super_admin(message.from_user.id):
+        await message.reply_text(msg_text("en", "code_mode_owner_only"))
+        return
+
+    if len(message.command) < 2:
+        mode = "ON" if is_code_mode_on() else "OFF"
+        await message.reply_text(msg_text("en", "code_mode_usage") + "\n\n" + msg_text("en", "code_mode_status", mode=mode))
+        return
+
+    value = message.command[1].strip().lower()
+    if value == "status":
+        mode = "ON" if is_code_mode_on() else "OFF"
+        await message.reply_text(msg_text("en", "code_mode_status", mode=mode))
+        return
+    if value not in {"on", "off"}:
+        await message.reply_text(msg_text("en", "code_mode_usage"))
+        return
+
+    set_setting("code_mode", value)
+    await message.reply_text(msg_text("en", "code_mode_set", mode=value.upper()))
 
 @app.on_message(filters.command("lang"))
 async def lang_cmd(client: Client, message: Message):
@@ -825,7 +926,7 @@ async def status_cmd(client: Client, message: Message):
     if not group:
         await message.reply_text("No group config found.")
         return
-    await message.reply_text(msg_text(lang, "status", activated="YES" if int(group["activated"]) == 1 else "NO", lang_name="Bangla" if get_group_lang(message.chat.id) == "bn" else "English", voice="ON" if int(group["voice_enabled"]) == 1 else "OFF", delete_service="ON" if int(group["delete_service"]) == 1 else "OFF", tz=TIMEZONE_NAME, phase=get_day_phase()))
+    await message.reply_text(msg_text(lang, "status", activated="YES" if int(group["activated"]) == 1 else "NO", lang_name="Bangla" if get_group_lang(message.chat.id) == "bn" else "English", voice="ON" if int(group["voice_enabled"]) == 1 else "OFF", delete_service="ON" if int(group["delete_service"]) == 1 else "OFF", code_mode="ON" if is_code_mode_on() else "OFF", tz=TIMEZONE_NAME, phase=get_day_phase()))
 
 @app.on_message(filters.command("testwelcome"))
 async def testwelcome_cmd(client: Client, message: Message):
