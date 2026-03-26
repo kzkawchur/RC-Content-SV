@@ -20,18 +20,12 @@ from pyrogram import Client
 from pytgcalls import PyTgCalls
 from pytgcalls.types import MediaStream
 
-# -----------------------------
-# Logging
-# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("WebhookLibraryMusicBot")
 
-# -----------------------------
-# Env
-# -----------------------------
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"].strip()
@@ -50,14 +44,8 @@ DB_PATH = os.environ.get("DB_PATH", "music_library.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/music_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# -----------------------------
-# Flask app
-# -----------------------------
 app = Flask(__name__)
 
-# -----------------------------
-# Telegram Bot API helpers
-# -----------------------------
 def tg_get(method: str, params: dict[str, Any] | None = None) -> requests.Response:
     url = f"{API_BASE}/{method}"
     r = requests.get(url, params=params or {}, timeout=30)
@@ -123,7 +111,6 @@ def set_webhook_once() -> bool:
     try:
         delete_webhook()
         time.sleep(1)
-
         resp = tg_post(
             "setWebhook",
             {
@@ -131,12 +118,9 @@ def set_webhook_once() -> bool:
                 "allowed_updates": ["message", "edited_message"],
             },
         )
-
         ok = resp.ok and '"ok":true' in resp.text.replace(" ", "").lower()
-
         info = tg_get("getWebhookInfo")
         logger.info("Webhook info after set: %s", info.text[:1000])
-
         if ok:
             set_my_commands()
             return True
@@ -173,9 +157,6 @@ def download_bot_file(file_id: str, destination: str) -> None:
                 if chunk:
                     f.write(chunk)
 
-# -----------------------------
-# DB
-# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -183,7 +164,8 @@ def db_connect() -> sqlite3.Connection:
 
 def init_db() -> None:
     with db_connect() as conn:
-        conn.execute("""
+        conn.execute(
+            '''
             CREATE TABLE IF NOT EXISTS songs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
@@ -193,7 +175,8 @@ def init_db() -> None:
                 added_by INTEGER,
                 created_at INTEGER NOT NULL
             )
-        """)
+            '''
+        )
         conn.commit()
 
 def normalize_name(name: str) -> str:
@@ -210,10 +193,13 @@ def add_song_to_db(
 ) -> None:
     song_name = normalize_name(name)
     with db_connect() as conn:
-        conn.execute("""
+        conn.execute(
+            '''
             INSERT OR REPLACE INTO songs (name, file_id, original_name, mime_type, added_by, created_at)
             VALUES (?, ?, ?, ?, ?, ?)
-        """, (song_name, file_id, original_name, mime_type, added_by, int(time.time())))
+            ''',
+            (song_name, file_id, original_name, mime_type, added_by, int(time.time())),
+        )
         conn.commit()
 
 def get_song(name: str) -> Optional[sqlite3.Row]:
@@ -243,9 +229,6 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def split_long_text(text: str, limit: int = 3500) -> list[str]:
     parts = []
     while len(text) > limit:
@@ -271,7 +254,6 @@ def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str
         ext = Path(original_name).suffix.lower()
         if ext:
             return ext
-
     if mime_type:
         if "mpeg" in mime_type or "mp3" in mime_type:
             return ".mp3"
@@ -287,34 +269,26 @@ def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str
             return ".flac"
         if "video/" in mime_type:
             return ".mp4"
-
     return ".mp3"
 
 def extract_replied_media(reply_msg: dict) -> tuple[Optional[dict], Optional[str]]:
     if not reply_msg:
         return None, None
-
     if reply_msg.get("audio"):
         return reply_msg["audio"], "audio"
     if reply_msg.get("voice"):
         return reply_msg["voice"], "voice"
     if reply_msg.get("video"):
         return reply_msg["video"], "video"
-
     doc = reply_msg.get("document")
     if doc and doc.get("mime_type"):
         mt = doc["mime_type"]
         if mt.startswith("audio/") or mt.startswith("video/"):
             return doc, "document"
-
     return None, None
 
-# -----------------------------
-# Voice / PyTgCalls
-# -----------------------------
 user = None
 call_py = None
-
 VOICE_LOOP = asyncio.new_event_loop()
 VOICE_READY = threading.Event()
 ACTIVE_STREAMS: dict[int, dict[str, Any]] = {}
@@ -333,26 +307,29 @@ async def cleanup_chat_file(chat_id: int) -> None:
 
 async def resolve_voice_chat_id(chat_id: int) -> int:
     global user
-
     if user is None:
         raise RuntimeError("Voice session is not ready")
-
-    resolved_chat = await user.get_chat(chat_id)
-    logger.info("Resolved voice peer successfully: raw=%s resolved=%s", chat_id, resolved_chat.id)
-    return resolved_chat.id
+    chat_id = int(chat_id)
+    try:
+        resolved_chat = await user.get_chat(chat_id)
+        logger.info("Resolved voice peer directly: raw=%s resolved=%s", chat_id, resolved_chat.id)
+        return resolved_chat.id
+    except Exception:
+        logger.exception("Direct get_chat failed, trying dialogs scan")
+    async for dialog in user.get_dialogs(limit=500):
+        try:
+            if int(dialog.chat.id) == chat_id:
+                logger.info("Resolved voice peer from dialogs: raw=%s resolved=%s", chat_id, dialog.chat.id)
+                return int(dialog.chat.id)
+        except Exception:
+            continue
+    raise RuntimeError(f"Could not resolve peer for chat id {chat_id}")
 
 async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, status_message_id: int) -> None:
     global user, call_py
-
     if user is None or call_py is None:
-        await asyncio.to_thread(
-            edit_message,
-            status_chat_id,
-            status_message_id,
-            "Voice engine is not ready.",
-        )
+        await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Voice engine is not ready.")
         return
-
     try:
         chat_id = await resolve_voice_chat_id(chat_id)
     except Exception as e:
@@ -364,39 +341,26 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
             f"Play failed:\nCould not resolve this group for the session account.\n{e}",
         )
         return
-
     row = get_song(song_name)
     if not row:
-        await asyncio.to_thread(
-            edit_message,
-            status_chat_id,
-            status_message_id,
-            "Song not found in library.",
-        )
+        await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Song not found in library.")
         return
-
     ext = safe_file_ext(row["original_name"], row["mime_type"])
     local_path = TMP_DIR / f"{abs(chat_id)}_{int(time.time())}{ext}"
-
     try:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Preparing: {row['name']}")
         await asyncio.to_thread(download_bot_file, row["file_id"], str(local_path))
-
         try:
             await call_py.leave_call(chat_id)
         except Exception:
             pass
-
         await cleanup_chat_file(chat_id)
-
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Starting voice chat stream...")
         await call_py.play(chat_id, MediaStream(str(local_path)))
-
         ACTIVE_STREAMS[chat_id] = {
             "name": row["name"],
             "local_path": str(local_path),
         }
-
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Now playing: {row['name']}")
     except Exception as e:
         logger.exception("play_saved_song failed")
@@ -405,54 +369,42 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
                 local_path.unlink(missing_ok=True)
         except Exception:
             pass
-        await asyncio.to_thread(
-            edit_message,
-            status_chat_id,
-            status_message_id,
-            f"Play failed:\n{e}",
-        )
+        await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Play failed:\n{e}")
 
 async def stop_current_stream(chat_id: int) -> None:
     global user, call_py
-
     if user is None or call_py is None:
         return
-
     try:
         chat_id = await resolve_voice_chat_id(chat_id)
     except Exception:
         logger.exception("Failed to resolve peer for stop")
-
     try:
         await call_py.leave_call(chat_id)
     except Exception:
         logger.exception("leave_call failed")
-
     await cleanup_chat_file(chat_id)
     ACTIVE_STREAMS.pop(chat_id, None)
 
 async def voice_boot() -> None:
     global user, call_py
-
     user = Client(
         "voice-user",
         api_id=API_ID,
         api_hash=API_HASH,
         session_string=SESSION_STRING,
-        no_updates=True,
     )
-
     call_py = PyTgCalls(user)
-
     await user.start()
     logger.info("User client started")
-
+    loaded = 0
+    async for _ in user.get_dialogs(limit=300):
+        loaded += 1
+    logger.info("Preloaded dialogs: %s", loaded)
     await call_py.start()
     logger.info("PyTgCalls started")
-
     me = await user.get_me()
     logger.info("User logged in as: %s", me.first_name)
-
     VOICE_READY.set()
 
 def run_voice_loop() -> None:
@@ -463,9 +415,6 @@ def run_voice_loop() -> None:
 def schedule_coro(coro: Any):
     return asyncio.run_coroutine_threadsafe(coro, VOICE_LOOP)
 
-# -----------------------------
-# Flask routes
-# -----------------------------
 @app.get("/")
 def home():
     return "Webhook Library Music Bot is running"
@@ -490,11 +439,7 @@ def manual_setup_webhook():
 def webhook_info():
     try:
         r = tg_get("getWebhookInfo")
-        return app.response_class(
-            response=r.text,
-            status=r.status_code,
-            mimetype="application/json",
-        )
+        return app.response_class(response=r.text, status=r.status_code, mimetype="application/json")
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
@@ -502,20 +447,16 @@ def webhook_info():
 def telegram_webhook():
     data = request.get_json(silent=True) or {}
     logger.info("Incoming update: %s", str(data)[:3000])
-
     msg = data.get("message") or data.get("edited_message")
     if not msg:
         return jsonify({"ok": True, "ignored": "no-message"})
-
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     chat_type = chat.get("type")
     message_id = msg.get("message_id")
     text = msg.get("text", "")
-
     if not chat_id:
         return jsonify({"ok": True, "ignored": "no-chat-id"})
-
     cmd, arg_text = parse_command(text)
 
     if cmd == "start":
@@ -549,7 +490,6 @@ def telegram_webhook():
             if not arg_text:
                 send_message(chat_id, "Usage:\n/addsong <name>", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             reply_msg = msg.get("reply_to_message")
             media, media_type = extract_replied_media(reply_msg)
             if not media:
@@ -559,13 +499,11 @@ def telegram_webhook():
                     reply_to_message_id=message_id,
                 )
                 return jsonify({"ok": True})
-
             song_name = arg_text.strip()
             file_id = media.get("file_id")
             original_name = media.get("file_name")
             mime_type = media.get("mime_type")
             added_by = (msg.get("from") or {}).get("id")
-
             add_song_to_db(song_name, file_id, original_name, mime_type, added_by)
             send_message(
                 chat_id,
@@ -579,7 +517,6 @@ def telegram_webhook():
             if not rows:
                 send_message(chat_id, "No songs saved yet.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             text_out = "Saved songs:\n\n" + "\n".join(f"- {row['name']}" for row in rows)
             for part in split_long_text(text_out):
                 send_message(chat_id, part)
@@ -589,12 +526,10 @@ def telegram_webhook():
             if not arg_text:
                 send_message(chat_id, "Usage:\n/searchsong <keyword>", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             rows = search_songs(arg_text, limit=20)
             if not rows:
                 send_message(chat_id, "No matching songs found.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             text_out = "Search results:\n\n" + "\n".join(f"- {row['name']}" for row in rows)
             send_message(chat_id, text_out, reply_to_message_id=message_id)
             return jsonify({"ok": True})
@@ -603,7 +538,6 @@ def telegram_webhook():
             if not arg_text:
                 send_message(chat_id, "Usage:\n/delsong <name>", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             ok = delete_song(arg_text)
             if ok:
                 send_message(chat_id, f"Deleted: {normalize_name(arg_text)}", reply_to_message_id=message_id)
@@ -624,16 +558,13 @@ def telegram_webhook():
             if not arg_text:
                 send_message(chat_id, "Usage:\n/play <saved song name>", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             if not VOICE_READY.is_set():
                 send_message(chat_id, "Voice engine is not ready yet. Try again in a few seconds.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             status_message_id = send_message(chat_id, "Queued...", reply_to_message_id=message_id)
             if status_message_id is None:
                 send_message(chat_id, "Failed to create status message.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             schedule_coro(play_saved_song(chat_id, arg_text, chat_id, status_message_id))
             return jsonify({"ok": True})
 
@@ -641,7 +572,6 @@ def telegram_webhook():
             if not VOICE_READY.is_set():
                 send_message(chat_id, "Voice engine is not ready yet.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
-
             schedule_coro(stop_current_stream(chat_id))
             send_message(chat_id, "Stopped the stream.", reply_to_message_id=message_id)
             return jsonify({"ok": True})
@@ -652,14 +582,9 @@ def telegram_webhook():
 
     return jsonify({"ok": True, "ignored": True})
 
-# -----------------------------
-# Main
-# -----------------------------
 if __name__ == "__main__":
     init_db()
-
     threading.Thread(target=run_voice_loop, daemon=True).start()
     threading.Thread(target=setup_webhook_with_retry, daemon=True).start()
-
     logger.info("Starting Flask on port %s", PORT)
     app.run(host="0.0.0.0", port=PORT, threaded=True)
