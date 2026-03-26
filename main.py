@@ -46,6 +46,9 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 
+# -----------------------------
+# Telegram Bot API helpers
+# -----------------------------
 def tg_get(method: str, params: dict[str, Any] | None = None) -> requests.Response:
     url = f"{API_BASE}/{method}"
     r = requests.get(url, params=params or {}, timeout=30)
@@ -108,7 +111,6 @@ def set_my_commands() -> None:
                     {"command": "delsong", "description": "Delete a saved song"},
                     {"command": "play", "description": "Play a saved song"},
                     {"command": "stop", "description": "Stop current stream"},
-                    {"command": "loop", "description": "Toggle loop mode"},
                     {"command": "nowplaying", "description": "Show current song"},
                 ]
             },
@@ -172,6 +174,9 @@ def download_bot_file(file_id: str, destination: str) -> None:
                 if chunk:
                     f.write(chunk)
 
+# -----------------------------
+# DB
+# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -244,6 +249,9 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
+# -----------------------------
+# Helpers
+# -----------------------------
 def split_long_text(text: str, limit: int = 3500) -> list[str]:
     parts = []
     while len(text) > limit:
@@ -302,13 +310,14 @@ def extract_replied_media(reply_msg: dict) -> tuple[Optional[dict], Optional[str
             return doc, "document"
     return None, None
 
+# -----------------------------
+# Voice / PyTgCalls
+# -----------------------------
 user = None
 call_py = None
 VOICE_LOOP = asyncio.new_event_loop()
 VOICE_READY = threading.Event()
 ACTIVE_STREAMS: dict[int, dict[str, Any]] = {}
-LOOP_STATES: dict[int, bool] = {}
-MANUAL_STOP_UNTIL: dict[int, float] = {}
 
 async def cleanup_chat_file(chat_id: int) -> None:
     info = ACTIVE_STREAMS.get(chat_id)
@@ -347,12 +356,8 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
     if user is None or call_py is None:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Voice engine is not ready.")
         return
-
-    original_chat_id = int(chat_id)
     try:
         chat_id = await resolve_voice_chat_id(chat_id)
-        if original_chat_id != chat_id and original_chat_id in LOOP_STATES and chat_id not in LOOP_STATES:
-            LOOP_STATES[chat_id] = LOOP_STATES[original_chat_id]
     except Exception as e:
         logger.exception("Failed to resolve peer")
         await asyncio.to_thread(
@@ -362,7 +367,6 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
             f"Play failed:\nCould not resolve this group for the session account.\n{e}",
         )
         return
-
     row = get_song(song_name)
     if not row:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Song not found in library.")
@@ -374,8 +378,6 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Preparing: {row['name']}")
         await asyncio.to_thread(download_bot_file, row["file_id"], str(local_path))
         try:
-            if chat_id in ACTIVE_STREAMS:
-                MANUAL_STOP_UNTIL[chat_id] = time.time() + 15
             await call_py.leave_call(chat_id)
         except Exception:
             pass
@@ -404,7 +406,6 @@ async def stop_current_stream(chat_id: int) -> None:
         chat_id = await resolve_voice_chat_id(chat_id)
     except Exception:
         logger.exception("Failed to resolve peer for stop")
-    MANUAL_STOP_UNTIL[int(chat_id)] = time.time() + 15
     try:
         await call_py.leave_call(chat_id)
     except Exception:
@@ -414,61 +415,32 @@ async def stop_current_stream(chat_id: int) -> None:
 
 async def voice_boot() -> None:
     global user, call_py
-    user = Client(
-        "voice-user",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=SESSION_STRING,
-    )
-    call_py = PyTgCalls(user)
+    try:
+        user = Client(
+            "voice-user",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=SESSION_STRING,
+        )
+        call_py = PyTgCalls(user)
 
-    @call_py.on_stream_end()
-    async def on_stream_end_handler(_, update):
-        chat_id = getattr(update, "chat_id", None)
-        if chat_id is None:
-            return
-        chat_id = int(chat_id)
+        await user.start()
+        logger.info("User client started")
 
-        suppress_until = MANUAL_STOP_UNTIL.get(chat_id)
-        if suppress_until is not None:
-            if time.time() <= suppress_until:
-                MANUAL_STOP_UNTIL.pop(chat_id, None)
-                return
-            MANUAL_STOP_UNTIL.pop(chat_id, None)
+        loaded = 0
+        async for _ in user.get_dialogs(limit=300):
+            loaded += 1
+        logger.info("Preloaded dialogs: %s", loaded)
 
-        info = ACTIVE_STREAMS.get(chat_id)
-        if not info:
-            return
+        await call_py.start()
+        logger.info("PyTgCalls started")
 
-        if not LOOP_STATES.get(chat_id, False):
-            await cleanup_chat_file(chat_id)
-            ACTIVE_STREAMS.pop(chat_id, None)
-            return
+        me = await user.get_me()
+        logger.info("User logged in as: %s", me.first_name)
 
-        local_path = info.get("local_path")
-        if not local_path or not os.path.exists(local_path):
-            ACTIVE_STREAMS.pop(chat_id, None)
-            return
-
-        try:
-            await call_py.play(chat_id, MediaStream(local_path))
-            logger.info("Loop replay started in chat %s for %s", chat_id, info.get("name"))
-        except Exception:
-            logger.exception("Loop replay failed for chat %s", chat_id)
-            await cleanup_chat_file(chat_id)
-            ACTIVE_STREAMS.pop(chat_id, None)
-
-    await user.start()
-    logger.info("User client started")
-    loaded = 0
-    async for _ in user.get_dialogs(limit=300):
-        loaded += 1
-    logger.info("Preloaded dialogs: %s", loaded)
-    await call_py.start()
-    logger.info("PyTgCalls started")
-    me = await user.get_me()
-    logger.info("User logged in as: %s", me.first_name)
-    VOICE_READY.set()
+        VOICE_READY.set()
+    except Exception:
+        logger.exception("voice_boot failed")
 
 def run_voice_loop() -> None:
     asyncio.set_event_loop(VOICE_LOOP)
@@ -478,6 +450,9 @@ def run_voice_loop() -> None:
 def schedule_coro(coro: Any):
     return asyncio.run_coroutine_threadsafe(coro, VOICE_LOOP)
 
+# -----------------------------
+# Flask routes
+# -----------------------------
 @app.get("/")
 def home():
     return "Webhook Library Music Bot is running"
@@ -513,6 +488,7 @@ def telegram_webhook():
     msg = data.get("message") or data.get("edited_message")
     if not msg:
         return jsonify({"ok": True, "ignored": "no-message"})
+
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     chat_type = chat.get("type")
@@ -520,6 +496,7 @@ def telegram_webhook():
     text = msg.get("text", "")
     if not chat_id:
         return jsonify({"ok": True, "ignored": "no-chat-id"})
+
     cmd, arg_text = parse_command(text)
 
     if cmd == "start":
@@ -535,12 +512,12 @@ def telegram_webhook():
             "/delsong <name>\n"
             "/play <name>\n"
             "/stop\n"
-            "/loop [on|off]\n"
             "/nowplaying\n\n"
             "How to use:\n"
             "1. Send or forward an audio/video file to the bot in private chat\n"
             "2. Reply to that file with /addsong <name>\n"
-            "3. In your group, start voice chat and use /play <name>",
+            "3. In your group, start voice chat and use /play <name>\n\n"
+            "Group playback commands work for admins only.",
             reply_to_message_id=message_id,
         )
         return jsonify({"ok": True})
@@ -610,41 +587,19 @@ def telegram_webhook():
             return jsonify({"ok": True})
 
     if chat_type in ("group", "supergroup"):
-        if cmd in ("play", "stop", "loop", "nowplaying"):
+        if cmd in {"play", "stop", "nowplaying"}:
             from_user = msg.get("from") or {}
-            from_user_id = from_user.get("id")
-            if not from_user_id or not is_group_admin(chat_id, from_user_id):
+            user_id = from_user.get("id")
+            if not user_id or not is_group_admin(chat_id, user_id):
                 send_message(chat_id, "Only group admins can use this command.", reply_to_message_id=message_id)
                 return jsonify({"ok": True})
 
-        if cmd == "loop":
-            if arg_text:
-                value = arg_text.strip().lower()
-                if value == "on":
-                    LOOP_STATES[chat_id] = True
-                    send_message(chat_id, "Loop enabled.", reply_to_message_id=message_id)
-                    return jsonify({"ok": True})
-                if value == "off":
-                    LOOP_STATES[chat_id] = False
-                    send_message(chat_id, "Loop disabled.", reply_to_message_id=message_id)
-                    return jsonify({"ok": True})
-                send_message(chat_id, "Usage:\n/loop\n/loop on\n/loop off", reply_to_message_id=message_id)
-                return jsonify({"ok": True})
-
-            LOOP_STATES[chat_id] = not LOOP_STATES.get(chat_id, False)
-            if LOOP_STATES[chat_id]:
-                send_message(chat_id, "Loop enabled.", reply_to_message_id=message_id)
-            else:
-                send_message(chat_id, "Loop disabled.", reply_to_message_id=message_id)
-            return jsonify({"ok": True})
-
         if cmd == "nowplaying":
             info = ACTIVE_STREAMS.get(chat_id)
-            loop_text = "ON" if LOOP_STATES.get(chat_id, False) else "OFF"
             if not info:
-                send_message(chat_id, f"Nothing is playing right now.\nLoop: {loop_text}", reply_to_message_id=message_id)
+                send_message(chat_id, "Nothing is playing right now.", reply_to_message_id=message_id)
             else:
-                send_message(chat_id, f"Now playing: {info['name']}\nLoop: {loop_text}", reply_to_message_id=message_id)
+                send_message(chat_id, f"Now playing: {info['name']}", reply_to_message_id=message_id)
             return jsonify({"ok": True})
 
         if cmd == "play":
