@@ -1,5 +1,4 @@
 Flask==3.1.0
-requests==2.32.3
 pyrogram==2.0.106
 tgcrypto==1.2.5
-py-tgcalls[pyrogram]==2.2.11
+edge-tts==7.2.3
