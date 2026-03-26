@@ -46,22 +46,17 @@ TMP_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 
-# -----------------------------
-# Telegram Bot API helpers
-# -----------------------------
 def tg_get(method: str, params: dict[str, Any] | None = None) -> requests.Response:
     url = f"{API_BASE}/{method}"
     r = requests.get(url, params=params or {}, timeout=30)
     logger.info("Telegram GET %s -> %s", method, r.text[:700])
     return r
 
-
 def tg_post(method: str, payload: dict[str, Any] | None = None) -> requests.Response:
     url = f"{API_BASE}/{method}"
     r = requests.post(url, json=payload or {}, timeout=30)
     logger.info("Telegram POST %s -> %s", method, r.text[:700])
     return r
-
 
 def send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = None) -> Optional[int]:
     payload: dict[str, Any] = {"chat_id": chat_id, "text": text}
@@ -76,7 +71,6 @@ def send_message(chat_id: int, text: str, reply_to_message_id: Optional[int] = N
         logger.exception("send_message failed")
     return None
 
-
 def edit_message(chat_id: int, message_id: int, text: str) -> None:
     try:
         tg_post(
@@ -85,23 +79,6 @@ def edit_message(chat_id: int, message_id: int, text: str) -> None:
         )
     except Exception:
         logger.exception("edit_message failed")
-
-
-def get_chat_member_status(chat_id: int, user_id: int) -> Optional[str]:
-    try:
-        r = tg_get("getChatMember", {"chat_id": chat_id, "user_id": user_id})
-        data = r.json()
-        if data.get("ok") and data.get("result"):
-            return data["result"].get("status")
-    except Exception:
-        logger.exception("get_chat_member_status failed")
-    return None
-
-
-def is_group_admin(chat_id: int, user_id: int) -> bool:
-    status = get_chat_member_status(chat_id, user_id)
-    return status in {"creator", "administrator"}
-
 
 def set_my_commands() -> None:
     try:
@@ -124,13 +101,11 @@ def set_my_commands() -> None:
     except Exception:
         logger.exception("setMyCommands failed")
 
-
 def delete_webhook() -> None:
     try:
         tg_post("deleteWebhook", {"drop_pending_updates": True})
     except Exception:
         logger.exception("deleteWebhook failed")
-
 
 def set_webhook_once() -> bool:
     try:
@@ -154,7 +129,6 @@ def set_webhook_once() -> bool:
         logger.exception("set_webhook_once failed")
         return False
 
-
 def setup_webhook_with_retry() -> None:
     logger.info("Starting webhook setup. Target: %s", FULL_WEBHOOK_URL)
     for attempt in range(1, 13):
@@ -165,14 +139,12 @@ def setup_webhook_with_retry() -> None:
         time.sleep(5)
     logger.error("Webhook setup failed after all retries")
 
-
 def get_file_path(file_id: str) -> str:
     r = tg_get("getFile", {"file_id": file_id})
     data = r.json()
     if not data.get("ok"):
         raise RuntimeError(f"getFile failed: {data}")
     return data["result"]["file_path"]
-
 
 def download_bot_file(file_id: str, destination: str) -> None:
     file_path = get_file_path(file_id)
@@ -185,14 +157,10 @@ def download_bot_file(file_id: str, destination: str) -> None:
                 if chunk:
                     f.write(chunk)
 
-# -----------------------------
-# DB
-# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_db() -> None:
     with db_connect() as conn:
@@ -211,12 +179,10 @@ def init_db() -> None:
         )
         conn.commit()
 
-
 def normalize_name(name: str) -> str:
     name = name.strip().lower()
     name = re.sub(r"\s+", " ", name)
     return name
-
 
 def add_song_to_db(
     name: str,
@@ -236,12 +202,10 @@ def add_song_to_db(
         )
         conn.commit()
 
-
 def get_song(name: str) -> Optional[sqlite3.Row]:
     song_name = normalize_name(name)
     with db_connect() as conn:
         return conn.execute("SELECT * FROM songs WHERE name = ?", (song_name,)).fetchone()
-
 
 def search_songs(keyword: str, limit: int = 10):
     q = f"%{normalize_name(keyword)}%"
@@ -251,14 +215,12 @@ def search_songs(keyword: str, limit: int = 10):
             (q, limit),
         ).fetchall()
 
-
 def list_songs(limit: int = 50):
     with db_connect() as conn:
         return conn.execute(
             "SELECT * FROM songs ORDER BY name ASC LIMIT ?",
             (limit,),
         ).fetchall()
-
 
 def delete_song(name: str) -> bool:
     song_name = normalize_name(name)
@@ -267,9 +229,6 @@ def delete_song(name: str) -> bool:
         conn.commit()
         return cur.rowcount > 0
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def split_long_text(text: str, limit: int = 3500) -> list[str]:
     parts = []
     while len(text) > limit:
@@ -282,7 +241,6 @@ def split_long_text(text: str, limit: int = 3500) -> list[str]:
         parts.append(text)
     return parts
 
-
 def parse_command(text: str) -> tuple[Optional[str], str]:
     if not text or not text.startswith("/"):
         return None, ""
@@ -290,7 +248,6 @@ def parse_command(text: str) -> tuple[Optional[str], str]:
     cmd = parts[0][1:].split("@")[0].lower()
     rest = parts[1].strip() if len(parts) > 1 else ""
     return cmd, rest
-
 
 def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str:
     if original_name and "." in original_name:
@@ -314,7 +271,6 @@ def safe_file_ext(original_name: Optional[str], mime_type: Optional[str]) -> str
             return ".mp4"
     return ".mp3"
 
-
 def extract_replied_media(reply_msg: dict) -> tuple[Optional[dict], Optional[str]]:
     if not reply_msg:
         return None, None
@@ -331,15 +287,11 @@ def extract_replied_media(reply_msg: dict) -> tuple[Optional[dict], Optional[str
             return doc, "document"
     return None, None
 
-# -----------------------------
-# Voice / PyTgCalls
-# -----------------------------
 user = None
 call_py = None
 VOICE_LOOP = asyncio.new_event_loop()
 VOICE_READY = threading.Event()
 ACTIVE_STREAMS: dict[int, dict[str, Any]] = {}
-
 
 async def cleanup_chat_file(chat_id: int) -> None:
     info = ACTIVE_STREAMS.get(chat_id)
@@ -352,7 +304,6 @@ async def cleanup_chat_file(chat_id: int) -> None:
             logger.info("Removed temp file: %s", path)
         except Exception:
             logger.exception("Failed to remove temp file: %s", path)
-
 
 async def resolve_voice_chat_id(chat_id: int) -> int:
     global user
@@ -374,7 +325,6 @@ async def resolve_voice_chat_id(chat_id: int) -> int:
             continue
     raise RuntimeError(f"Could not resolve peer for chat id {chat_id}")
 
-
 async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, status_message_id: int) -> None:
     global user, call_py
     if user is None or call_py is None:
@@ -395,7 +345,6 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
     if not row:
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, "Song not found in library.")
         return
-
     ext = safe_file_ext(row["original_name"], row["mime_type"])
     local_path = TMP_DIR / f"{abs(chat_id)}_{int(time.time())}{ext}"
     try:
@@ -422,7 +371,6 @@ async def play_saved_song(chat_id: int, song_name: str, status_chat_id: int, sta
             pass
         await asyncio.to_thread(edit_message, status_chat_id, status_message_id, f"Play failed:\n{e}")
 
-
 async def stop_current_stream(chat_id: int) -> None:
     global user, call_py
     if user is None or call_py is None:
@@ -438,53 +386,38 @@ async def stop_current_stream(chat_id: int) -> None:
     await cleanup_chat_file(chat_id)
     ACTIVE_STREAMS.pop(chat_id, None)
 
-
 async def voice_boot() -> None:
     global user, call_py
-    try:
-        user = Client(
-            "voice-user",
-            api_id=API_ID,
-            api_hash=API_HASH,
-            session_string=SESSION_STRING,
-        )
-        call_py = PyTgCalls(user)
-
-        await user.start()
-        logger.info("User client started")
-
-        loaded = 0
-        async for _ in user.get_dialogs(limit=300):
-            loaded += 1
-        logger.info("Preloaded dialogs: %s", loaded)
-
-        await call_py.start()
-        logger.info("PyTgCalls started")
-
-        me = await user.get_me()
-        logger.info("User logged in as: %s", me.first_name)
-
-        VOICE_READY.set()
-    except Exception:
-        logger.exception("voice_boot failed")
-
+    user = Client(
+        "voice-user",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=SESSION_STRING,
+    )
+    call_py = PyTgCalls(user)
+    await user.start()
+    logger.info("User client started")
+    loaded = 0
+    async for _ in user.get_dialogs(limit=300):
+        loaded += 1
+    logger.info("Preloaded dialogs: %s", loaded)
+    await call_py.start()
+    logger.info("PyTgCalls started")
+    me = await user.get_me()
+    logger.info("User logged in as: %s", me.first_name)
+    VOICE_READY.set()
 
 def run_voice_loop() -> None:
     asyncio.set_event_loop(VOICE_LOOP)
     VOICE_LOOP.create_task(voice_boot())
     VOICE_LOOP.run_forever()
 
-
 def schedule_coro(coro: Any):
     return asyncio.run_coroutine_threadsafe(coro, VOICE_LOOP)
 
-# -----------------------------
-# Flask routes
-# -----------------------------
 @app.get("/")
 def home():
     return "Webhook Library Music Bot is running"
-
 
 @app.get("/health")
 def health():
@@ -497,12 +430,10 @@ def health():
         }
     )
 
-
 @app.get("/setup-webhook")
 def manual_setup_webhook():
     ok = set_webhook_once()
     return jsonify({"ok": ok, "webhook_url": FULL_WEBHOOK_URL})
-
 
 @app.get("/webhook-info")
 def webhook_info():
@@ -512,7 +443,6 @@ def webhook_info():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
-
 @app.post(WEBHOOK_PATH)
 def telegram_webhook():
     data = request.get_json(silent=True) or {}
@@ -520,7 +450,6 @@ def telegram_webhook():
     msg = data.get("message") or data.get("edited_message")
     if not msg:
         return jsonify({"ok": True, "ignored": "no-message"})
-
     chat = msg.get("chat") or {}
     chat_id = chat.get("id")
     chat_type = chat.get("type")
@@ -528,7 +457,6 @@ def telegram_webhook():
     text = msg.get("text", "")
     if not chat_id:
         return jsonify({"ok": True, "ignored": "no-chat-id"})
-
     cmd, arg_text = parse_command(text)
 
     if cmd == "start":
@@ -548,8 +476,7 @@ def telegram_webhook():
             "How to use:\n"
             "1. Send or forward an audio/video file to the bot in private chat\n"
             "2. Reply to that file with /addsong <name>\n"
-            "3. In your group, start voice chat and use /play <name>\n\n"
-            "Group playback commands work for admins only.",
+            "3. In your group, start voice chat and use /play <name>",
             reply_to_message_id=message_id,
         )
         return jsonify({"ok": True})
@@ -619,13 +546,6 @@ def telegram_webhook():
             return jsonify({"ok": True})
 
     if chat_type in ("group", "supergroup"):
-        if cmd in {"play", "stop", "nowplaying"}:
-            from_user = msg.get("from") or {}
-            user_id = from_user.get("id")
-            if not user_id or not is_group_admin(chat_id, user_id):
-                send_message(chat_id, "Only group admins can use this command.", reply_to_message_id=message_id)
-                return jsonify({"ok": True})
-
         if cmd == "nowplaying":
             info = ACTIVE_STREAMS.get(chat_id)
             if not info:
@@ -661,7 +581,6 @@ def telegram_webhook():
         return jsonify({"ok": True})
 
     return jsonify({"ok": True, "ignored": True})
-
 
 if __name__ == "__main__":
     init_db()
