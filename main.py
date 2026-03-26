@@ -1,71 +1,101 @@
-import asyncio
 import logging
 import os
 import threading
 
 import requests
-from flask import Flask
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message
+from flask import Flask, jsonify, request
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("ResetBot")
+logger = logging.getLogger("WebhookBot")
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 PORT = int(os.environ.get("PORT", 8080))
+WEBHOOK_URL = os.environ["WEBHOOK_URL"].rstrip("/")
 
-flask_app = Flask(__name__)
+API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
+WEBHOOK_PATH = "/webhook"
+FULL_WEBHOOK_URL = f"{WEBHOOK_URL}{WEBHOOK_PATH}"
 
-@flask_app.get("/")
-def home():
-    return "Reset bot running"
+app = Flask(__name__)
 
-@flask_app.get("/health")
-def health():
-    return {"status": "ok"}
 
-def run_flask():
-    flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
-
-def delete_webhook():
+def tg_api(method: str, payload: dict | None = None):
+    url = f"{API_BASE}/{method}"
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
-        r = requests.get(url, params={"drop_pending_updates": "true"}, timeout=20)
-        logger.info("deleteWebhook response: %s", r.text)
+        r = requests.post(url, json=payload or {}, timeout=30)
+        logger.info("Telegram API %s -> %s", method, r.text[:500])
+        return r
     except Exception:
-        logger.exception("deleteWebhook failed")
+        logger.exception("Telegram API call failed: %s", method)
+        raise
 
-bot = Client(
-    "reset-bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
 
-@bot.on_message(filters.private & ~filters.service)
-async def private_debug(client: Client, message: Message):
-    logger.info("PRIVATE UPDATE | chat_id=%s | text=%s", message.chat.id, message.text)
-    if message.text == "/start":
-        await message.reply_text("reset ok")
+def send_message(chat_id: int, text: str):
+    return tg_api("sendMessage", {"chat_id": chat_id, "text": text})
+
+
+def set_webhook():
+    try:
+        tg_api("deleteWebhook", {"drop_pending_updates": True})
+        tg_api("setWebhook", {"url": FULL_WEBHOOK_URL})
+        info = requests.get(f"{API_BASE}/getWebhookInfo", timeout=30)
+        logger.info("Webhook info: %s", info.text)
+    except Exception:
+        logger.exception("Failed to set webhook")
+
+
+@app.get("/")
+def home():
+    return "Webhook bot is running!"
+
+
+@app.get("/health")
+def health():
+    return jsonify(
+        {
+            "status": "ok",
+            "mode": "webhook",
+            "webhook_url": FULL_WEBHOOK_URL,
+        }
+    )
+
+
+@app.post(WEBHOOK_PATH)
+def webhook():
+    data = request.get_json(silent=True) or {}
+    logger.info("Incoming update: %s", str(data)[:2000])
+
+    message = data.get("message") or data.get("edited_message")
+    if not message:
+        return jsonify({"ok": True, "ignored": True})
+
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    text = message.get("text", "")
+
+    if not chat_id:
+        return jsonify({"ok": True, "ignored": True})
+
+    if text == "/start":
+        send_message(
+            chat_id,
+            "Webhook bot is alive.\n\nCommands:\n/start\n/ping",
+        )
+    elif text == "/ping":
+        send_message(chat_id, "pong")
     else:
-        await message.reply_text("got your message")
+        send_message(chat_id, f"got: {text or '[non-text]'}")
 
-async def main():
-    threading.Thread(target=run_flask, daemon=True).start()
-    logger.info("Flask started on port %s", PORT)
+    return jsonify({"ok": True})
 
-    delete_webhook()
 
-    await bot.start()
-    me = await bot.get_me()
-    logger.info("Bot logged in as: @%s", me.username)
+def boot():
+    set_webhook()
 
-    await idle()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    threading.Thread(target=boot, daemon=True).start()
+    app.run(host="0.0.0.0", port=PORT, threaded=True)
