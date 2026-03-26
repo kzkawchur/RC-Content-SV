@@ -18,18 +18,12 @@ from pyrogram import Client, filters
 from pyrogram.types import Message
 from zoneinfo import ZoneInfo
 
-# -----------------------------
-# Logging
-# -----------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("MayaWelcomeBot")
 
-# -----------------------------
-# Env
-# -----------------------------
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"].strip()
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
@@ -39,21 +33,17 @@ DB_PATH = os.environ.get("DB_PATH", "maya_welcome_bot.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/maya_welcome_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-# Voice tuning
 VOICE_NAME = os.environ.get("VOICE_NAME", "bn-BD-NabanitaNeural")
 VOICE_RATE = os.environ.get("VOICE_RATE", "-6%")
 VOICE_PITCH = os.environ.get("VOICE_PITCH", "+0Hz")
 VOICE_VOLUME = os.environ.get("VOICE_VOLUME", "+0%")
 
 TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Asia/Dhaka")
-
-# Anti-spam / cleanup
 WELCOME_DELETE_AFTER = int(os.environ.get("WELCOME_DELETE_AFTER", "90"))
 JOIN_COOLDOWN_SECONDS = int(os.environ.get("JOIN_COOLDOWN_SECONDS", "15"))
 REJOIN_IGNORE_SECONDS = int(os.environ.get("REJOIN_IGNORE_SECONDS", "300"))
 SECRET_CODE_TTL_SECONDS = int(os.environ.get("SECRET_CODE_TTL_SECONDS", "600"))
 
-# Broadcast permission: comma-separated Telegram user IDs
 SUPER_ADMINS = {
     int(x.strip())
     for x in os.environ.get("SUPER_ADMINS", "").split(",")
@@ -62,9 +52,6 @@ SUPER_ADMINS = {
 
 BOT_NAME = os.environ.get("BOT_NAME", "Maya")
 
-# -----------------------------
-# Flask health server for Render
-# -----------------------------
 flask_app = Flask(__name__)
 
 @flask_app.get("/")
@@ -78,9 +65,6 @@ def health():
 def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
-# -----------------------------
-# DB
-# -----------------------------
 def db_connect() -> sqlite3.Connection:
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -106,10 +90,13 @@ def init_db() -> None:
         )
         conn.execute(
             """
-            CREATE TABLE IF NOT EXISTS admin_codes (
-                user_id INTEGER PRIMARY KEY,
-                code TEXT NOT NULL,
+            CREATE TABLE IF NOT EXISTS activation_codes (
+                code TEXT PRIMARY KEY,
+                issued_by INTEGER NOT NULL,
                 expires_at INTEGER NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                used_by INTEGER,
+                used_in_chat INTEGER,
                 created_at INTEGER NOT NULL
             )
             """
@@ -175,37 +162,55 @@ def get_activated_groups() -> list[int]:
         rows = conn.execute("SELECT chat_id FROM groups WHERE activated = 1").fetchall()
         return [int(r["chat_id"]) for r in rows]
 
-def set_admin_code(user_id: int, code: str, expires_at: int) -> None:
+def generate_secret_code(length: int = 6) -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(length))
+
+def create_activation_code(issued_by: int) -> tuple[str, int]:
+    code = generate_secret_code()
+    expires_at = int(time.time()) + SECRET_CODE_TTL_SECONDS
     now_ts = int(time.time())
     with db_connect() as conn:
         conn.execute(
             """
-            INSERT INTO admin_codes (user_id, code, expires_at, created_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                code = excluded.code,
-                expires_at = excluded.expires_at,
-                created_at = excluded.created_at
+            INSERT OR REPLACE INTO activation_codes
+            (code, issued_by, expires_at, used, used_by, used_in_chat, created_at)
+            VALUES (?, ?, ?, 0, NULL, NULL, ?)
             """,
-            (user_id, code, expires_at, now_ts),
+            (code, issued_by, expires_at, now_ts),
         )
         conn.commit()
+    return code, expires_at
 
-def validate_admin_code(user_id: int, code: str) -> bool:
+def consume_activation_code(code: str, used_by: int, used_in_chat: int) -> bool:
     now_ts = int(time.time())
     with db_connect() as conn:
         row = conn.execute(
-            "SELECT code, expires_at FROM admin_codes WHERE user_id = ?",
-            (user_id,),
+            """
+            SELECT code, expires_at, used
+            FROM activation_codes
+            WHERE code = ?
+            """,
+            (code,),
         ).fetchone()
+
         if not row:
             return False
-        return row["code"] == code and int(row["expires_at"]) >= now_ts
+        if int(row["used"]) == 1:
+            return False
+        if int(row["expires_at"]) < now_ts:
+            return False
 
-def clear_admin_code(user_id: int) -> None:
-    with db_connect() as conn:
-        conn.execute("DELETE FROM admin_codes WHERE user_id = ?", (user_id,))
+        conn.execute(
+            """
+            UPDATE activation_codes
+            SET used = 1, used_by = ?, used_in_chat = ?
+            WHERE code = ?
+            """,
+            (used_by, used_in_chat, code),
+        )
         conn.commit()
+        return True
 
 def get_last_join_time(chat_id: int, user_id: int) -> int:
     with db_connect() as conn:
@@ -228,9 +233,6 @@ def save_join_time(chat_id: int, user_id: int) -> None:
         )
         conn.commit()
 
-# -----------------------------
-# Bot client
-# -----------------------------
 app = Client(
     "maya-welcome-bot",
     api_id=API_ID,
@@ -238,14 +240,8 @@ app = Client(
     bot_token=BOT_TOKEN,
 )
 
-# -----------------------------
-# Runtime state
-# -----------------------------
 chat_last_welcome_ts: dict[int, float] = {}
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def clean_name(name: str) -> str:
     if not name:
         return "বন্ধু"
@@ -303,10 +299,10 @@ def build_welcome_copy(first_name: str, mention_name: str, group_title: str, cus
     voice_templates = {
         "morning": [
             f"{first_name}, শুভ সকাল। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
-            f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে খুব ভালো লাগছে।",
+            f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।",
         ],
         "day": [
-            f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে খুব ভালো লাগছে।",
+            f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে ভালো লাগছে।",
             f"হ্যালো {first_name}, {safe_group} এ তোমাকে পেয়ে সত্যিই ভালো লাগছে। স্বাগতম।",
         ],
         "evening": [
@@ -332,10 +328,6 @@ async def is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
     except Exception:
         logger.exception("Failed to check admin status for user %s in chat %s", user_id, chat_id)
         return False
-
-def generate_secret_code(length: int = 6) -> str:
-    alphabet = string.ascii_uppercase + string.digits
-    return "".join(random.choice(alphabet) for _ in range(length))
 
 def should_skip_for_spam(chat_id: int, user_id: int) -> bool:
     now_ts = time.time()
@@ -401,15 +393,11 @@ def build_cover_bytes(first_name: str, group_title: str) -> BytesIO:
         b = int(c1[2] * (1 - blend) + c2[2] * blend)
         draw.line((0, y, width, y), fill=(r, g, b))
 
-    # Decorative circles
     draw.ellipse((65, 65, 245, 245), fill=(255, 255, 255))
     draw.ellipse((1040, 110, 1220, 290), fill=(255, 255, 255))
     draw.ellipse((965, 500, 1160, 695), fill=(255, 255, 255))
-
-    # Dark glass panel
     draw.rounded_rectangle((90, 120, 1190, 610), radius=36, fill=(20, 20, 30))
 
-    # Fonts
     title_font = ImageFont.load_default()
     mid_font = ImageFont.load_default()
     small_font = ImageFont.load_default()
@@ -428,9 +416,6 @@ def build_cover_bytes(first_name: str, group_title: str) -> BytesIO:
     bio.seek(0)
     return bio
 
-# -----------------------------
-# Service message handler
-# -----------------------------
 @app.on_message(filters.service)
 async def service_handler(client: Client, message: Message):
     chat = message.chat
@@ -438,19 +423,16 @@ async def service_handler(client: Client, message: Message):
         return
 
     ensure_group(chat.id, chat.title or "")
-
     group = get_group(chat.id)
     if not group or int(group["activated"]) != 1:
         return
 
-    # Delete Telegram's default join/leave message if enabled
     if int(group["delete_service"]) == 1:
         try:
             await client.delete_messages(chat.id, message.id)
         except Exception:
             logger.exception("Failed deleting service message in chat %s", chat.id)
 
-    # Join welcome
     if message.new_chat_members:
         me = await client.get_me()
         target_member = None
@@ -502,7 +484,6 @@ async def service_handler(client: Client, message: Message):
                 )
 
             mark_welcomed(chat.id, user_id)
-
             set_group_value(chat.id, "last_primary_msg_id", primary_message.id if primary_message else None)
             set_group_value(chat.id, "last_voice_msg_id", voice_message.id if voice_message else None)
             set_group_value(chat.id, "updated_at", int(time.time()))
@@ -521,38 +502,28 @@ async def service_handler(client: Client, message: Message):
             except Exception:
                 logger.exception("Failed removing temp voice file")
 
-    # Leave event: only default service message delete, no extra chatter
-    elif message.left_chat_member:
-        logger.info("Member left in chat %s", chat.id)
-
-# -----------------------------
-# Commands
-# -----------------------------
 @app.on_message(filters.command("start"))
 async def start_cmd(client: Client, message: Message):
     if message.chat.type == "private":
-        code_help = (
+        await message.reply_text(
             f"আমি {BOT_NAME} 🌸\n\n"
-            "Main private commands:\n"
-            "/getcode - group activation code নাও\n"
+            "Private commands:\n"
+            "/getcode - owner code নেবে\n"
             "/ping - bot alive check\n"
             "/broadcast <text> - owner broadcast\n"
-            "/myid - তোমার user id দেখাবে\n\n"
-            "Group setup steps:\n"
+            "/myid - তোমার user id\n\n"
+            "Group setup:\n"
             "1. আমাকে group-এ add করো\n"
             "2. আমাকে Delete Messages permission দাও\n"
-            "3. personal chat-এ /getcode দাও\n"
-            "4. group-এ /activate CODE দাও\n\n"
-            "তারপর আমি join/leave service message delete করব,\n"
-            "cover welcome + sweet voice দিব।"
+            "3. owner personal chat-এ /getcode দেবে\n"
+            "4. group-এ যে কেউ /activate CODE দিতে পারবে"
         )
-        await message.reply_text(code_help)
     else:
         await message.reply_text(
             f"{BOT_NAME} is here.\n"
             "এই group-এ use করতে:\n"
-            "1. Admin personal chat-এ /getcode নেবে\n"
-            "2. Group-এ /activate CODE দেবে"
+            "1. Owner personal chat-এ /getcode নেবে\n"
+            "2. Group-এ যে কেউ /activate CODE দেবে"
         )
 
 @app.on_message(filters.command("ping"))
@@ -567,15 +538,15 @@ async def myid_cmd(_, message: Message):
 
 @app.on_message(filters.command("getcode") & filters.private)
 async def getcode_cmd(_, message: Message):
-    if not message.from_user:
+    if not message.from_user or not is_super_admin(message.from_user.id):
+        await message.reply_text("Only bot owner/admin can get activation code.")
         return
-    code = generate_secret_code()
-    expires_at = int(time.time()) + SECRET_CODE_TTL_SECONDS
-    set_admin_code(message.from_user.id, code, expires_at)
+
+    code, expires_at = create_activation_code(message.from_user.id)
     mins = max(1, SECRET_CODE_TTL_SECONDS // 60)
     await message.reply_text(
         f"🔐 Secret activation code: `{code}`\n\n"
-        f"এই code শুধু group admin use করবে.\n"
+        f"এই code group-এ যে কেউ use করতে পারবে.\n"
         f"Group-এ লিখবে:\n`/activate {code}`\n\n"
         f"Code {mins} মিনিট valid থাকবে."
     )
@@ -586,26 +557,26 @@ async def activate_cmd(client: Client, message: Message):
         await message.reply_text("Use /activate শুধু group-এ.")
         return
 
-    if not message.from_user:
-        return
-
     if len(message.command) < 2:
         await message.reply_text("Usage:\n/activate YOURCODE")
         return
 
-    is_admin = await is_group_admin(client, message.chat.id, message.from_user.id)
-    if not is_admin:
-        await message.reply_text("Only group admins can activate me.")
-        return
-
     code = message.command[1].strip().upper()
-    if not validate_admin_code(message.from_user.id, code):
-        await message.reply_text("Invalid or expired code. Personal chat-এ /getcode দাও.")
+    ok = consume_activation_code(
+        code=code,
+        used_by=message.from_user.id if message.from_user else 0,
+        used_in_chat=message.chat.id,
+    )
+    if not ok:
+        await message.reply_text("Invalid, expired, or already used code.")
         return
 
     ensure_group(message.chat.id, message.chat.title or "")
-    activate_group(message.chat.id, message.chat.title or "", message.from_user.id)
-    clear_admin_code(message.from_user.id)
+    activate_group(
+        message.chat.id,
+        message.chat.title or "",
+        message.from_user.id if message.from_user else 0,
+    )
 
     await message.reply_text(
         f"✅ {BOT_NAME} activated successfully.\n\n"
@@ -742,9 +713,6 @@ async def status_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("testwelcome"))
 async def testwelcome_cmd(client: Client, message: Message):
-    if message.chat.type not in ("group", "supergroup", "private"):
-        return
-
     first_name = clean_name(message.from_user.first_name if message.from_user else "বন্ধু")
     mention_name = message.from_user.mention(first_name) if message.from_user else first_name
     text_welcome, voice_text = build_welcome_copy(
@@ -817,16 +785,11 @@ async def broadcast_cmd(client: Client, message: Message):
         f"Broadcast finished.\n\nSuccess: {ok_count}\nFailed: {fail_count}"
     )
 
-# -----------------------------
-# Main
-# -----------------------------
 def main():
     init_db()
-
     flask_thread = threading.Thread(target=run_flask, daemon=True)
     flask_thread.start()
     logger.info("Flask started on port %s", PORT)
-
     logger.info("Starting %s", BOT_NAME)
     app.run()
 
