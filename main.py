@@ -2,9 +2,11 @@ import asyncio
 import logging
 import os
 import random
+import re
 import sqlite3
 import threading
 import time
+from collections import defaultdict, deque
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -14,8 +16,17 @@ import edge_tts
 import requests
 from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
-from pyrogram import Client, filters
-from pyrogram.types import ChatMemberUpdated, Message, User
+from telegram import BotCommand, Update
+from telegram.constants import ChatMemberStatus
+from telegram.ext import (
+    Application,
+    ApplicationBuilder,
+    ChatMemberHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 from zoneinfo import ZoneInfo
 
 logging.basicConfig(
@@ -24,14 +35,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MayaWelcomeBot")
 
-API_ID = int(os.environ["API_ID"])
-API_HASH = os.environ["API_HASH"].strip()
 BOT_TOKEN = os.environ["BOT_TOKEN"].strip()
-PORT = int(os.environ.get("PORT", 8080))
-
+PORT = int(os.environ.get("PORT", "8080"))
 DB_PATH = os.environ.get("DB_PATH", "maya_welcome_bot.db")
 TMP_DIR = Path(os.environ.get("TMP_DIR", "/tmp/maya_welcome_bot"))
 TMP_DIR.mkdir(parents=True, exist_ok=True)
+
+BOT_NAME = os.environ.get("BOT_NAME", "Maya")
+TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Asia/Dhaka")
+SUPPORT_GROUP_NAME = os.environ.get("SUPPORT_GROUP_NAME", "Support Group")
+SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "").strip()
 
 VOICE_NAME_BN = os.environ.get("VOICE_NAME_BN", "bn-BD-NabanitaNeural")
 VOICE_NAME_EN = os.environ.get("VOICE_NAME_EN", "en-US-JennyNeural")
@@ -39,26 +52,26 @@ VOICE_RATE = os.environ.get("VOICE_RATE", "-2%")
 VOICE_PITCH = os.environ.get("VOICE_PITCH", "+0Hz")
 VOICE_VOLUME = os.environ.get("VOICE_VOLUME", "+0%")
 
-TIMEZONE_NAME = os.environ.get("TIMEZONE_NAME", "Asia/Dhaka")
 WELCOME_DELETE_AFTER = int(os.environ.get("WELCOME_DELETE_AFTER", "90"))
-JOIN_COOLDOWN_SECONDS = int(os.environ.get("JOIN_COOLDOWN_SECONDS", "15"))
+JOIN_COOLDOWN_SECONDS = int(os.environ.get("JOIN_COOLDOWN_SECONDS", "10"))
 REJOIN_IGNORE_SECONDS = int(os.environ.get("REJOIN_IGNORE_SECONDS", "300"))
-WELCOME_DEDUP_SECONDS = int(os.environ.get("WELCOME_DEDUP_SECONDS", "8"))
 HOURLY_INTERVAL_SECONDS = int(os.environ.get("HOURLY_INTERVAL_SECONDS", "3600"))
+AI_HOURLY_ENABLED = os.environ.get("AI_HOURLY_ENABLED", "true").strip().lower() == "true"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "").strip()
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GROQ_TIMEOUT_SECONDS = int(os.environ.get("GROQ_TIMEOUT_SECONDS", "20"))
+AI_BATCH_SIZE = int(os.environ.get("AI_BATCH_SIZE", "8"))
+AI_MAX_TEXT_LEN = int(os.environ.get("AI_MAX_TEXT_LEN", "140"))
 
 SUPER_ADMINS = {
-    int(x.strip())
-    for x in os.environ.get("SUPER_ADMINS", "").split(",")
-    if x.strip().isdigit()
+    int(x.strip()) for x in os.environ.get("SUPER_ADMINS", "").split(",") if x.strip().isdigit()
 }
 
-BOT_NAME = os.environ.get("BOT_NAME", "Maya")
-SUPPORT_GROUP_NAME = os.environ.get("SUPPORT_GROUP_NAME", "Support Group")
-SUPPORT_GROUP_URL = os.environ.get("SUPPORT_GROUP_URL", "").strip()
-
 API_BASE = f"https://api.telegram.org/bot{BOT_TOKEN}"
-
 flask_app = Flask(__name__)
+
+recent_hourly_by_chat: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=8))
+recent_welcome_keys: dict[str, float] = {}
 
 
 @flask_app.get("/")
@@ -71,7 +84,7 @@ def health():
     return jsonify({"status": "ok", "bot": BOT_NAME})
 
 
-def run_flask() -> None:
+def run_flask():
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
 
@@ -87,34 +100,12 @@ def tg_post(method: str, payload: dict) -> dict:
 
 
 def send_message_http(chat_id: int, text: str) -> bool:
-    data = tg_post(
-        "sendMessage",
-        {
-            "chat_id": chat_id,
-            "text": text,
-            "disable_web_page_preview": True,
-        },
-    )
+    data = tg_post("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
     return bool(data.get("ok"))
 
 
-def set_my_commands() -> None:
-    commands = [
-        {"command": "start", "description": "Show bot info"},
-        {"command": "ping", "description": "Bot alive check"},
-        {"command": "support", "description": "Support group"},
-        {"command": "myid", "description": "Show your user id"},
-        {"command": "lang", "description": "Change group language"},
-        {"command": "voice", "description": "Toggle welcome voice"},
-        {"command": "deleteservice", "description": "Toggle service delete"},
-        {"command": "hourly", "description": "Toggle hourly texts"},
-        {"command": "setwelcome", "description": "Custom welcome text"},
-        {"command": "resetwelcome", "description": "Reset custom welcome"},
-        {"command": "status", "description": "Show group status"},
-        {"command": "testwelcome", "description": "Send test welcome"},
-        {"command": "broadcast", "description": "Owner broadcast"},
-    ]
-    tg_post("setMyCommands", {"commands": commands})
+def delete_webhook():
+    tg_post("deleteWebhook", {"drop_pending_updates": False})
 
 
 def db_connect() -> sqlite3.Connection:
@@ -123,7 +114,7 @@ def db_connect() -> sqlite3.Connection:
     return conn
 
 
-def init_db() -> None:
+def init_db():
     with db_connect() as conn:
         conn.execute(
             """
@@ -156,7 +147,7 @@ def init_db() -> None:
         conn.commit()
 
 
-def ensure_group(chat_id: int, title: str) -> None:
+def ensure_group(chat_id: int, title: str):
     now_ts = int(time.time())
     with db_connect() as conn:
         conn.execute(
@@ -172,20 +163,19 @@ def ensure_group(chat_id: int, title: str) -> None:
         conn.commit()
 
 
-def get_group(chat_id: int) -> Optional[sqlite3.Row]:
+def get_group(chat_id: int):
     with db_connect() as conn:
         return conn.execute("SELECT * FROM groups WHERE chat_id = ?", (chat_id,)).fetchone()
 
 
 def get_group_lang(chat_id: int) -> str:
     row = get_group(chat_id)
-    if not row:
-        return "bn"
-    lang = (row["language"] or "bn").strip().lower()
+    lang = (row["language"] if row else "bn") or "bn"
+    lang = lang.strip().lower()
     return lang if lang in {"bn", "en"} else "bn"
 
 
-def set_group_value(chat_id: int, field: str, value) -> None:
+def set_group_value(chat_id: int, field: str, value):
     allowed = {
         "title",
         "language",
@@ -206,7 +196,7 @@ def set_group_value(chat_id: int, field: str, value) -> None:
         conn.commit()
 
 
-def get_enabled_groups_for_hourly() -> list[sqlite3.Row]:
+def get_enabled_groups_for_hourly():
     now_ts = int(time.time())
     with db_connect() as conn:
         return conn.execute(
@@ -221,10 +211,9 @@ def get_enabled_groups_for_hourly() -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def get_all_enabled_groups() -> list[int]:
+def get_all_enabled_groups():
     with db_connect() as conn:
-        rows = conn.execute("SELECT chat_id FROM groups WHERE enabled = 1").fetchall()
-        return [int(r["chat_id"]) for r in rows]
+        return [int(r["chat_id"]) for r in conn.execute("SELECT chat_id FROM groups WHERE enabled = 1").fetchall()]
 
 
 def get_last_join_time(chat_id: int, user_id: int) -> int:
@@ -236,7 +225,7 @@ def get_last_join_time(chat_id: int, user_id: int) -> int:
         return int(row["joined_at"]) if row else 0
 
 
-def save_join_time(chat_id: int, user_id: int) -> None:
+def save_join_time(chat_id: int, user_id: int):
     now_ts = int(time.time())
     with db_connect() as conn:
         conn.execute(
@@ -250,150 +239,6 @@ def save_join_time(chat_id: int, user_id: int) -> None:
         conn.commit()
 
 
-app = Client(
-    "maya-welcome-bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
-
-chat_last_welcome_ts: dict[int, float] = {}
-recent_welcome_keys: dict[str, float] = {}
-group_touch_cache: dict[int, float] = {}
-
-
-def maybe_track_group(chat_id: int, title: str) -> None:
-    now_ts = time.time()
-    prev = group_touch_cache.get(chat_id, 0)
-    if now_ts - prev < 1800:
-        return
-    group_touch_cache[chat_id] = now_ts
-    try:
-        ensure_group(chat_id, title or '')
-    except Exception:
-        logger.exception('maybe_track_group failed for %s', chat_id)
-
-
-
-MESSAGES = {
-    "bn": {
-        "start_private": [
-            "আমি {bot} 🌸\n\nCommands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nGroup-এ আমাকে add করলেই আমি কাজ শুরু করব।\nAdmin চাইলে /lang, /voice, /deleteservice, /hourly ব্যবহার করতে পারবে।",
-            "{bot} ready 🌷\n\nআমি group-এ auto কাজ করি।\nCommands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nGroup admin হলে /lang bn বা /lang en, /hourly on বা off, /voice on বা off দিতে পারবে।",
-        ],
-        "start_group": [
-            "{bot} ready for this group 🌸\nআমি এখন auto কাজ করব। Welcome, voice, service delete, hourly text—সব group settings দিয়ে control করা যাবে।",
-            "{bot} এই group-এ ready আছে 🌷\nআমি join/leave handle করব, সুন্দর welcome দেব, আর চাইলে hourly সুন্দর text-ও পাঠাব।",
-        ],
-        "only_group_admin": [
-            "Only group admins can use this command.",
-            "এই command শুধু group admin ব্যবহার করতে পারবে।",
-        ],
-        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
-        "lang_set": ["Language changed to বাংলা.", "ঠিক আছে, এখন থেকে আমি বাংলায় কথা বলব।"],
-        "lang_set_en": ["Language changed to English.", "Okay, I will speak in English now."],
-        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
-        "voice_set": ["Voice welcome: {value}", "ঠিক আছে, voice welcome এখন {value}।"],
-        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
-        "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
-        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
-        "hourly_set": ["Hourly text: {value}", "Hourly beautiful text mode: {value}"],
-        "hourly_now": ["একটা সুন্দর hourly message এখন পাঠানো হলো।", "ঠিক আছে, এখনই একটা সুন্দর message দিলাম।"],
-        "welcome_saved": ["Custom welcome text saved successfully.", "Custom welcome text save হয়ে গেছে।"],
-        "welcome_reset": ["Custom welcome reset done.", "Custom welcome reset করা হয়েছে।"],
-        "status": ["Bot name: {bot}\nEnabled: {enabled}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nHourly text: {hourly}\nTimezone: {tz}\nPhase now: {phase}"],
-        "broadcast_owner_only": ["Broadcast is owner-only."],
-        "broadcast_usage": ["Usage:\n/broadcast your message"],
-        "broadcast_none": ["No groups found."],
-        "broadcast_start": ["Broadcast started to {count} groups..."],
-        "broadcast_done": ["Broadcast finished.\n\nSuccess: {ok}\nFailed: {fail}"],
-        "test_voice_caption": ["🎤 {bot} test voice"],
-        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
-        "ping": ["pong | {tz} | {time}"],
-        "myid": ["Your user ID: {user_id}"],
-        "support": ["Support: {support}"],
-        "hourly_texts": {
-            "morning": [
-                "🌼 শুভ সকাল সবাইকে। আশা করি আজকের দিনটা সুন্দর কাটবে।",
-                "☀️ নতুন দিনের শুরুতে সবার জন্য রইল ভালোবাসা আর শুভেচ্ছা।",
-                "✨ সকালটা হোক শান্ত, সুন্দর আর হাসিমাখা।",
-            ],
-            "day": [
-                "🌸 সবার দিনটা সুন্দর কাটুক—এই কামনা রইল।",
-                "💫 একটু হাসো, একটু ভালো থাকো, আর সুন্দর থাকো সবাই।",
-                "🌷 এই group-এর সবাইকে অনেক শুভেচ্ছা। দিনটা হোক দারুণ।",
-            ],
-            "evening": [
-                "🌙 শুভ সন্ধ্যা সবাইকে। সন্ধ্যাটা হোক শান্ত আর মিষ্টি।",
-                "✨ দিনের ক্লান্তি ভুলে একটু ভালো থাকো সবাই।",
-                "🌆 সুন্দর এক সন্ধ্যার শুভেচ্ছা রইল এই group-এর সবার জন্য।",
-            ],
-            "night": [
-                "🌌 শুভ রাত্রি সবাইকে। রাতটা হোক শান্ত আর আরামদায়ক।",
-                "💙 সবাই ভালো থেকো, শান্তিতে থেকো।",
-                "⭐ দিনের শেষে সবার জন্য রইল শান্ত শুভেচ্ছা।",
-            ],
-        },
-    },
-    "en": {
-        "start_private": [
-            "I am {bot} 🌸\n\nCommands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nOnce I am added to a group, I start working automatically.\nGroup admins can use /lang, /voice, /deleteservice, and /hourly.",
-            "{bot} is ready 🌷\n\nI work automatically in groups.\nGroup admins can use /lang bn or /lang en, /hourly on or off, and /voice on or off.",
-        ],
-        "start_group": [
-            "{bot} is ready for this group 🌸\nI will work automatically here. Welcome messages, voice, service cleanup, and hourly texts can be controlled with settings.",
-            "{bot} is now active in this group 🌷\nI can handle welcomes, voice, cleanup, and elegant hourly texts.",
-        ],
-        "only_group_admin": ["Only group admins can use this command."],
-        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
-        "lang_set": ["Language changed to Bangla."],
-        "lang_set_en": ["Language changed to English.", "Okay, I will speak in English now."],
-        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
-        "voice_set": ["Voice welcome: {value}", "Voice welcome is now {value}."],
-        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
-        "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
-        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
-        "hourly_set": ["Hourly text: {value}", "Hourly beautiful text mode: {value}"],
-        "hourly_now": ["A beautiful hourly message was sent just now.", "Okay, I sent a beautiful message right now."],
-        "welcome_saved": ["Custom welcome text saved successfully.", "Your custom welcome text has been saved."],
-        "welcome_reset": ["Custom welcome has been reset."],
-        "status": ["Bot name: {bot}\nEnabled: {enabled}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nHourly text: {hourly}\nTimezone: {tz}\nCurrent phase: {phase}"],
-        "broadcast_owner_only": ["Broadcast is owner-only."],
-        "broadcast_usage": ["Usage:\n/broadcast your message"],
-        "broadcast_none": ["No groups found."],
-        "broadcast_start": ["Broadcast started to {count} groups..."],
-        "broadcast_done": ["Broadcast finished.\n\nSuccess: {ok}\nFailed: {fail}"],
-        "test_voice_caption": ["🎤 {bot} test voice"],
-        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
-        "ping": ["pong | {tz} | {time}"],
-        "myid": ["Your user ID: {user_id}"],
-        "support": ["Support: {support}"],
-        "hourly_texts": {
-            "morning": [
-                "🌼 Good morning everyone. Hope your day begins beautifully.",
-                "☀️ Wishing a bright and peaceful morning to everyone here.",
-                "✨ A gentle morning hello to this lovely group.",
-            ],
-            "day": [
-                "🌸 Hope everyone is having a beautiful day.",
-                "💫 Sending good vibes to everyone in this group.",
-                "🌷 A little warm message to make your day softer and brighter.",
-            ],
-            "evening": [
-                "🌙 Good evening everyone. Hope your evening feels calm and lovely.",
-                "✨ Wishing this group a peaceful and beautiful evening.",
-                "🌆 Sending soft evening vibes to everyone here.",
-            ],
-            "night": [
-                "🌌 Good night everyone. Wishing you all a calm and restful night.",
-                "💙 A peaceful night message for this beautiful group.",
-                "⭐ Hope everyone ends the day with a little peace and comfort.",
-            ],
-        },
-    },
-}
-
-
 def support_text() -> str:
     if SUPPORT_GROUP_URL and SUPPORT_GROUP_NAME:
         return f"{SUPPORT_GROUP_NAME} | {SUPPORT_GROUP_URL}"
@@ -402,26 +247,19 @@ def support_text() -> str:
     return SUPPORT_GROUP_NAME
 
 
-def msg_text(lang: str, key: str, **kwargs) -> str:
-    base_lang = lang if lang in MESSAGES else "bn"
-    variants = MESSAGES[base_lang].get(key) or MESSAGES["bn"].get(key) or [key]
-    return random.choice(variants).format(bot=BOT_NAME, support=support_text(), **kwargs)
+def local_now() -> datetime:
+    return datetime.now(ZoneInfo(TIMEZONE_NAME))
 
 
-def hourly_text(lang: str) -> str:
-    base_lang = lang if lang in MESSAGES else "bn"
-    phase = get_day_phase()
-    return random.choice(MESSAGES[base_lang]["hourly_texts"][phase])
-
-
-def chat_type_name(chat) -> str:
-    if not chat:
-        return ""
-    return getattr(chat.type, "value", str(chat.type)).lower()
-
-
-def member_status_name(status) -> str:
-    return getattr(status, "value", str(status)).lower()
+def phase_now() -> str:
+    h = local_now().hour
+    if 5 <= h < 12:
+        return "morning"
+    if 12 <= h < 17:
+        return "day"
+    if 17 <= h < 21:
+        return "evening"
+    return "night"
 
 
 def clean_name(name: str) -> str:
@@ -435,120 +273,272 @@ def ascii_name(name: str) -> str:
     return s[:22] if s else "FRIEND"
 
 
-def get_local_time() -> datetime:
-    return datetime.now(ZoneInfo(TIMEZONE_NAME))
+def recent_key(chat_id: int, user_id: int) -> str:
+    return f"{chat_id}:{user_id}"
 
 
-def get_day_phase() -> str:
-    hour = get_local_time().hour
-    if 5 <= hour < 12:
-        return "morning"
-    if 12 <= hour < 17:
-        return "day"
-    if 17 <= hour < 21:
-        return "evening"
-    return "night"
-
-
-def voice_name_for_lang(lang: str) -> str:
-    return VOICE_NAME_EN if lang == "en" else VOICE_NAME_BN
-
-
-def build_welcome_copy(lang: str, first_name: str, mention_name: str, group_title: str, custom_text: Optional[str]) -> tuple[str, str]:
-    phase = get_day_phase()
-    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
-    if custom_text:
-        text_welcome = custom_text.replace("{name}", mention_name).replace("{group}", safe_group).replace("{phase}", phase)
-        voice_text = f"Hello {first_name}, welcome to {safe_group}." if lang == "en" else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।"
-        return text_welcome, voice_text
-
-    if lang == "en":
-        templates = {
-            "morning": [f"🌼 Good morning {mention_name}!\nWelcome to {safe_group}.", f"✨ {mention_name}, warm morning wishes and welcome to {safe_group}.", f"☀️ Hello {mention_name}!\nA bright morning welcome to {safe_group}."],
-            "day": [f"🌸 Welcome {mention_name}!\nWe are happy to have you in {safe_group}.", f"💫 Hello {mention_name}!\nA warm welcome to {safe_group}.", f"🌷 {mention_name}, glad to see you in {safe_group}. Welcome!"],
-            "evening": [f"🌙 Good evening {mention_name}!\nWelcome to {safe_group}.", f"✨ {mention_name}, lovely evening wishes and welcome to {safe_group}.", f"🌆 Hello {mention_name}!\nEvening smiles and a warm welcome to {safe_group}."],
-            "night": [f"🌌 Good night {mention_name}!\nWelcome to {safe_group}.", f"💙 {mention_name}, peaceful night wishes and welcome to {safe_group}.", f"⭐ Hello {mention_name}!\nA calm night welcome to {safe_group}."],
-        }
-        voices = {
-            "morning": [f"{first_name}, good morning. A warm welcome to {safe_group}.", f"Hello {first_name}, welcome to {safe_group}. We are glad to have you here."],
-            "day": [f"{first_name}, welcome to {safe_group}. We are really happy to have you here.", f"Hello {first_name}, a warm welcome to {safe_group}."],
-            "evening": [f"{first_name}, good evening. Welcome to {safe_group}. Hope you enjoy your time here.", f"Hello {first_name}, evening wishes and welcome to {safe_group}."],
-            "night": [f"{first_name}, good night. A warm welcome to {safe_group}.", f"Hello {first_name}, welcome to {safe_group}. Glad to have you here."],
-        }
-    else:
-        templates = {
-            "morning": [f"🌼 শুভ সকাল {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"✨ {mention_name}, সকালের মিষ্টি শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"☀️ হ্যালো {mention_name}!\nএকটা সুন্দর সকালের স্বাগতম রইল {safe_group} এ।"],
-            "day": [f"🌸 স্বাগতম {mention_name}!\n{safe_group} এ তোমাকে পেয়ে খুব ভালো লাগছে।", f"💫 হ্যালো {mention_name}!\n{safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"🌷 {mention_name}, তোমাকে পেয়ে {safe_group} আরও সুন্দর লাগছে। স্বাগতম।"],
-            "evening": [f"🌙 শুভ সন্ধ্যা {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"✨ {mention_name}, সন্ধ্যার সুন্দর শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"🌆 হ্যালো {mention_name}!\nসন্ধ্যার নরম আলোয় তোমাকে {safe_group} এ স্বাগতম।"],
-            "night": [f"🌌 শুভ রাত্রি {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"💙 {mention_name}, রাতের শান্ত শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"⭐ হ্যালো {mention_name}!\nরাতের শান্ত শুভেচ্ছার সাথে তোমাকে স্বাগতম {safe_group} এ।"],
-        }
-        voices = {
-            "morning": [f"{first_name}, শুভ সকাল। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
-            "day": [f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে ভালো লাগছে।", f"হ্যালো {first_name}, {safe_group} এ তোমাকে পেয়ে সত্যিই ভালো লাগছে। স্বাগতম।"],
-            "evening": [f"{first_name}, শুভ সন্ধ্যা। {safe_group} এ তোমাকে স্বাগতম। আশা করি এখানে ভালো সময় কাটাবে।", f"হ্যালো {first_name}, সন্ধ্যার মিষ্টি শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
-            "night": [f"{first_name}, শুভ রাত্রি। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"হ্যালো {first_name}, রাতের শান্ত শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
-        }
-
-    return random.choice(templates[phase]), random.choice(voices[phase])
+def is_recent_duplicate(chat_id: int, user_id: int) -> bool:
+    key = recent_key(chat_id, user_id)
+    now_ts = time.time()
+    prev = recent_welcome_keys.get(key, 0)
+    recent_welcome_keys[key] = now_ts
+    return now_ts - prev < 8
 
 
 def is_super_admin(user_id: Optional[int]) -> bool:
     return bool(user_id and user_id in SUPER_ADMINS)
 
 
-async def is_group_admin(client: Client, chat_id: int, user_id: int) -> bool:
+TEXTS = {
+    "bn": {
+        "start_private": [
+            "আমি {bot} 🌸\n\nCommands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nGroup-এ আমাকে add করলেই আমি auto কাজ শুরু করব। Admin চাইলে /lang, /voice, /deleteservice, /hourly ব্যবহার করতে পারবে।",
+            "{bot} ready 🌷\n\nআমি group-এ auto কাজ করি। Commands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nAdmin হলে /lang bn বা /lang en, /hourly on বা off, /voice on বা off দিতে পারবে।",
+        ],
+        "start_group": [
+            "{bot} ready for this group 🌸\nআমি welcome, voice আর hourly text handle করব।",
+            "{bot} এই group-এ ready আছে 🌷\nআমি join হলে সুন্দর welcome দেব, আর চাইলে hourly text-ও পাঠাব।",
+        ],
+        "only_group_admin": [
+            "Only group admins can use this command.",
+            "এই command শুধু group admin ব্যবহার করতে পারবে।",
+        ],
+        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
+        "lang_set_bn": ["ঠিক আছে, এখন থেকে আমি বাংলায় কথা বলব।", "Language changed to বাংলা."],
+        "lang_set_en": ["Okay, I will speak in English now.", "Language changed to English."],
+        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
+        "voice_set": ["Voice welcome: {value}", "ঠিক আছে, voice welcome এখন {value}।"],
+        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
+        "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
+        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
+        "hourly_set": ["Hourly text: {value}", "Hourly সুন্দর message mode: {value}"],
+        "hourly_now": ["এখনই একটা সুন্দর hourly message পাঠালাম।", "ঠিক আছে, এখনই একটা সুন্দর message দিলাম।"],
+        "welcome_saved": ["Custom welcome text saved successfully.", "Custom welcome text save হয়ে গেছে।"],
+        "welcome_reset": ["Custom welcome reset done.", "Custom welcome reset করা হয়েছে।"],
+        "status": ["Bot: {bot}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service: {delete_service}\nHourly: {hourly}\nTimezone: {tz}\nPhase: {phase}"],
+        "broadcast_owner_only": ["Broadcast is owner-only."],
+        "broadcast_usage": ["Usage:\n/broadcast your message"],
+        "broadcast_none": ["No groups found."],
+        "broadcast_start": ["Broadcast started to {count} groups..."],
+        "broadcast_done": ["Broadcast finished.\nSuccess: {ok}\nFailed: {fail}"],
+        "test_voice_caption": ["🎤 {bot} test voice"],
+        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
+        "ping": ["pong | {tz} | {time}"],
+        "myid": ["Your user ID: {user_id}"],
+        "support": ["Support: {support}"],
+    },
+    "en": {
+        "start_private": [
+            "I am {bot} 🌸\n\nCommands:\n/ping\n/myid\n/support\n/broadcast <text>\n\nOnce I am added to a group, I start working automatically. Group admins can use /lang, /voice, /deleteservice, and /hourly.",
+            "{bot} is ready 🌷\n\nI work automatically in groups. Group admins can use /lang bn or /lang en, /hourly on or off, and /voice on or off.",
+        ],
+        "start_group": [
+            "{bot} is ready for this group 🌸\nI will handle welcomes, voice, and hourly texts here.",
+            "{bot} is now ready in this group 🌷\nI can send welcome messages and beautiful hourly texts.",
+        ],
+        "only_group_admin": ["Only group admins can use this command."],
+        "lang_usage": ["Usage:\n/lang bn\n/lang en"],
+        "lang_set_bn": ["Language changed to Bangla."],
+        "lang_set_en": ["Language changed to English.", "Okay, I will speak in English now."],
+        "voice_usage": ["Usage:\n/voice on\n/voice off\n\nCurrent: {current}"],
+        "voice_set": ["Voice welcome: {value}", "Voice welcome is now {value}."],
+        "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
+        "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
+        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
+        "hourly_set": ["Hourly text: {value}", "Hourly beautiful text mode: {value}"],
+        "hourly_now": ["I just sent a beautiful hourly message.", "Okay, I sent one beautiful message right now."],
+        "welcome_saved": ["Custom welcome text saved successfully.", "Your custom welcome text has been saved."],
+        "welcome_reset": ["Custom welcome has been reset."],
+        "status": ["Bot: {bot}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service: {delete_service}\nHourly: {hourly}\nTimezone: {tz}\nPhase: {phase}"],
+        "broadcast_owner_only": ["Broadcast is owner-only."],
+        "broadcast_usage": ["Usage:\n/broadcast your message"],
+        "broadcast_none": ["No groups found."],
+        "broadcast_start": ["Broadcast started to {count} groups..."],
+        "broadcast_done": ["Broadcast finished.\nSuccess: {ok}\nFailed: {fail}"],
+        "test_voice_caption": ["🎤 {bot} test voice"],
+        "welcome_voice_caption": ["🎤 {bot} welcome voice"],
+        "ping": ["pong | {tz} | {time}"],
+        "myid": ["Your user ID: {user_id}"],
+        "support": ["Support: {support}"],
+    },
+}
+
+
+def t(lang: str, key: str, **kwargs) -> str:
+    lang = lang if lang in TEXTS else "bn"
+    arr = TEXTS[lang].get(key) or TEXTS["bn"].get(key) or [key]
+    return random.choice(arr).format(bot=BOT_NAME, support=support_text(), **kwargs)
+
+
+BN_PHASE_OPENERS = {
+    "morning": ["🌼 শুভ সকাল সবাইকে।", "☀️ সকালের সুন্দর শুভেচ্ছা রইল।", "✨ নতুন সকাল মানেই নতুন আলো।", "💛 সকালটা হোক কোমল আর সুন্দর।", "🌸 মিষ্টি এক সকালের শুভেচ্ছা।", "🍃 আজকের সকালটা শান্ত হোক।", "🕊️ ভালো একটি সকাল সবার জন্য।", "🌤️ আলো ভরা সকাল তোমাদের জন্য।"],
+    "day": ["🌷 দুপুর/দিনের শুভেচ্ছা সবাইকে।", "💫 দিনটা যেন সুন্দর কাটে।", "🌸 একটু হাসো, একটু ভালো থাকো।", "🍀 আজকের দিনটা হোক দারুণ।", "🌞 উষ্ণ দিনের শুভেচ্ছা রইল।", "✨ নরম এক দিনের শুভেচ্ছা।", "🌺 সবার জন্য সুন্দর দিনের বার্তা।", "💐 ভালো থাকুক এই group-এর সবাই।"],
+    "evening": ["🌙 শুভ সন্ধ্যা সবাইকে।", "✨ সন্ধ্যার নরম শুভেচ্ছা রইল।", "🌆 আজকের সন্ধ্যাটা হোক মিষ্টি।", "💜 শান্ত এক সন্ধ্যার শুভেচ্ছা।", "🕯️ সন্ধ্যার আলোয় ভালোবাসা রইল।", "🌃 নরম সন্ধ্যার শুভেচ্ছা সবাইকে।", "🍂 সন্ধ্যাটা হোক আরামদায়ক।", "💫 ক্লান্তি ভুলে একটু ভালো থাকো।"],
+    "night": ["🌌 শুভ রাত্রি সবাইকে।", "⭐ রাতের শান্ত শুভেচ্ছা রইল।", "💙 আজকের রাতটা হোক শান্ত।", "🌙 মিষ্টি এক রাতের শুভেচ্ছা।", "🕊️ নীরব রাতের কোমল শুভেচ্ছা।", "✨ রাতের শেষে ভালো থেকো সবাই।", "🌠 আরামদায়ক একটি রাত কামনা করি।", "💫 সবার জন্য শান্ত রাতের বার্তা।"],
+}
+BN_MIDDLES = [
+    "এই group-এর সবার জন্য অনেক শুভকামনা।",
+    "একটু হাসো, একটু স্বস্তিতে থাকো।",
+    "নিজের মনটাকে আজ একটু হালকা রাখো।",
+    "আশা করি সময়টা তোমাদের ভালো কাটছে।",
+    "সবাই যেন সুন্দর আর নিরাপদে থাকো।",
+    "দিনের ভিড়ে মনটাও যেন সুন্দর থাকে।",
+    "মনে রাখো, শান্ত থাকাও একধরনের শক্তি।",
+    "আজও ভালো কিছুর অপেক্ষা থাকুক।",
+    "সুন্দর কথা, সুন্দর মন—দুটোই জরুরি।",
+    "ভালো vibes ছড়িয়ে দাও চারদিকে।",
+]
+BN_ENDINGS = ["🌷 ভালো থাকো সবাই।", "💫 সুন্দর থাকো সবাই।", "🌼 হাসিখুশি থাকো সবাই।", "💙 শান্তিতে থাকো সবাই।", "✨ হৃদয়টা নরম আর সুন্দর থাকুক।", "🕊️ মনটা হোক হালকা আর শান্ত।", "🌸 তোমাদের সবার জন্য রইল শুভেচ্ছা।"]
+
+EN_PHASE_OPENERS = {
+    "morning": ["🌼 Good morning everyone.", "☀️ A gentle morning hello to all of you.", "✨ Wishing this group a soft and beautiful morning.", "💛 Hope your morning feels light and peaceful.", "🌸 Sending warm morning wishes to everyone.", "🍃 May this morning begin softly for you all.", "🕊️ A calm and lovely morning to this group.", "🌤️ Bright morning wishes to everyone here."],
+    "day": ["🌷 Hope everyone is having a good day.", "💫 Sending warm daytime vibes to this group.", "🌸 A little beautiful message for your day.", "🍀 Wishing everyone a smooth and lovely day.", "🌞 Daytime wishes to all of you.", "✨ Hope today feels a little softer and brighter.", "🌺 Sending kindness across the group today.", "💐 A warm little note for everyone here."],
+    "evening": ["🌙 Good evening everyone.", "✨ Sending peaceful evening wishes to this group.", "🌆 Hope your evening feels calm and gentle.", "💜 A soft evening hello to all of you.", "🕯️ Wishing everyone a lovely evening.", "🌃 Evening warmth to this beautiful group.", "🍂 Hope the evening brings a little peace.", "💫 A gentle evening message for everyone here."],
+    "night": ["🌌 Good night everyone.", "⭐ Sending calm night wishes to all of you.", "💙 Hope your night feels peaceful and restful.", "🌙 A soft night message for this group.", "🕊️ Wishing everyone a gentle and quiet night.", "✨ End the day with a little peace.", "🌠 Warm night wishes to everyone here.", "💫 A peaceful close to the day for all of you."],
+}
+EN_MIDDLES = [
+    "Wishing this group a little more peace and softness.",
+    "Hope your heart feels a little lighter today.",
+    "Take a small moment to breathe and smile.",
+    "May your day carry a little extra kindness.",
+    "Sending good energy to everyone here.",
+    "Hope things feel a bit easier and brighter.",
+    "A small warm message can change a day.",
+    "Keep your heart gentle and your mind steady.",
+    "You all deserve a peaceful moment today.",
+    "May this group stay kind, calm, and warm.",
+]
+EN_ENDINGS = ["🌷 Stay well, everyone.", "💫 Stay beautiful, everyone.", "🌼 Wishing you comfort and peace.", "💙 Take care, everyone.", "✨ Keep your vibe soft and bright.", "🕊️ May your mind feel calm.", "🌸 Warm wishes to all of you."]
+
+FALLBACK_CACHE: dict[tuple[str, str], list[str]] = {}
+
+
+def build_fallback_messages(lang: str, phase: str) -> list[str]:
+    key = (lang, phase)
+    if key in FALLBACK_CACHE:
+        return FALLBACK_CACHE[key]
+
+    result = []
+    if lang == "en":
+        for a in EN_PHASE_OPENERS[phase]:
+            for b in EN_MIDDLES:
+                for c in EN_ENDINGS:
+                    text = f"{a} {b} {c}".strip()
+                    if len(text) <= AI_MAX_TEXT_LEN:
+                        result.append(text)
+    else:
+        for a in BN_PHASE_OPENERS[phase]:
+            for b in BN_MIDDLES:
+                for c in BN_ENDINGS:
+                    text = f"{a} {b} {c}".strip()
+                    if len(text) <= AI_MAX_TEXT_LEN:
+                        result.append(text)
+
+    seen = set()
+    uniq = []
+    for x in result:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    random.shuffle(uniq)
+    FALLBACK_CACHE[key] = uniq
+    return uniq
+
+
+def sanitize_ai_lines(text: str) -> list[str]:
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        line = re.sub(r"^[\-\*\d\.\)\s]+", "", line)
+        line = re.sub(r"\s+", " ", line).strip()
+        if not line:
+            continue
+        if len(line) > AI_MAX_TEXT_LEN:
+            continue
+        lowered = line.lower()
+        bad = ["18+", "sex", "sexy", "dating", "kiss", "adult", "nude", "xxx", "porn"]
+        if any(b in lowered for b in bad):
+            continue
+        lines.append(line)
+    uniq = []
+    seen = set()
+    for x in lines:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
+
+
+def groq_generate_batch(lang: str, phase: str) -> list[str]:
+    if not AI_HOURLY_ENABLED or not GROQ_API_KEY:
+        return []
+    prompt = (
+        f"Write {AI_BATCH_SIZE} short, beautiful Telegram group hourly messages in "
+        f"{'Bengali' if lang == 'bn' else 'English'}.\n"
+        f"Rules:\n"
+        f"- warm, elegant, group-safe\n"
+        f"- non-sexual, non-romantic, non-political, non-religious\n"
+        f"- no flirting\n"
+        f"- no hashtags\n"
+        f"- keep each under {AI_MAX_TEXT_LEN} characters\n"
+        f"- suitable for {phase}\n"
+        f"- each line must be different\n"
+        f"Return only the messages, one per line."
+    )
     try:
-        member = await client.get_chat_member(chat_id, user_id)
-        return any(x in member_status_name(member.status) for x in ("administrator", "owner", "creator"))
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {"role": "system", "content": "You write clean, tasteful, short Telegram group texts."},
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.9,
+                "max_tokens": 300,
+            },
+            timeout=GROQ_TIMEOUT_SECONDS,
+        )
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        lines = sanitize_ai_lines(content)
+        logger.info("Groq hourly success | lang=%s phase=%s count=%s", lang, phase, len(lines))
+        return lines
     except Exception:
-        logger.exception("Failed to check admin status for user %s in chat %s", user_id, chat_id)
-        return False
+        logger.exception("Groq hourly failed | lang=%s phase=%s", lang, phase)
+        return []
 
 
-def should_skip_for_spam(chat_id: int, user_id: int) -> bool:
-    now_ts = time.time()
-    last_chat_ts = chat_last_welcome_ts.get(chat_id, 0)
-    if now_ts - last_chat_ts < JOIN_COOLDOWN_SECONDS:
-        return True
-    last_user_ts = get_last_join_time(chat_id, user_id)
-    if now_ts - last_user_ts < REJOIN_IGNORE_SECONDS:
-        return True
-    return False
+def pick_hourly_message(chat_id: int, lang: str, phase: str, pool: list[str]) -> str:
+    recent = recent_hourly_by_chat[chat_id]
+    choices = [x for x in pool if x not in recent]
+    if not choices:
+        choices = pool[:] or build_fallback_messages(lang, phase)
+    text = random.choice(choices)
+    recent.append(text)
+    return text
 
 
-def mark_welcomed(chat_id: int, user_id: int) -> None:
-    chat_last_welcome_ts[chat_id] = time.time()
-    save_join_time(chat_id, user_id)
-
-
-def recent_key(chat_id: int, user_id: int, kind: str) -> str:
-    return f"{kind}:{chat_id}:{user_id}"
-
-
-def is_recent_duplicate(chat_id: int, user_id: int, kind: str) -> bool:
-    key = recent_key(chat_id, user_id, kind)
-    now_ts = time.time()
-    prev = recent_welcome_keys.get(key, 0)
-    recent_welcome_keys[key] = now_ts
-    return now_ts - prev < WELCOME_DEDUP_SECONDS
-
-
-async def delete_previous_welcome(client: Client, chat_id: int) -> None:
-    group = get_group(chat_id)
-    if not group:
+async def delete_previous_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    row = get_group(chat_id)
+    if not row:
         return
-    for mid in (group["last_primary_msg_id"], group["last_voice_msg_id"]):
+    for mid in (row["last_primary_msg_id"], row["last_voice_msg_id"]):
         if mid:
             try:
-                await client.delete_messages(chat_id, int(mid))
+                await context.bot.delete_message(chat_id=chat_id, message_id=int(mid))
             except Exception:
                 pass
 
 
-async def schedule_delete_message(client: Client, chat_id: int, message_id: int, delay: int) -> None:
+async def schedule_delete(bot, chat_id: int, message_id: int, delay: int):
     try:
         await asyncio.sleep(delay)
-        await client.delete_messages(chat_id, message_id)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
     except Exception:
         pass
 
@@ -566,14 +556,9 @@ def pick_font(size: int, bold: bool = False):
     return ImageFont.load_default()
 
 
-async def make_voice_file(text: str, lang: str, output_path: Path) -> None:
-    communicate = edge_tts.Communicate(text=text, voice=voice_name_for_lang(lang), rate=VOICE_RATE, pitch=VOICE_PITCH, volume=VOICE_VOLUME)
-    await communicate.save(str(output_path))
-
-
 def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
     width, height = 1280, 720
-    phase = get_day_phase()
+    phase = phase_now()
     palette = {
         "morning": ((255, 226, 150), (255, 143, 116)),
         "day": ((119, 215, 255), (82, 103, 255)),
@@ -594,22 +579,16 @@ def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
     draw.ellipse((930, 480, 1160, 710), fill=(255, 255, 255))
     draw.rounded_rectangle((95, 95, 1185, 625), radius=42, fill=(13, 18, 35))
     draw.rounded_rectangle((120, 120, 145, 600), radius=10, fill=(255, 214, 120))
-
-    title_font = pick_font(62, bold=True)
-    name_font = pick_font(88, bold=True)
-    sub_font = pick_font(34, bold=False)
-    mini_font = pick_font(28, bold=True)
-
-    name_text = ascii_name(first_name).upper()
-    group_text = ascii_name(group_title or ("OUR GROUP" if lang == "en" else "GROUP")).upper()
-
+    title_font = pick_font(62, True)
+    name_font = pick_font(88, True)
+    sub_font = pick_font(34, False)
+    mini_font = pick_font(28, True)
     draw.text((175, 155), "WELCOME", fill=(255, 255, 255), font=title_font)
-    draw.text((175, 255), name_text, fill=(255, 224, 153), font=name_font)
-    draw.text((175, 385), f"TO {group_text}", fill=(214, 228, 255), font=sub_font)
+    draw.text((175, 255), ascii_name(first_name).upper(), fill=(255, 224, 153), font=name_font)
+    draw.text((175, 385), f"TO {ascii_name(group_title or 'GROUP').upper()}", fill=(214, 228, 255), font=sub_font)
     draw.text((175, 470), BOT_NAME.upper(), fill=(173, 255, 223), font=mini_font)
     draw.rounded_rectangle((175, 535, 410, 548), radius=6, fill=(255, 255, 255))
     draw.rounded_rectangle((175, 565, 330, 578), radius=6, fill=(190, 225, 255))
-
     bio = BytesIO()
     img.save(bio, format="PNG")
     bio.name = "welcome.png"
@@ -617,392 +596,439 @@ def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
     return bio
 
 
-async def perform_welcome(client: Client, chat_id: int, chat_title: str, user_obj: User) -> None:
-    ensure_group(chat_id, chat_title or "")
-    group = get_group(chat_id)
-    if not group or int(group["enabled"]) != 1:
+async def make_voice_file(text: str, lang: str, path: Path):
+    voice = VOICE_NAME_EN if lang == "en" else VOICE_NAME_BN
+    communicate = edge_tts.Communicate(text=text, voice=voice, rate=VOICE_RATE, pitch=VOICE_PITCH, volume=VOICE_VOLUME)
+    await communicate.save(str(path))
+
+
+def welcome_texts(lang: str, mention_name: str, first_name: str, group_title: str, custom_text: Optional[str]) -> tuple[str, str]:
+    phase = phase_now()
+    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
+    if custom_text:
+        text = custom_text.replace("{name}", mention_name).replace("{group}", safe_group).replace("{phase}", phase)
+        voice = f"Hello {first_name}, welcome to {safe_group}." if lang == "en" else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।"
+        return text, voice
+
+    if lang == "en":
+        bank = {
+            "morning": [f"🌼 Good morning {mention_name}!\nWelcome to {safe_group}.", f"✨ {mention_name}, warm morning wishes and welcome to {safe_group}.", f"☀️ Hello {mention_name}!\nA bright morning welcome to {safe_group}."],
+            "day": [f"🌸 Welcome {mention_name}!\nWe are happy to have you in {safe_group}.", f"💫 Hello {mention_name}!\nA warm welcome to {safe_group}.", f"🌷 {mention_name}, glad to see you in {safe_group}. Welcome!"],
+            "evening": [f"🌙 Good evening {mention_name}!\nWelcome to {safe_group}.", f"✨ {mention_name}, lovely evening wishes and welcome to {safe_group}.", f"🌆 Hello {mention_name}!\nEvening smiles and a warm welcome to {safe_group}."],
+            "night": [f"🌌 Good night {mention_name}!\nWelcome to {safe_group}.", f"💙 {mention_name}, peaceful night wishes and welcome to {safe_group}.", f"⭐ Hello {mention_name}!\nA calm night welcome to {safe_group}."],
+        }
+        voice_bank = {
+            "morning": [f"{first_name}, good morning. A warm welcome to {safe_group}.", f"Hello {first_name}, welcome to {safe_group}. We are glad to have you here."],
+            "day": [f"{first_name}, welcome to {safe_group}. We are really happy to have you here.", f"Hello {first_name}, a warm welcome to {safe_group}."],
+            "evening": [f"{first_name}, good evening. Welcome to {safe_group}. Hope you enjoy your time here.", f"Hello {first_name}, evening wishes and welcome to {safe_group}."],
+            "night": [f"{first_name}, good night. A warm welcome to {safe_group}.", f"Hello {first_name}, welcome to {safe_group}. Glad to have you here."],
+        }
+    else:
+        bank = {
+            "morning": [f"🌼 শুভ সকাল {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"✨ {mention_name}, সকালের মিষ্টি শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"☀️ হ্যালো {mention_name}!\nএকটা সুন্দর সকালের স্বাগতম রইল {safe_group} এ।"],
+            "day": [f"🌸 স্বাগতম {mention_name}!\n{safe_group} এ তোমাকে পেয়ে খুব ভালো লাগছে।", f"💫 হ্যালো {mention_name}!\n{safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"🌷 {mention_name}, তোমাকে পেয়ে {safe_group} আরও সুন্দর লাগছে। স্বাগতম।"],
+            "evening": [f"🌙 শুভ সন্ধ্যা {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"✨ {mention_name}, সন্ধ্যার সুন্দর শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"🌆 হ্যালো {mention_name}!\nসন্ধ্যার নরম আলোয় তোমাকে {safe_group} এ স্বাগতম।"],
+            "night": [f"🌌 শুভ রাত্রি {mention_name}!\n{safe_group} এ তোমাকে স্বাগতম।", f"💙 {mention_name}, রাতের শান্ত শুভেচ্ছা। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।", f"⭐ হ্যালো {mention_name}!\nরাতের শান্ত শুভেচ্ছার সাথে তোমাকে স্বাগতম {safe_group} এ।"],
+        }
+        voice_bank = {
+            "morning": [f"{first_name}, শুভ সকাল। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"হ্যালো {first_name}, সকালের সুন্দর শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
+            "day": [f"{first_name}, তোমাকে {safe_group} এ আন্তরিক স্বাগতম। তোমাকে পেয়ে ভালো লাগছে।", f"হ্যালো {first_name}, {safe_group} এ তোমাকে পেয়ে সত্যিই ভালো লাগছে। স্বাগতম।"],
+            "evening": [f"{first_name}, শুভ সন্ধ্যা। {safe_group} এ তোমাকে স্বাগতম। আশা করি এখানে ভালো সময় কাটাবে।", f"হ্যালো {first_name}, সন্ধ্যার মিষ্টি শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
+            "night": [f"{first_name}, শুভ রাত্রি। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।", f"হ্যালো {first_name}, রাতের শান্ত শুভেচ্ছা। তোমাকে পেয়ে ভালো লাগছে।"],
+        }
+    return random.choice(bank[phase]), random.choice(voice_bank[phase])
+
+
+async def delete_previous_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    row = get_group(chat_id)
+    if not row:
         return
+    for mid in (row["last_primary_msg_id"], row["last_voice_msg_id"]):
+        if mid:
+            try:
+                await context.bot.delete_message(chat_id=chat_id, message_id=int(mid))
+            except Exception:
+                pass
+
+
+async def schedule_delete(bot, chat_id: int, message_id: int, delay: int):
+    try:
+        await asyncio.sleep(delay)
+        await bot.delete_message(chat_id=chat_id, message_id=message_id)
+    except Exception:
+        pass
+
+
+async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, user):
+    ensure_group(chat_id, title or "")
+    group = get_group(chat_id)
+    if not group or int(group["enabled"]) != 1 or user.is_bot:
+        return
+
+    if is_recent_duplicate(chat_id, user.id):
+        return
+    if time.time() - get_last_join_time(chat_id, user.id) < REJOIN_IGNORE_SECONDS:
+        return
+    last_chat = recent_welcome_keys.get(f"chat:{chat_id}", 0)
+    if time.time() - last_chat < JOIN_COOLDOWN_SECONDS:
+        return
+    recent_welcome_keys[f"chat:{chat_id}"] = time.time()
 
     lang = get_group_lang(chat_id)
-    user_id = int(user_obj.id)
-    first_name = clean_name(user_obj.first_name)
-    mention_name = user_obj.mention(first_name)
+    first_name = clean_name(user.first_name)
+    mention_name = user.mention_html(first_name)
+    text_welcome, voice_text = welcome_texts(lang, mention_name, first_name, title or "", group["custom_welcome"])
 
-    if is_recent_duplicate(chat_id, user_id, "join"):
-        return
-    if should_skip_for_spam(chat_id, user_id):
-        logger.info("Skipped welcome due to anti-spam rules | chat_id=%s user_id=%s", chat_id, user_id)
-        return
+    await delete_previous_welcome(context, chat_id)
 
-    await delete_previous_welcome(client, chat_id)
-    text_welcome, voice_text = build_welcome_copy(lang, first_name, mention_name, chat_title or ("our group" if lang == "en" else "আমাদের গ্রুপ"), group["custom_welcome"])
-
-    primary_message = None
-    voice_message = None
-    voice_path = TMP_DIR / f"welcome_{chat_id}_{user_id}_{int(time.time())}.mp3"
+    primary = None
+    voice_msg = None
+    voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
 
     try:
-        cover = build_cover_bytes(first_name, chat_title or "GROUP", lang)
-        primary_message = await client.send_photo(chat_id=chat_id, photo=cover, caption=text_welcome)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang)
+        primary = await context.bot.send_photo(chat_id=chat_id, photo=cover, caption=text_welcome, parse_mode="HTML")
         if int(group["voice_enabled"]) == 1:
             await make_voice_file(voice_text, lang, voice_path)
-            voice_message = await client.send_voice(chat_id=chat_id, voice=str(voice_path), caption=msg_text(lang, "welcome_voice_caption"))
-        mark_welcomed(chat_id, user_id)
-        set_group_value(chat_id, "last_primary_msg_id", primary_message.id if primary_message else None)
-        set_group_value(chat_id, "last_voice_msg_id", voice_message.id if voice_message else None)
+            voice_msg = await context.bot.send_voice(chat_id=chat_id, voice=voice_path.read_bytes(), caption=t(lang, "welcome_voice_caption"))
+        save_join_time(chat_id, user.id)
+        set_group_value(chat_id, "last_primary_msg_id", primary.message_id if primary else None)
+        set_group_value(chat_id, "last_voice_msg_id", voice_msg.message_id if voice_msg else None)
         set_group_value(chat_id, "updated_at", int(time.time()))
-        if primary_message:
-            asyncio.create_task(schedule_delete_message(client, chat_id, primary_message.id, WELCOME_DELETE_AFTER))
-        if voice_message:
-            asyncio.create_task(schedule_delete_message(client, chat_id, voice_message.id, WELCOME_DELETE_AFTER))
+        if primary:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, primary.message_id, WELCOME_DELETE_AFTER))
+        if voice_msg:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, voice_msg.message_id, WELCOME_DELETE_AFTER))
     except Exception:
-        logger.exception("Failed welcome flow in chat %s for user %s", chat_id, user_id)
+        logger.exception("Welcome failed in chat %s for user %s", chat_id, user.id)
     finally:
-        try:
-            if voice_path.exists():
+        if voice_path.exists():
+            try:
                 voice_path.unlink()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
 
-@app.on_message(filters.group & ~filters.service)
-async def group_tracker_handler(_, message: Message):
-    chat = message.chat
-    if not chat or chat_type_name(chat) not in ('group', 'supergroup'):
-        return
-    maybe_track_group(chat.id, chat.title or '')
+async def track_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat and chat.type in {"group", "supergroup"}:
+        ensure_group(chat.id, chat.title or "")
 
 
-new_members_filter = filters.create(lambda _, __, m: bool(getattr(m, "new_chat_members", None)))
-
-
-@app.on_message(new_members_filter)
-async def new_members_message_handler(client: Client, message: Message):
-    chat = message.chat
-    if not chat or chat_type_name(chat) not in ("group", "supergroup"):
-        return
-
-    ensure_group(chat.id, chat.title or "")
-    group = get_group(chat.id)
-    if not group or int(group["enabled"]) != 1:
-        return
-
-    if int(group["delete_service"]) == 1:
-        try:
-            await client.delete_messages(chat.id, message.id)
-        except Exception:
-            logger.info("Join message delete skipped in chat %s", chat.id)
-
-    me = await client.get_me()
-    for member in message.new_chat_members or []:
-        if member.is_bot and member.id == me.id:
-            continue
-        if not member.is_bot:
-            await perform_welcome(client, chat.id, chat.title or "", member)
-            break
-
-
-@app.on_message(filters.service)
-async def service_handler(client: Client, message: Message):
-    chat = message.chat
-    if not chat or chat_type_name(chat) not in ("group", "supergroup"):
-        return
-
-    ensure_group(chat.id, chat.title or "")
-    group = get_group(chat.id)
-    if not group or int(group["enabled"]) != 1:
-        return
-
-    if int(group["delete_service"]) == 1:
-        try:
-            await client.delete_messages(chat.id, message.id)
-        except Exception:
-            logger.info("Service delete skipped in chat %s (likely missing permission)", chat.id)
-
-
-@app.on_chat_member_updated()
-async def chat_member_updated_handler(client: Client, update: ChatMemberUpdated):
-    chat = update.chat
-    if not chat or chat_type_name(chat) not in ("group", "supergroup"):
-        return
-
-    ensure_group(chat.id, chat.title or "")
-    group = get_group(chat.id)
-    if not group or int(group["enabled"]) != 1:
-        return
-
-    old_status = member_status_name(update.old_chat_member.status) if update.old_chat_member else ""
-    new_status = member_status_name(update.new_chat_member.status) if update.new_chat_member else ""
-    user_obj = update.new_chat_member.user if update.new_chat_member else None
-    if not user_obj or user_obj.is_bot:
-        return
-
-    joined_states = {"member", "administrator", "owner", "creator"}
-    left_states = {"left", "kicked", "banned"}
-
-    if old_status in left_states and new_status in joined_states:
-        await perform_welcome(client, chat.id, chat.title or "", user_obj)
-
-
-@app.on_message(filters.command("start"))
-async def start_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) in ("group", "supergroup"):
-        ensure_group(message.chat.id, message.chat.title or "")
-        await message.reply_text(msg_text(get_group_lang(message.chat.id), "start_group"))
+async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_group(update, context)
+    if update.effective_chat and update.effective_chat.type in {"group", "supergroup"}:
+        await update.effective_message.reply_text(t(get_group_lang(update.effective_chat.id), "start_group"))
     else:
-        await message.reply_text(msg_text("bn", "start_private"))
+        await update.effective_message.reply_text(t("bn", "start_private"))
 
 
-@app.on_message(filters.command("support"))
-async def support_cmd(_, message: Message):
-    lang = get_group_lang(message.chat.id) if chat_type_name(message.chat) in ("group", "supergroup") else "bn"
-    await message.reply_text(msg_text(lang, "support"))
+async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_group(update, context)
+    lang = get_group_lang(update.effective_chat.id) if update.effective_chat and update.effective_chat.type in {"group", "supergroup"} else "bn"
+    await update.effective_message.reply_text(t(lang, "support"))
 
 
-@app.on_message(filters.command("ping"))
-async def ping_cmd(_, message: Message):
-    lang = get_group_lang(message.chat.id) if chat_type_name(message.chat) in ("group", "supergroup") else "bn"
-    await message.reply_text(msg_text(lang, "ping", tz=TIMEZONE_NAME, time=get_local_time().strftime("%I:%M %p")))
+async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_group(update, context)
+    lang = get_group_lang(update.effective_chat.id) if update.effective_chat and update.effective_chat.type in {"group", "supergroup"} else "bn"
+    await update.effective_message.reply_text(t(lang, "ping", tz=TIMEZONE_NAME, time=local_now().strftime("%I:%M %p")))
 
 
-@app.on_message(filters.command("myid"))
-async def myid_cmd(_, message: Message):
-    await message.reply_text(msg_text("en", "myid", user_id=message.from_user.id if message.from_user else 0))
+async def on_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id if update.effective_user else 0
+    await update.effective_message.reply_text(t("en", "myid", user_id=uid))
 
 
-@app.on_message(filters.command("lang"))
-async def lang_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text(msg_text("en", "lang_usage"))
+async def require_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    user = update.effective_user
+    if not chat or chat.type not in {"group", "supergroup"}:
+        await update.effective_message.reply_text("Use this command in group.")
+        return False
+    ensure_group(chat.id, chat.title or "")
+    if not user:
+        return False
+    member = await context.bot.get_chat_member(chat.id, user.id)
+    if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+        await update.effective_message.reply_text(t(get_group_lang(chat.id), "only_group_admin"))
+        return False
+    return True
+
+
+async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    current_lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(current_lang, "only_group_admin"))
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    if not context.args:
+        await update.effective_message.reply_text(t(lang, "lang_usage"))
         return
-    if len(message.command) < 2:
-        await message.reply_text(msg_text(current_lang, "lang_usage"))
-        return
-    new_lang = message.command[1].strip().lower()
+    new_lang = context.args[0].strip().lower()
     if new_lang not in {"bn", "en"}:
-        await message.reply_text(msg_text(current_lang, "lang_usage"))
+        await update.effective_message.reply_text(t(lang, "lang_usage"))
         return
-    set_group_value(message.chat.id, "language", new_lang)
-    await message.reply_text(msg_text(new_lang, "lang_set_en" if new_lang == "en" else "lang_set"))
+    set_group_value(chat.id, "language", new_lang)
+    await update.effective_message.reply_text(t(new_lang, "lang_set_en" if new_lang == "en" else "lang_set_bn"))
 
 
-@app.on_message(filters.command("voice"))
-async def voice_toggle_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /voice in group.")
+async def on_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
-        return
-    group = get_group(message.chat.id)
-    if len(message.command) < 2:
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    group = get_group(chat.id)
+    if not context.args:
         current = "ON" if int(group["voice_enabled"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "voice_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "voice_usage", current=current))
         return
-    value = message.command[1].strip().lower()
-    if value not in ("on", "off"):
+    value = context.args[0].strip().lower()
+    if value not in {"on", "off"}:
         current = "ON" if int(group["voice_enabled"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "voice_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "voice_usage", current=current))
         return
-    set_group_value(message.chat.id, "voice_enabled", 1 if value == "on" else 0)
-    await message.reply_text(msg_text(lang, "voice_set", value=value.upper()))
+    set_group_value(chat.id, "voice_enabled", 1 if value == "on" else 0)
+    await update.effective_message.reply_text(t(lang, "voice_set", value=value.upper()))
 
 
-@app.on_message(filters.command("deleteservice"))
-async def deleteservice_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /deleteservice in group.")
+async def on_delete_service(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
-        return
-    group = get_group(message.chat.id)
-    if len(message.command) < 2:
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    group = get_group(chat.id)
+    if not context.args:
         current = "ON" if int(group["delete_service"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "deleteservice_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "deleteservice_usage", current=current))
         return
-    value = message.command[1].strip().lower()
-    if value not in ("on", "off"):
+    value = context.args[0].strip().lower()
+    if value not in {"on", "off"}:
         current = "ON" if int(group["delete_service"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "deleteservice_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "deleteservice_usage", current=current))
         return
-    set_group_value(message.chat.id, "delete_service", 1 if value == "on" else 0)
-    await message.reply_text(msg_text(lang, "deleteservice_set", value=value.upper()))
+    set_group_value(chat.id, "delete_service", 1 if value == "on" else 0)
+    await update.effective_message.reply_text(t(lang, "deleteservice_set", value=value.upper()))
 
 
-@app.on_message(filters.command("hourly"))
-async def hourly_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /hourly in group.")
+async def on_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
-        return
-    group = get_group(message.chat.id)
-    if len(message.command) < 2:
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    group = get_group(chat.id)
+    if not context.args:
         current = "ON" if int(group["hourly_enabled"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "hourly_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "hourly_usage", current=current))
         return
-
-    value = message.command[1].strip().lower()
+    value = context.args[0].strip().lower()
     if value == "now":
-        text = hourly_text(lang)
-        await message.reply_text(text)
-        set_group_value(message.chat.id, "last_hourly_at", int(time.time()))
-        await message.reply_text(msg_text(lang, "hourly_now"))
+        msg = pick_hourly_message(chat.id, lang, phase_now(), groq_generate_batch(lang, phase_now()) or build_fallback_messages(lang, phase_now()))
+        await update.effective_message.reply_text(msg)
+        set_group_value(chat.id, "last_hourly_at", int(time.time()))
+        await update.effective_message.reply_text(t(lang, "hourly_now"))
         return
-
-    if value not in ("on", "off"):
+    if value not in {"on", "off"}:
         current = "ON" if int(group["hourly_enabled"]) == 1 else "OFF"
-        await message.reply_text(msg_text(lang, "hourly_usage", current=current))
+        await update.effective_message.reply_text(t(lang, "hourly_usage", current=current))
         return
-
-    set_group_value(message.chat.id, "hourly_enabled", 1 if value == "on" else 0)
+    set_group_value(chat.id, "hourly_enabled", 1 if value == "on" else 0)
     if value == "on":
-        set_group_value(message.chat.id, "last_hourly_at", 0)
-        group_touch_cache[message.chat.id] = time.time()
-    set_group_value(message.chat.id, "updated_at", int(time.time()))
-    await message.reply_text(msg_text(lang, "hourly_set", value=value.upper()))
+        set_group_value(chat.id, "last_hourly_at", 0)
+    await update.effective_message.reply_text(t(lang, "hourly_set", value=value.upper()))
 
 
-@app.on_message(filters.command("setwelcome"))
-async def setwelcome_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /setwelcome in group.")
+async def on_setwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
-        return
-    parts = (message.text or "").split(" ", 1)
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    raw = update.effective_message.text or ""
+    parts = raw.split(" ", 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text("Usage:\n/setwelcome your text\n\nAvailable placeholders:\n{name} = user mention\n{group} = group title\n{phase} = morning/day/evening/night")
+        await update.effective_message.reply_text("Usage:\n/setwelcome your text\n\nAvailable placeholders:\n{name} = user mention\n{group} = group title\n{phase} = morning/day/evening/night")
         return
-    set_group_value(message.chat.id, "custom_welcome", parts[1].strip()[:600])
-    await message.reply_text(msg_text(lang, "welcome_saved"))
+    set_group_value(chat.id, "custom_welcome", parts[1].strip()[:600])
+    await update.effective_message.reply_text(t(lang, "welcome_saved"))
 
 
-@app.on_message(filters.command("resetwelcome"))
-async def resetwelcome_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /resetwelcome in group.")
+async def on_resetwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    set_group_value(chat.id, "custom_welcome", None)
+    await update.effective_message.reply_text(t(lang, "welcome_reset"))
+
+
+async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
         return
-    set_group_value(message.chat.id, "custom_welcome", None)
-    await message.reply_text(msg_text(lang, "welcome_reset"))
+    chat = update.effective_chat
+    group = get_group(chat.id)
+    lang = get_group_lang(chat.id)
+    await update.effective_message.reply_text(
+        t(
+            lang,
+            "status",
+            lang_name="Bangla" if lang == "bn" else "English",
+            voice="ON" if int(group["voice_enabled"]) == 1 else "OFF",
+            delete_service="ON" if int(group["delete_service"]) == 1 else "OFF",
+            hourly="ON" if int(group["hourly_enabled"]) == 1 else "OFF",
+            tz=TIMEZONE_NAME,
+            phase=phase_now(),
+        )
+    )
 
 
-@app.on_message(filters.command("status"))
-async def status_cmd(client: Client, message: Message):
-    if chat_type_name(message.chat) not in ("group", "supergroup"):
-        await message.reply_text("Use /status in group.")
+async def on_testwelcome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await track_group(update, context)
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id) if chat and chat.type in {"group", "supergroup"} else "bn"
+    user = update.effective_user
+    if not user:
         return
-    ensure_group(message.chat.id, message.chat.title or "")
-    lang = get_group_lang(message.chat.id)
-    if not message.from_user or not await is_group_admin(client, message.chat.id, message.from_user.id):
-        await message.reply_text(msg_text(lang, "only_group_admin"))
+    await maybe_welcome(context, chat.id, chat.title or "", user)
+
+
+async def on_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user or not is_super_admin(update.effective_user.id):
+        await update.effective_message.reply_text(t("en", "broadcast_owner_only"))
         return
-    group = get_group(message.chat.id)
-    await message.reply_text(msg_text(lang, "status", enabled="YES" if int(group["enabled"]) == 1 else "NO", lang_name="Bangla" if get_group_lang(message.chat.id) == "bn" else "English", voice="ON" if int(group["voice_enabled"]) == 1 else "OFF", delete_service="ON" if int(group["delete_service"]) == 1 else "OFF", hourly="ON" if int(group["hourly_enabled"]) == 1 else "OFF", tz=TIMEZONE_NAME, phase=get_day_phase()))
-
-
-@app.on_message(filters.command("testwelcome"))
-async def testwelcome_cmd(client: Client, message: Message):
-    lang = get_group_lang(message.chat.id) if chat_type_name(message.chat) in ("group", "supergroup") else "bn"
-    first_name = clean_name(message.from_user.first_name if message.from_user else ("Friend" if lang == "en" else "বন্ধু"))
-    mention_name = message.from_user.mention(first_name) if message.from_user else first_name
-    text_welcome, voice_text = build_welcome_copy(lang, first_name, mention_name, message.chat.title if message.chat and message.chat.title else ("our group" if lang == "en" else "আমাদের গ্রুপ"), None)
-
-    cover = build_cover_bytes(first_name, message.chat.title if message.chat else "GROUP", lang)
-    primary_message = await client.send_photo(chat_id=message.chat.id, photo=cover, caption=text_welcome)
-    voice_path = TMP_DIR / f"test_{message.chat.id}_{int(time.time())}.mp3"
-    voice_message = None
-    try:
-        await make_voice_file(voice_text, lang, voice_path)
-        voice_message = await client.send_voice(chat_id=message.chat.id, voice=str(voice_path), caption=msg_text(lang, "test_voice_caption"))
-    except Exception:
-        logger.exception("Failed sending test welcome voice")
-    finally:
-        try:
-            if voice_path.exists():
-                voice_path.unlink()
-        except Exception:
-            pass
-    asyncio.create_task(schedule_delete_message(client, message.chat.id, primary_message.id, WELCOME_DELETE_AFTER))
-    if voice_message:
-        asyncio.create_task(schedule_delete_message(client, message.chat.id, voice_message.id, WELCOME_DELETE_AFTER))
-
-
-@app.on_message(filters.command("broadcast") & filters.private)
-async def broadcast_cmd(client: Client, message: Message):
-    if not message.from_user or not is_super_admin(message.from_user.id):
-        await message.reply_text(msg_text("en", "broadcast_owner_only"))
-        return
-    parts = (message.text or "").split(" ", 1)
+    raw = update.effective_message.text or ""
+    parts = raw.split(" ", 1)
     if len(parts) < 2 or not parts[1].strip():
-        await message.reply_text(msg_text("en", "broadcast_usage"))
+        await update.effective_message.reply_text(t("en", "broadcast_usage"))
         return
-    group_ids = get_all_enabled_groups()
-    if not group_ids:
-        await message.reply_text(msg_text("en", "broadcast_none"))
+    groups = get_all_enabled_groups()
+    if not groups:
+        await update.effective_message.reply_text(t("en", "broadcast_none"))
         return
-    status = await message.reply_text(msg_text("en", "broadcast_start", count=len(group_ids)))
+    status = await update.effective_message.reply_text(t("en", "broadcast_start", count=len(groups)))
     ok_count = 0
     fail_count = 0
-    for gid in group_ids:
+    for gid in groups:
         try:
-            await client.send_message(gid, parts[1].strip())
+            await context.bot.send_message(chat_id=gid, text=parts[1].strip())
             ok_count += 1
         except Exception:
             fail_count += 1
-            logger.exception("Broadcast failed to group %s", gid)
-    await status.edit_text(msg_text("en", "broadcast_done", ok=ok_count, fail=fail_count))
+    await status.edit_text(t("en", "broadcast_done", ok=ok_count, fail=fail_count))
 
 
-def hourly_loop() -> None:
+async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in {"group", "supergroup"}:
+        return
+    ensure_group(chat.id, chat.title or "")
+    group = get_group(chat.id)
+    if int(group["delete_service"]) == 1 and update.effective_message:
+        try:
+            await update.effective_message.delete()
+        except Exception:
+            pass
+    for member in update.effective_message.new_chat_members or []:
+        if member.is_bot:
+            continue
+        await maybe_welcome(context, chat.id, chat.title or "", member)
+        break
+
+
+async def on_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmu = update.chat_member
+    if not cmu:
+        return
+    chat = cmu.chat
+    if chat.type not in {"group", "supergroup"}:
+        return
+    ensure_group(chat.id, chat.title or "")
+    new_status = cmu.new_chat_member.status
+    old_status = cmu.old_chat_member.status
+    if cmu.new_chat_member.user.is_bot:
+        return
+    if old_status in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED} and new_status in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+        await maybe_welcome(context, chat.id, chat.title or "", cmu.new_chat_member.user)
+
+
+def hourly_loop():
     logger.info("Hourly loop started")
     while True:
         try:
-            rows = get_enabled_groups_for_hourly()
-            for row in rows:
-                chat_id = int(row["chat_id"])
-                lang = get_group_lang(chat_id)
-                text = hourly_text(lang)
-                ok = send_message_http(chat_id, text)
-                if ok:
-                    logger.info('Hourly message sent to %s', chat_id)
-                    set_group_value(chat_id, "last_hourly_at", int(time.time()))
-                else:
-                    logger.warning('Hourly message failed for %s', chat_id)
+            due_rows = get_enabled_groups_for_hourly()
+            if due_rows:
+                phase = phase_now()
+                pools = {}
+                langs = {get_group_lang(int(r["chat_id"])) for r in due_rows}
+                for lang in langs:
+                    ai_lines = groq_generate_batch(lang, phase)
+                    pools[lang] = ai_lines or build_fallback_messages(lang, phase)
+
+                for row in due_rows:
+                    chat_id = int(row["chat_id"])
+                    lang = get_group_lang(chat_id)
+                    msg = pick_hourly_message(chat_id, lang, phase, pools[lang])
+                    if send_message_http(chat_id, msg):
+                        set_group_value(chat_id, "last_hourly_at", int(time.time()))
+                        logger.info("Hourly sent to %s", chat_id)
+                    else:
+                        logger.warning("Hourly failed to %s", chat_id)
         except Exception:
             logger.exception("hourly_loop failed")
         time.sleep(60)
 
 
-def main() -> None:
+async def post_init(application: Application):
+    delete_webhook()
+    commands = [
+        BotCommand("start", "Show bot info"),
+        BotCommand("ping", "Bot alive check"),
+        BotCommand("support", "Support group"),
+        BotCommand("myid", "Show your user id"),
+        BotCommand("lang", "Change group language"),
+        BotCommand("voice", "Toggle welcome voice"),
+        BotCommand("deleteservice", "Toggle service delete"),
+        BotCommand("hourly", "Toggle hourly texts"),
+        BotCommand("setwelcome", "Custom welcome text"),
+        BotCommand("resetwelcome", "Reset custom welcome"),
+        BotCommand("status", "Show group status"),
+        BotCommand("testwelcome", "Send test welcome"),
+        BotCommand("broadcast", "Owner broadcast"),
+    ]
+    await application.bot.set_my_commands(commands)
+
+
+def build_app() -> Application:
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    application.add_handler(CommandHandler("start", on_start))
+    application.add_handler(CommandHandler("support", on_support))
+    application.add_handler(CommandHandler("ping", on_ping))
+    application.add_handler(CommandHandler("myid", on_myid))
+    application.add_handler(CommandHandler("lang", on_lang))
+    application.add_handler(CommandHandler("voice", on_voice))
+    application.add_handler(CommandHandler("deleteservice", on_delete_service))
+    application.add_handler(CommandHandler("hourly", on_hourly))
+    application.add_handler(CommandHandler("setwelcome", on_setwelcome))
+    application.add_handler(CommandHandler("resetwelcome", on_resetwelcome))
+    application.add_handler(CommandHandler("status", on_status))
+    application.add_handler(CommandHandler("testwelcome", on_testwelcome))
+    application.add_handler(CommandHandler("broadcast", on_broadcast))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
+    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group))
+    return application
+
+
+def main():
     init_db()
-    set_my_commands()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=hourly_loop, daemon=True).start()
     logger.info("Flask started on port %s", PORT)
     logger.info("Starting %s", BOT_NAME)
-    app.run()
+    app = build_app()
+    app.run_polling(
+        allowed_updates=Update.ALL_TYPES,
+        drop_pending_updates=False,
+        close_loop=False,
+    )
 
 
 if __name__ == "__main__":
