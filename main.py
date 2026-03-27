@@ -259,6 +259,21 @@ app = Client(
 
 chat_last_welcome_ts: dict[int, float] = {}
 recent_welcome_keys: dict[str, float] = {}
+group_touch_cache: dict[int, float] = {}
+
+
+def maybe_track_group(chat_id: int, title: str) -> None:
+    now_ts = time.time()
+    prev = group_touch_cache.get(chat_id, 0)
+    if now_ts - prev < 1800:
+        return
+    group_touch_cache[chat_id] = now_ts
+    try:
+        ensure_group(chat_id, title or '')
+    except Exception:
+        logger.exception('maybe_track_group failed for %s', chat_id)
+
+
 
 MESSAGES = {
     "bn": {
@@ -650,6 +665,14 @@ async def perform_welcome(client: Client, chat_id: int, chat_title: str, user_ob
             pass
 
 
+@app.on_message(filters.group & ~filters.service)
+async def group_tracker_handler(_, message: Message):
+    chat = message.chat
+    if not chat or chat_type_name(chat) not in ('group', 'supergroup'):
+        return
+    maybe_track_group(chat.id, chat.title or '')
+
+
 new_members_filter = filters.create(lambda _, __, m: bool(getattr(m, "new_chat_members", None)))
 
 
@@ -848,6 +871,8 @@ async def hourly_cmd(client: Client, message: Message):
     set_group_value(message.chat.id, "hourly_enabled", 1 if value == "on" else 0)
     if value == "on":
         set_group_value(message.chat.id, "last_hourly_at", 0)
+        group_touch_cache[message.chat.id] = time.time()
+    set_group_value(message.chat.id, "updated_at", int(time.time()))
     await message.reply_text(msg_text(lang, "hourly_set", value=value.upper()))
 
 
@@ -961,7 +986,10 @@ def hourly_loop() -> None:
                 text = hourly_text(lang)
                 ok = send_message_http(chat_id, text)
                 if ok:
+                    logger.info('Hourly message sent to %s', chat_id)
                     set_group_value(chat_id, "last_hourly_at", int(time.time()))
+                else:
+                    logger.warning('Hourly message failed for %s', chat_id)
         except Exception:
             logger.exception("hourly_loop failed")
         time.sleep(60)
