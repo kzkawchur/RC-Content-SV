@@ -15,7 +15,7 @@ import requests
 from flask import Flask, jsonify
 from PIL import Image, ImageDraw, ImageFont
 from pyrogram import Client, filters
-from pyrogram.types import ChatMemberUpdated, Message
+from pyrogram.types import ChatMemberUpdated, Message, User
 from zoneinfo import ZoneInfo
 
 logging.basicConfig(
@@ -71,7 +71,7 @@ def health():
     return jsonify({"status": "ok", "bot": BOT_NAME})
 
 
-def run_flask():
+def run_flask() -> None:
     flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
 
 
@@ -89,12 +89,16 @@ def tg_post(method: str, payload: dict) -> dict:
 def send_message_http(chat_id: int, text: str) -> bool:
     data = tg_post(
         "sendMessage",
-        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+        {
+            "chat_id": chat_id,
+            "text": text,
+            "disable_web_page_preview": True,
+        },
     )
     return bool(data.get("ok"))
 
 
-def set_my_commands():
+def set_my_commands() -> None:
     commands = [
         {"command": "start", "description": "Show bot info"},
         {"command": "ping", "description": "Bot alive check"},
@@ -122,7 +126,7 @@ def db_connect() -> sqlite3.Connection:
 def init_db() -> None:
     with db_connect() as conn:
         conn.execute(
-            '''
+            """
             CREATE TABLE IF NOT EXISTS groups (
                 chat_id INTEGER PRIMARY KEY,
                 title TEXT,
@@ -137,17 +141,17 @@ def init_db() -> None:
                 last_hourly_at INTEGER NOT NULL DEFAULT 0,
                 updated_at INTEGER NOT NULL DEFAULT 0
             )
-            '''
+            """
         )
         conn.execute(
-            '''
+            """
             CREATE TABLE IF NOT EXISTS join_memory (
                 chat_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
                 joined_at INTEGER NOT NULL,
                 PRIMARY KEY (chat_id, user_id)
             )
-            '''
+            """
         )
         conn.commit()
 
@@ -156,14 +160,14 @@ def ensure_group(chat_id: int, title: str) -> None:
     now_ts = int(time.time())
     with db_connect() as conn:
         conn.execute(
-            '''
+            """
             INSERT INTO groups (chat_id, title, enabled, updated_at, last_hourly_at)
-            VALUES (?, ?, 1, ?, ?)
+            VALUES (?, ?, 1, ?, 0)
             ON CONFLICT(chat_id) DO UPDATE SET
                 title = excluded.title,
                 updated_at = excluded.updated_at
-            ''',
-            (chat_id, title or "", now_ts, now_ts),
+            """,
+            (chat_id, title or "", now_ts),
         )
         conn.commit()
 
@@ -206,13 +210,13 @@ def get_enabled_groups_for_hourly() -> list[sqlite3.Row]:
     now_ts = int(time.time())
     with db_connect() as conn:
         return conn.execute(
-            '''
+            """
             SELECT * FROM groups
             WHERE enabled = 1
               AND hourly_enabled = 1
               AND (? - last_hourly_at) >= ?
             ORDER BY updated_at DESC
-            ''',
+            """,
             (now_ts, HOURLY_INTERVAL_SECONDS),
         ).fetchall()
 
@@ -236,11 +240,11 @@ def save_join_time(chat_id: int, user_id: int) -> None:
     now_ts = int(time.time())
     with db_connect() as conn:
         conn.execute(
-            '''
+            """
             INSERT INTO join_memory (chat_id, user_id, joined_at)
             VALUES (?, ?, ?)
             ON CONFLICT(chat_id, user_id) DO UPDATE SET joined_at = excluded.joined_at
-            ''',
+            """,
             (chat_id, user_id, now_ts),
         )
         conn.commit()
@@ -277,8 +281,9 @@ MESSAGES = {
         "voice_set": ["Voice welcome: {value}", "ঠিক আছে, voice welcome এখন {value}।"],
         "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
         "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
-        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n\nCurrent: {current}"],
+        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
         "hourly_set": ["Hourly text: {value}", "Hourly beautiful text mode: {value}"],
+        "hourly_now": ["একটা সুন্দর hourly message এখন পাঠানো হলো।", "ঠিক আছে, এখনই একটা সুন্দর message দিলাম।"],
         "welcome_saved": ["Custom welcome text saved successfully.", "Custom welcome text save হয়ে গেছে।"],
         "welcome_reset": ["Custom welcome reset done.", "Custom welcome reset করা হয়েছে।"],
         "status": ["Bot name: {bot}\nEnabled: {enabled}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nHourly text: {hourly}\nTimezone: {tz}\nPhase now: {phase}"],
@@ -332,8 +337,9 @@ MESSAGES = {
         "voice_set": ["Voice welcome: {value}", "Voice welcome is now {value}."],
         "deleteservice_usage": ["Usage:\n/deleteservice on\n/deleteservice off\n\nCurrent: {current}"],
         "deleteservice_set": ["Delete service message: {value}", "Service message delete mode: {value}"],
-        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n\nCurrent: {current}"],
+        "hourly_usage": ["Usage:\n/hourly on\n/hourly off\n/hourly now\n\nCurrent: {current}"],
         "hourly_set": ["Hourly text: {value}", "Hourly beautiful text mode: {value}"],
+        "hourly_now": ["A beautiful hourly message was sent just now.", "Okay, I sent a beautiful message right now."],
         "welcome_saved": ["Custom welcome text saved successfully.", "Your custom welcome text has been saved."],
         "welcome_reset": ["Custom welcome has been reset."],
         "status": ["Bot name: {bot}\nEnabled: {enabled}\nLanguage: {lang_name}\nVoice welcome: {voice}\nDelete service message: {delete_service}\nHourly text: {hourly}\nTimezone: {tz}\nCurrent phase: {phase}"],
@@ -390,8 +396,7 @@ def msg_text(lang: str, key: str, **kwargs) -> str:
 def hourly_text(lang: str) -> str:
     base_lang = lang if lang in MESSAGES else "bn"
     phase = get_day_phase()
-    variants = MESSAGES[base_lang]["hourly_texts"][phase]
-    return random.choice(variants)
+    return random.choice(MESSAGES[base_lang]["hourly_texts"][phase])
 
 
 def chat_type_name(chat) -> str:
@@ -597,14 +602,14 @@ def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
     return bio
 
 
-async def perform_welcome(client: Client, chat_id: int, chat_title: str, user_obj) -> None:
+async def perform_welcome(client: Client, chat_id: int, chat_title: str, user_obj: User) -> None:
     ensure_group(chat_id, chat_title or "")
     group = get_group(chat_id)
     if not group or int(group["enabled"]) != 1:
         return
 
     lang = get_group_lang(chat_id)
-    user_id = user_obj.id
+    user_id = int(user_obj.id)
     first_name = clean_name(user_obj.first_name)
     mention_name = user_obj.mention(first_name)
 
@@ -645,6 +650,35 @@ async def perform_welcome(client: Client, chat_id: int, chat_title: str, user_ob
             pass
 
 
+new_members_filter = filters.create(lambda _, __, m: bool(getattr(m, "new_chat_members", None)))
+
+
+@app.on_message(new_members_filter)
+async def new_members_message_handler(client: Client, message: Message):
+    chat = message.chat
+    if not chat or chat_type_name(chat) not in ("group", "supergroup"):
+        return
+
+    ensure_group(chat.id, chat.title or "")
+    group = get_group(chat.id)
+    if not group or int(group["enabled"]) != 1:
+        return
+
+    if int(group["delete_service"]) == 1:
+        try:
+            await client.delete_messages(chat.id, message.id)
+        except Exception:
+            logger.info("Join message delete skipped in chat %s", chat.id)
+
+    me = await client.get_me()
+    for member in message.new_chat_members or []:
+        if member.is_bot and member.id == me.id:
+            continue
+        if not member.is_bot:
+            await perform_welcome(client, chat.id, chat.title or "", member)
+            break
+
+
 @app.on_message(filters.service)
 async def service_handler(client: Client, message: Message):
     chat = message.chat
@@ -661,17 +695,6 @@ async def service_handler(client: Client, message: Message):
             await client.delete_messages(chat.id, message.id)
         except Exception:
             logger.info("Service delete skipped in chat %s (likely missing permission)", chat.id)
-
-    if message.new_chat_members:
-        me = await client.get_me()
-        target_member = None
-        for member in message.new_chat_members:
-            if member.is_bot and member.id == me.id:
-                continue
-            if not member.is_bot:
-                target_member = member
-        if target_member is not None:
-            await perform_welcome(client, chat.id, chat.title or "", target_member)
 
 
 @app.on_chat_member_updated()
@@ -690,7 +713,11 @@ async def chat_member_updated_handler(client: Client, update: ChatMemberUpdated)
     user_obj = update.new_chat_member.user if update.new_chat_member else None
     if not user_obj or user_obj.is_bot:
         return
-    if old_status in {"left", "kicked", "banned"} and new_status in {"member", "administrator", "owner", "creator"}:
+
+    joined_states = {"member", "administrator", "owner", "creator"}
+    left_states = {"left", "kicked", "banned"}
+
+    if old_status in left_states and new_status in joined_states:
         await perform_welcome(client, chat.id, chat.title or "", user_obj)
 
 
@@ -804,12 +831,23 @@ async def hourly_cmd(client: Client, message: Message):
         current = "ON" if int(group["hourly_enabled"]) == 1 else "OFF"
         await message.reply_text(msg_text(lang, "hourly_usage", current=current))
         return
+
     value = message.command[1].strip().lower()
+    if value == "now":
+        text = hourly_text(lang)
+        await message.reply_text(text)
+        set_group_value(message.chat.id, "last_hourly_at", int(time.time()))
+        await message.reply_text(msg_text(lang, "hourly_now"))
+        return
+
     if value not in ("on", "off"):
         current = "ON" if int(group["hourly_enabled"]) == 1 else "OFF"
         await message.reply_text(msg_text(lang, "hourly_usage", current=current))
         return
+
     set_group_value(message.chat.id, "hourly_enabled", 1 if value == "on" else 0)
+    if value == "on":
+        set_group_value(message.chat.id, "last_hourly_at", 0)
     await message.reply_text(msg_text(lang, "hourly_set", value=value.upper()))
 
 
@@ -912,7 +950,7 @@ async def broadcast_cmd(client: Client, message: Message):
     await status.edit_text(msg_text("en", "broadcast_done", ok=ok_count, fail=fail_count))
 
 
-def hourly_loop():
+def hourly_loop() -> None:
     logger.info("Hourly loop started")
     while True:
         try:
@@ -929,7 +967,7 @@ def hourly_loop():
         time.sleep(60)
 
 
-def main():
+def main() -> None:
     init_db()
     set_my_commands()
     threading.Thread(target=run_flask, daemon=True).start()
