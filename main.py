@@ -18,7 +18,7 @@ from flask import Flask, jsonify
 import colorsys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telegram import BotCommand, Update
-from telegram.constants import ChatMemberStatus, ParseMode
+from telegram.constants import ChatMemberStatus, ParseMode, ChatAction
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -2410,27 +2410,27 @@ async def on_setcountdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     raw = (update.effective_message.text or "").split(" ", 1)
     if len(raw) < 2:
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text("Usage:\n/setcountdown YYYY-MM-DD HH:MM | Event title")
         return
     try:
         target_ts, title = parse_countdown_input(raw[1])
         set_countdown(update.effective_chat.id, title, target_ts, "event")
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text("Countdown saved successfully.")
     except Exception as e:
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(str(e))
 
 async def on_showcountdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in {"group", "supergroup"}:
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text("Use /countdown in group.")
         return
     row = get_countdown(chat.id)
     if not row:
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text("No countdown set for this group.")
         return
     now_ts = int(time.time())
@@ -2439,14 +2439,14 @@ async def on_showcountdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hours_left = (diff % 86400) // 3600
     lang = get_group_lang(chat.id)
     card = build_countdown_card_bytes(chat.title or "GROUP", row["title"], days_left, hours_left, lang)
-    await human_delay()
+    await human_delay_and_action(context, update)
     await send_photo_with_retry(context.bot, chat_id=chat.id, photo=card, caption=f"{row['title']}\n{days_left} days {hours_left} hours left")
 
 async def on_clearcountdown(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_group_admin(update, context):
         return
     clear_countdown(update.effective_chat.id)
-    await human_delay()
+    await human_delay_and_action(context, update)
     await update.effective_message.reply_text("Countdown cleared.")
 
 async def on_hourlyclean(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2456,17 +2456,17 @@ async def on_hourlyclean(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         current = current_hourly_delete_after(chat.id)
         label = "OFF" if current <= 0 else f"{current//60}m" if current < 3600 else f"{current//3600}h"
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(f"Usage:\n/hourlyclean off\n/hourlyclean 30m\n/hourlyclean 1h\n\nCurrent: {label}")
         return
     try:
         seconds = parse_duration_to_seconds(context.args[0])
         set_group_value(chat.id, "hourly_delete_after", seconds)
         label = "OFF" if seconds <= 0 else f"{seconds//60}m" if seconds < 3600 else f"{seconds//3600}h"
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(f"Hourly auto-clean set to {label}.")
     except Exception:
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text("Use /hourlyclean off, /hourlyclean 30m or /hourlyclean 1h")
 
 async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2492,7 +2492,7 @@ async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
     keyword_last_user_at[(chat.id, user.id)] = now_ts
     lang = get_group_lang(chat.id)
     replies = KEYWORD_REPLIES["en" if lang == "en" else "bn"][matched]
-    await human_delay()
+    await human_delay_and_action(context, update)
     try:
         await msg.reply_text(random.choice(replies))
     except Exception:
@@ -2543,7 +2543,7 @@ async def on_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mood = peek_hourly_mood(chat.id)
         clean_after = current_hourly_delete_after(chat.id)
         clean_label = "OFF" if clean_after <= 0 else f"{clean_after//60}m" if clean_after < 3600 else f"{clean_after//3600}h"
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(f"{t(lang, 'hourly_usage', current=current)}\nMood wheel: {mood}\nAuto-clean: {clean_label}")
         return
     value = context.args[0].strip().lower()
@@ -2554,7 +2554,7 @@ async def on_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pool, source = await asyncio.to_thread(get_batch_pool, lang, phase, mood, festival_key)
         used_ai = source == "ai"
         msg = pick_hourly_message(chat.id, lang, phase, pool)
-        await human_delay()
+        await human_delay_and_action(context, update)
         sent = await send_text_with_retry(context.bot, chat_id=chat.id, text=msg)
         clean_after = current_hourly_delete_after(chat.id)
         if clean_after > 0:
@@ -2565,23 +2565,23 @@ async def on_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
             set_group_value(chat.id, "last_ai_success_at", int(time.time()))
         else:
             set_group_value(chat.id, "last_fallback_used_at", int(time.time()))
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(f"{t(lang, 'hourly_now')}\nMood: {mood}")
         return
     if value not in {"on", "off"}:
         current = "ON" if int(group["hourly_enabled"]) == 1 else "OFF"
-        await human_delay()
+        await human_delay_and_action(context, update)
         await update.effective_message.reply_text(t(lang, "hourly_usage", current=current))
         return
     set_group_value(chat.id, "hourly_enabled", 1 if value == "on" else 0)
     if value == "on":
         set_group_value(chat.id, "last_hourly_at", 0)
-    await human_delay()
+    await human_delay_and_action(context, update)
     await update.effective_message.reply_text(t(lang, "hourly_set", value=value.upper()))
 
 async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_group(update, context)
-    await human_delay()
+    await human_delay_and_action(context, update)
     if update.effective_chat and update.effective_chat.type in {"group", "supergroup"}:
         await update.effective_message.reply_text(t(get_group_lang(update.effective_chat.id), "start_group"))
     else:
@@ -2590,18 +2590,18 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_group(update, context)
     lang = get_group_lang(update.effective_chat.id) if update.effective_chat and update.effective_chat.type in {"group", "supergroup"} else "bn"
-    await human_delay()
+    await human_delay_and_action(context, update)
     await update.effective_message.reply_text(t(lang, "support"))
 
 async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_group(update, context)
     lang = get_group_lang(update.effective_chat.id) if update.effective_chat and update.effective_chat.type in {"group", "supergroup"} else "bn"
-    await human_delay()
+    await human_delay_and_action(context, update)
     await update.effective_message.reply_text(t(lang, "ping", tz=TIMEZONE_NAME, time=local_now().strftime("%I:%M %p")))
 
 async def on_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id if update.effective_user else 0
-    await human_delay()
+    await human_delay_and_action(context, update)
     await update.effective_message.reply_text(t("en", "myid", user_id=uid))
 
 async def maybe_send_countdown_reminder(chat_id: int, title: str):
@@ -2745,6 +2745,844 @@ def build_app() -> Application:
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group))
     return application
+
+
+
+# ===== Premium v6 overrides: festival APIs, multi Groq keys, weekly scheduler, exam reminders, link-safe keyword replies, typing actions =====
+
+GROQ_API_KEYS_RAW = os.environ.get("GROQ_API_KEYS", "").strip()
+GROQ_API_KEYS = [k.strip() for k in GROQ_API_KEYS_RAW.split(",") if k.strip()]
+if not GROQ_API_KEYS and GROQ_API_KEY:
+    GROQ_API_KEYS = [GROQ_API_KEY]
+LAST_GROQ_STATUS["configured"] = bool(GROQ_API_KEYS)
+LAST_GROQ_STATUS["key_count"] = len(GROQ_API_KEYS)
+
+NAGER_COUNTRY_CODE = (os.environ.get("NAGER_COUNTRY_CODE", "BD").strip() or "BD").upper()
+ALADHAN_COUNTRY = os.environ.get("ALADHAN_COUNTRY", "Bangladesh").strip() or "Bangladesh"
+ALADHAN_CITY = os.environ.get("ALADHAN_CITY", "Dhaka").strip() or "Dhaka"
+
+FRIDAY_SPECIAL_HOUR = int(os.environ.get("FRIDAY_SPECIAL_HOUR", "20"))
+MONDAY_SPECIAL_HOUR = int(os.environ.get("MONDAY_SPECIAL_HOUR", "9"))
+SPECIAL_EVENT_DELETE_AFTER = int(os.environ.get("SPECIAL_EVENT_DELETE_AFTER", "0"))
+
+NAGER_YEAR_CACHE: dict[int, list] = {}
+ALADHAN_DAY_CACHE: dict[str, dict] = {}
+DAILY_EVENT_MARK_CACHE: dict[tuple[int, str, str], float] = {}
+GROQ_KEY_POINTER = 0
+
+URLISH_RE = re.compile(r"(https?://|www\.|t\.me/|\+[\w\-]{8,})", re.I)
+
+_old_init_db = init_db
+
+def init_db():
+    _old_init_db()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS scheduled_events (
+                chat_id INTEGER NOT NULL,
+                event_kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                target_ts INTEGER NOT NULL,
+                last_sent_day TEXT NOT NULL DEFAULT '',
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, event_kind)
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS daily_event_marks (
+                chat_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                day_key TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, event_key, day_key)
+            )
+            """
+        )
+        conn.commit()
+
+def set_scheduled_event(chat_id: int, event_kind: str, title: str, target_ts: int):
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO scheduled_events (chat_id, event_kind, title, target_ts, last_sent_day, created_at)
+            VALUES (?, ?, ?, ?, '', ?)
+            ON CONFLICT(chat_id, event_kind) DO UPDATE SET
+                title = excluded.title,
+                target_ts = excluded.target_ts,
+                last_sent_day = '',
+                created_at = excluded.created_at
+            """,
+            (chat_id, event_kind, title[:90], target_ts, int(time.time())),
+        )
+        conn.commit()
+
+def get_scheduled_event(chat_id: int, event_kind: str):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM scheduled_events WHERE chat_id = ? AND event_kind = ?",
+            (chat_id, event_kind),
+        ).fetchone()
+
+def clear_scheduled_event(chat_id: int, event_kind: str):
+    with db_connect() as conn:
+        conn.execute(
+            "DELETE FROM scheduled_events WHERE chat_id = ? AND event_kind = ?",
+            (chat_id, event_kind),
+        )
+        conn.commit()
+
+def mark_daily_event_sent(chat_id: int, event_key: str, day_key: str):
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO daily_event_marks (chat_id, event_key, day_key, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (chat_id, event_key, day_key, int(time.time())),
+        )
+        conn.commit()
+    DAILY_EVENT_MARK_CACHE[(chat_id, event_key, day_key)] = time.time()
+
+def was_daily_event_sent(chat_id: int, event_key: str, day_key: str) -> bool:
+    if (chat_id, event_key, day_key) in DAILY_EVENT_MARK_CACHE:
+        return True
+    with db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM daily_event_marks
+            WHERE chat_id = ? AND event_key = ? AND day_key = ?
+            """,
+            (chat_id, event_key, day_key),
+        ).fetchone()
+        return bool(row)
+
+def get_all_enabled_group_rows():
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM groups WHERE enabled = 1").fetchall()
+
+def cleanup_daily_marks():
+    cutoff = int(time.time()) - 86400 * 60
+    with db_connect() as conn:
+        conn.execute("DELETE FROM daily_event_marks WHERE created_at < ?", (cutoff,))
+        conn.commit()
+
+def groq_candidate_keys() -> list[str]:
+    global GROQ_KEY_POINTER
+    if not GROQ_API_KEYS:
+        return []
+    start = GROQ_KEY_POINTER % len(GROQ_API_KEYS)
+    ordered = GROQ_API_KEYS[start:] + GROQ_API_KEYS[:start]
+    GROQ_KEY_POINTER = (GROQ_KEY_POINTER + 1) % max(1, len(GROQ_API_KEYS))
+    return ordered
+
+def _groq_chat_request(payload: dict):
+    last_error = None
+    for idx, key in enumerate(groq_candidate_keys(), start=1):
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=GROQ_TIMEOUT_SECONDS,
+            )
+            data = resp.json()
+            if isinstance(data, dict) and data.get("choices"):
+                LAST_GROQ_STATUS["last_key_index"] = idx
+                return data
+            last_error = data
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(str(last_error)[:500] if last_error is not None else "No Groq key succeeded")
+
+def groq_live_check() -> tuple[bool, str]:
+    if not GROQ_API_KEYS:
+        _update_groq_status(False, "No Groq API key configured")
+        return False, "No key configured"
+    try:
+        data = _groq_chat_request(
+            {
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": "Reply with just OK"}],
+                "max_tokens": 8,
+                "temperature": 0,
+            }
+        )
+        content = (data["choices"][0]["message"]["content"] or "").strip()
+        result = content[:80] if content else "Empty"
+        _update_groq_status(True, f"Live OK via key #{LAST_GROQ_STATUS.get('last_key_index', 1)}")
+        return True, result
+    except Exception as e:
+        _update_groq_status(False, f"Live check failed: {e}")
+        record_failure("ai", None, "", f"Live check failed: {e}")
+        return False, str(e)[:120]
+
+def fetch_nager_holidays(year: int) -> list:
+    cached = NAGER_YEAR_CACHE.get(year)
+    if cached is not None:
+        return cached
+    try:
+        resp = requests.get(
+            f"https://date.nager.at/api/v3/PublicHolidays/{year}/{NAGER_COUNTRY_CODE}",
+            timeout=15,
+        )
+        data = resp.json()
+        if isinstance(data, list):
+            NAGER_YEAR_CACHE[year] = data
+            return data
+    except Exception:
+        logger.exception("Nager.Date fetch failed for year %s", year)
+    NAGER_YEAR_CACHE[year] = []
+    return []
+
+def fetch_aladhan_today() -> dict:
+    today = local_now().strftime("%d-%m-%Y")
+    if today in ALADHAN_DAY_CACHE:
+        return ALADHAN_DAY_CACHE[today]
+    # Prefer official API server; gToH is a common Gregorian-to-Hijri conversion endpoint.
+    endpoints = [
+        ("https://api.aladhan.com/v1/gToH", {"date": today}),
+        ("https://api.aladhan.com/v1/gToHCalendar", {"month": local_now().strftime("%m"), "year": local_now().strftime("%Y"), "adjustment": 0}),
+    ]
+    result = {}
+    for url, params in endpoints:
+        try:
+            resp = requests.get(url, params=params, timeout=15)
+            data = resp.json()
+            if url.endswith("/gToH") and isinstance(data, dict) and data.get("data"):
+                result = data["data"]
+                break
+            if url.endswith("/gToHCalendar") and isinstance(data, dict) and data.get("data"):
+                day = int(local_now().strftime("%d"))
+                calendar = data["data"]
+                if 1 <= day <= len(calendar):
+                    result = calendar[day - 1]
+                    break
+        except Exception:
+            continue
+    ALADHAN_DAY_CACHE[today] = result or {}
+    return ALADHAN_DAY_CACHE[today]
+
+def _map_nager_today() -> Optional[dict]:
+    now = local_now()
+    today = now.strftime("%Y-%m-%d")
+    holidays = fetch_nager_holidays(now.year)
+    for item in holidays:
+        if item.get("date") != today:
+            continue
+        name = (item.get("name") or "").lower()
+        local_name = (item.get("localName") or "").lower()
+        combined = f"{name} {local_name}"
+        if "new year" in combined:
+            return {"key": "new_year", "name_bn": "নতুন বছর", "name_en": "New Year", "theme": "crystal"}
+        if "independence" in combined:
+            return {"key": "independence", "name_bn": "স্বাধীনতা দিবস", "name_en": "Independence Day", "theme": "royal-blue"}
+        if "victory" in combined:
+            return {"key": "victory", "name_bn": "বিজয় দিবস", "name_en": "Victory Day", "theme": "emerald"}
+        if "bengali" in combined or "boishakh" in combined or "pohela" in combined or "pahela" in combined:
+            return {"key": "pohela_boishakh", "name_bn": "পহেলা বৈশাখ", "name_en": "Pohela Boishakh", "theme": "flame"}
+    return None
+
+def _map_hijri_today() -> Optional[dict]:
+    data = fetch_aladhan_today()
+    hijri = {}
+    if isinstance(data, dict):
+        hijri = data.get("hijri") or data.get("data", {}).get("hijri") or {}
+    month = str((hijri.get("month") or {}).get("number") or "")
+    day = str(hijri.get("day") or "")
+    if month == "10" and day == "1":
+        return {"key": "eid_fitr", "name_bn": "ঈদ মোবারক", "name_en": "Eid Mubarak", "theme": "gold"}
+    if month == "12" and day == "10":
+        return {"key": "eid_adha", "name_bn": "ঈদ মোবারক", "name_en": "Eid Mubarak", "theme": "emerald"}
+    return None
+
+def current_festival():
+    static = {
+        "01-01": {"key": "new_year", "name_bn": "নতুন বছর", "name_en": "New Year", "theme": "crystal"},
+        "03-26": {"key": "independence", "name_bn": "স্বাধীনতা দিবস", "name_en": "Independence Day", "theme": "royal-blue"},
+        "04-14": {"key": "pohela_boishakh", "name_bn": "পহেলা বৈশাখ", "name_en": "Pohela Boishakh", "theme": "flame"},
+        "12-16": {"key": "victory", "name_bn": "বিজয় দিবস", "name_en": "Victory Day", "theme": "emerald"},
+    }
+    # APIs first, then fallback to static dates.
+    by_nager = _map_nager_today()
+    if by_nager:
+        return by_nager
+    by_hijri = _map_hijri_today()
+    if by_hijri:
+        return by_hijri
+    return static.get(local_now().strftime("%m-%d"))
+
+async def human_delay_and_action(context: ContextTypes.DEFAULT_TYPE, update: Update, action: str = "typing"):
+    chat = update.effective_chat if update else None
+    if chat:
+        try:
+            await context.bot.send_chat_action(chat_id=chat.id, action=action)
+        except Exception:
+            pass
+    await human_delay()
+
+async def bot_humanize(bot, chat_id: int, action: str = "typing", kind: str = "reply"):
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=action)
+    except Exception:
+        pass
+    if not HUMAN_DELAY_ENABLED:
+        return
+    if kind == "reply":
+        await asyncio.sleep(random.choice([1.5, 3.0, 5.0]))
+    elif kind == "photo":
+        await asyncio.sleep(random.uniform(1.0, 2.2))
+    elif kind == "voice":
+        await asyncio.sleep(random.uniform(1.1, 2.4))
+    else:
+        await asyncio.sleep(random.uniform(0.5, 1.2))
+
+def http_humanize(chat_id: int, action: str = "typing", kind: str = "auto"):
+    try:
+        tg_post("sendChatAction", {"chat_id": chat_id, "action": action})
+    except Exception:
+        pass
+    if HUMAN_DELAY_ENABLED:
+        if kind == "auto":
+            time.sleep(random.uniform(0.4, 1.0))
+        else:
+            time.sleep(random.choice([1.5, 3.0]))
+
+async def send_photo_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.UPLOAD_PHOTO, "photo")
+            return await bot.send_photo(**kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("send_photo", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+async def send_voice_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.UPLOAD_VOICE, "voice")
+            return await bot.send_voice(**kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("send_voice", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+async def send_text_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.TYPING, "reply")
+            return await bot.send_message(**kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("send_message", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+def send_message_http_full(chat_id: int, text: str) -> tuple[bool, int | None]:
+    http_humanize(chat_id, "typing", "auto")
+    data = tg_post("sendMessage", {"chat_id": chat_id, "text": text, "disable_web_page_preview": True})
+    ok = bool(data.get("ok"))
+    mid = data.get("result", {}).get("message_id") if ok else None
+    if not ok:
+        record_failure("send_message", chat_id, "", str(data)[:400])
+    return ok, mid
+
+def shorten_name(name: str) -> str:
+    name = clean_name(name)
+    return name.split()[0][:18] if name else "বন্ধু"
+
+def sweet_name(name: str, lang: str) -> str:
+    short = shorten_name(name)
+    if lang == "en":
+        return short
+    if short.endswith("া") or short.endswith("ি"):
+        return short
+    return short
+
+def voice_name_variant(full_name: str, lang: str) -> str:
+    options = [
+        full_name,
+        shorten_name(full_name),
+        sweet_name(full_name, lang),
+    ]
+    clean = [x for x in options if x]
+    return random.choice(clean)
+
+def personalize_voice_text(voice_text: str, first_name: str, lang: str) -> str:
+    variant = voice_name_variant(first_name, lang)
+    if lang == "en":
+        prefixes = [
+            f"Hello {variant}. ",
+            f"Hi {variant}. ",
+            f"{variant}, ",
+        ]
+    else:
+        prefixes = [
+            f"হ্যালো {variant}। ",
+            f"{variant}, ",
+            f"শোনো {variant}। ",
+        ]
+    prefix = random.choice(prefixes)
+    if voice_text.lower().startswith(("hello", "hi", "হ্যালো", first_name.lower())):
+        return voice_text
+    return f"{prefix}{voice_text}"
+
+def is_linkish_message(msg: Message) -> bool:
+    text = (msg.text or msg.caption or "").strip()
+    if not text:
+        return False
+    if URLISH_RE.search(text):
+        return True
+    entities = list(msg.entities or []) + list(msg.caption_entities or [])
+    for ent in entities:
+        try:
+            ent_type = str(ent.type).lower()
+            if "url" in ent_type or "text_link" in ent_type:
+                return True
+        except Exception:
+            continue
+    if getattr(msg, "forward_origin", None) or getattr(msg, "forward_date", None):
+        return True
+    return False
+
+def keyword_reply_match(text: str):
+    lowered = re.sub(r"\s+", " ", (text or "").strip().lower())
+    if not lowered or URLISH_RE.search(lowered):
+        return None
+    cleaned = re.sub(r"[^\w\s\u0980-\u09ff]", " ", lowered)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if len(cleaned) > 60:
+        return None
+    checks = [
+        ("salam", [r"\bassalamu alaikum\b", r"\bassalamualaikum\b", r"^আসসালামু আলাইকুম$", r"^আসসালামু আলাইকুম$"]),
+        ("hello", [r"\bhello everyone\b", r"\bhi everyone\b", r"\bhey everyone\b", r"^হ্যালো সবাই$", r"^হাই সবাই$"]),
+        ("night", [r"\bgood night\b", r"^gn$", r"^শুভ রাত্রি$", r"^গুড নাইট$"]),
+    ]
+    for key, patterns in checks:
+        for p in patterns:
+            if re.search(p, cleaned, re.I):
+                return key
+    return None
+
+async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or chat.type not in {"group", "supergroup"} or not msg or not user or user.is_bot:
+        return
+    ensure_group(chat.id, chat.title or "")
+    if not current_keyword_mode(chat.id):
+        return
+    if is_linkish_message(msg):
+        return
+    matched = keyword_reply_match(msg.text or "")
+    if not matched:
+        return
+    now_ts = time.time()
+    if now_ts - keyword_last_chat_at.get(chat.id, 0) < KEYWORD_COOLDOWN_SECONDS:
+        return
+    if now_ts - keyword_last_user_at.get((chat.id, user.id), 0) < KEYWORD_USER_COOLDOWN_SECONDS:
+        return
+    if random.random() > KEYWORD_REPLY_CHANCE:
+        return
+    keyword_last_chat_at[chat.id] = now_ts
+    keyword_last_user_at[(chat.id, user.id)] = now_ts
+    lang = get_group_lang(chat.id)
+    replies = KEYWORD_REPLIES["en" if lang == "en" else "bn"][matched]
+    try:
+        await bot_humanize(context.bot, chat.id, ChatAction.TYPING, "reply")
+        await msg.reply_text(random.choice(replies))
+    except Exception:
+        logger.exception("Keyword reply failed in %s", chat.id)
+
+def _special_lines(lang: str, key: str) -> list[str]:
+    bank = {
+        "bn": {
+            "monday": [
+                "🌟 নতুন সপ্তাহটা সুন্দরভাবে শুরু হোক। মনোযোগ, শান্তি আর সাফল্য থাকুক সবার সাথে।",
+                "💼 সোমবার মানেই নতুন শুরু। আজকের দিনটা হোক গুছানো আর ফলপ্রসূ।",
+                "✨ সপ্তাহের শুরুতে এই group-এর সবার জন্য রইল উজ্জ্বল শুভেচ্ছা।",
+            ],
+            "friday": [
+                "🕌 জুমার দিনটা হোক শান্ত, সুন্দর আর বরকতময়। এই group-এর সবার জন্য শুভেচ্ছা।",
+                "🌙 শুক্রবারের কোমল শুভেচ্ছা। আজকের দিনটা হোক প্রশান্তি ভরা।",
+                "💙 জুমার দিনের মিষ্টি শুভেচ্ছা রইল। ভালো থাকুন সবাই।",
+            ],
+            "exam": [
+                "📘 আজ {title}। শান্ত থাকুন, মনোযোগ ধরে রাখুন, আর নিজের সেরাটা দিন।",
+                "📝 আজ {title}। আত্মবিশ্বাস রাখুন — ইনশাআল্লাহ ভালো হবে।",
+                "🎯 {title} আজ। মনটা শান্ত রেখে সুন্দরভাবে এগিয়ে যান।",
+            ],
+        },
+        "en": {
+            "monday": [
+                "🌟 A fresh week begins today. Wishing everyone focus, calm, and a strong start.",
+                "💼 Monday is a new beginning. Hope the day feels organized and productive.",
+                "✨ Warm wishes to this group for a bright and graceful week ahead.",
+            ],
+            "friday": [
+                "🌙 Soft Friday wishes to everyone. Hope the day feels peaceful and kind.",
+                "💙 Wishing this group a calm, gentle, and beautiful Friday.",
+                "✨ May your Friday carry a little more peace and comfort.",
+            ],
+            "exam": [
+                "📘 {title} is today. Stay calm, focused, and do your best.",
+                "📝 It's {title} today. Trust yourself and move forward with confidence.",
+                "🎯 {title} is today. Keep your mind steady and your heart calm.",
+            ],
+        },
+    }
+    return bank["en" if lang == "en" else "bn"][key]
+
+def maybe_weekly_special_text(lang: str) -> tuple[str, str] | None:
+    now = local_now()
+    if now.weekday() == 0 and now.hour >= MONDAY_SPECIAL_HOUR:
+        return "weekly_monday", random.choice(_special_lines(lang, "monday"))
+    if now.weekday() == 4 and now.hour >= FRIDAY_SPECIAL_HOUR:
+        return "weekly_friday", random.choice(_special_lines(lang, "friday"))
+    return None
+
+async def maybe_send_scheduled_specials(chat_row):
+    chat_id = int(chat_row["chat_id"])
+    title = chat_row["title"] or "GROUP"
+    lang = get_group_lang(chat_id)
+    today_key = local_now().strftime("%Y-%m-%d")
+
+    weekly = maybe_weekly_special_text(lang)
+    if weekly:
+        event_key, text = weekly
+        if not was_daily_event_sent(chat_id, event_key, today_key):
+            ok, mid = send_message_http_full(chat_id, text)
+            if ok:
+                mark_daily_event_sent(chat_id, event_key, today_key)
+                if SPECIAL_EVENT_DELETE_AFTER > 0 and mid:
+                    schedule_http_delete(chat_id, mid, SPECIAL_EVENT_DELETE_AFTER)
+
+    exam_row = get_scheduled_event(chat_id, "exam")
+    if exam_row:
+        target = int(exam_row["target_ts"])
+        now_ts = int(local_now().timestamp())
+        event_day = datetime.fromtimestamp(target, ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d")
+        if event_day == today_key and exam_row["last_sent_day"] != today_key and now_ts >= target:
+            text = random.choice(_special_lines(lang, "exam")).format(title=exam_row["title"])
+            try:
+                ok, mid = send_message_http_full(chat_id, text)
+                if ok and SPECIAL_EVENT_DELETE_AFTER > 0 and mid:
+                    schedule_http_delete(chat_id, mid, SPECIAL_EVENT_DELETE_AFTER)
+            except Exception:
+                pass
+            with db_connect() as conn:
+                conn.execute(
+                    "UPDATE scheduled_events SET last_sent_day = ? WHERE chat_id = ? AND event_kind = 'exam'",
+                    (today_key, chat_id),
+                )
+                conn.commit()
+
+def hourly_loop():
+    logger.info("Hourly loop started")
+    while True:
+        try:
+            due_rows = get_enabled_groups_for_hourly()
+            if due_rows:
+                phase = phase_now()
+                prepared = {}
+                for row in due_rows:
+                    chat_id = int(row["chat_id"])
+                    lang = get_group_lang(chat_id)
+                    mood = next_hourly_mood(chat_id)
+                    festival_key = (current_festival() or {}).get("key", "") if current_festival_mode(chat_id) else ""
+                    prepared[chat_id] = (lang, mood, festival_key)
+                pools = {}
+                pool_source = {}
+                unique_keys = {(lang, mood, festival_key) for lang, mood, festival_key in prepared.values()}
+                for lang, mood, festival_key in unique_keys:
+                    texts, source = get_batch_pool(lang, phase, mood, festival_key)
+                    pools[(lang, mood, festival_key)] = texts
+                    pool_source[(lang, mood, festival_key)] = source
+
+                for row in due_rows:
+                    chat_id = int(row["chat_id"])
+                    lang, mood, festival_key = prepared[chat_id]
+                    msg = pick_hourly_message(chat_id, lang, phase, pools[(lang, mood, festival_key)])
+                    ok, mid = send_message_http_full(chat_id, msg)
+                    if ok:
+                        set_group_value(chat_id, "last_hourly_at", int(time.time()))
+                        increment_group_counter(chat_id, "total_hourly_sent")
+                        if pool_source.get((lang, mood, festival_key)) == "ai":
+                            set_group_value(chat_id, "last_ai_success_at", int(time.time()))
+                        else:
+                            set_group_value(chat_id, "last_fallback_used_at", int(time.time()))
+                        clean_after = current_hourly_delete_after(chat_id)
+                        if clean_after > 0 and mid:
+                            schedule_http_delete(chat_id, mid, clean_after)
+                        try:
+                            maybe_send_countdown_reminder(chat_id, row["title"] or "")
+                        except Exception:
+                            pass
+                        logger.info("Hourly sent to %s | mood=%s", chat_id, mood)
+                    else:
+                        logger.warning("Hourly failed to %s", chat_id)
+
+            # Independent weekly special + exam reminder loop for all enabled groups.
+            for row in get_all_enabled_group_rows():
+                try:
+                    asyncio.run(maybe_send_scheduled_specials(row))
+                except RuntimeError:
+                    # If an event loop is already present for some reason, fall back to direct call path.
+                    try:
+                        loop = asyncio.new_event_loop()
+                        loop.run_until_complete(maybe_send_scheduled_specials(row))
+                        loop.close()
+                    except Exception:
+                        logger.exception("Special scheduler failed in %s", row["chat_id"])
+                except Exception:
+                    logger.exception("Special scheduler failed in %s", row["chat_id"])
+
+            cleanup_daily_marks()
+        except Exception:
+            logger.exception("hourly_loop failed")
+        time.sleep(60)
+
+async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, user):
+    ensure_group(chat_id, title or "")
+    group = get_group(chat_id)
+    if not group or int(group["enabled"]) != 1 or user.is_bot:
+        return
+    if is_recent_duplicate(chat_id, user.id):
+        return
+    if time.time() - get_last_join_time(chat_id, user.id) < REJOIN_IGNORE_SECONDS:
+        return
+
+    lang = get_group_lang(chat_id)
+    first_name = clean_name(user.first_name)
+    mention_name = user.mention_html(first_name)
+    save_join_time(chat_id, user.id)
+
+    burst_mode = is_join_burst(chat_id)
+    if burst_mode:
+        try:
+            compact = t(lang, "burst_compact", name=mention_name, group=(title or ("our group" if lang == "en" else "আমাদের গ্রুপ")))
+            msg = await send_text_with_retry(context.bot, chat_id=chat_id, text=compact, parse_mode=ParseMode.HTML)
+            set_group_value(chat_id, "last_primary_msg_id", msg.message_id)
+            increment_group_counter(chat_id, "total_welcome_sent")
+            set_group_value(chat_id, "last_welcome_at", int(time.time()))
+            asyncio.create_task(schedule_delete(context.bot, chat_id, msg.message_id, WELCOME_DELETE_AFTER))
+            await maybe_send_milestone(context, chat_id, title or "", lang)
+        except Exception:
+            logger.exception("Compact burst welcome failed in %s", chat_id)
+        return
+
+    text_welcome, voice_text = welcome_texts(lang, mention_name, first_name, title or "", group["custom_welcome"])
+    voice_text = personalize_voice_text(voice_text, first_name, lang)
+    await delete_previous_welcome(context, chat_id)
+
+    primary = None
+    voice_msg = None
+    voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
+    try:
+        style = current_welcome_style(chat_id)
+        footer = current_footer_text(chat_id)
+        style, footer, festival = effective_style_footer(chat_id, style, footer)
+        if festival and len(text_welcome) < 900:
+            fest_name = festival["name_bn"] if lang == "bn" else festival["name_en"]
+            text_welcome = f"{text_welcome}\n\n✨ {fest_name}"
+        member_count = None
+        try:
+            member_count = await context.bot.get_chat_member_count(chat_id)
+        except Exception:
+            member_count = None
+        profile_bytes = await fetch_profile_photo_bytes(context.bot, user.id)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang, style=style, footer=footer, profile_bytes=profile_bytes, member_count=member_count)
+        try:
+            primary = await send_photo_with_retry(context.bot, chat_id=chat_id, photo=cover, caption=text_welcome, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Photo welcome failed in chat %s, switching to text-only", chat_id)
+            primary = await send_text_with_retry(context.bot, chat_id=chat_id, text=re.sub(r"<[^>]+>", "", text_welcome))
+
+        if int(group["voice_enabled"]) == 1 and primary:
+            try:
+                voice_name = selected_voice_name(lang, chat_id)
+                await make_voice_file(voice_text, voice_name, voice_path)
+                voice_msg = await send_voice_with_retry(context.bot, chat_id=chat_id, voice=voice_path.read_bytes(), caption=t(lang, "welcome_voice_caption"))
+            except Exception:
+                logger.exception("Voice welcome failed in chat %s; keeping banner/text only", chat_id)
+
+        set_group_value(chat_id, "last_primary_msg_id", primary.message_id if primary else None)
+        set_group_value(chat_id, "last_voice_msg_id", voice_msg.message_id if voice_msg else None)
+        set_group_value(chat_id, "updated_at", int(time.time()))
+        set_group_value(chat_id, "last_welcome_at", int(time.time()))
+        increment_group_counter(chat_id, "total_welcome_sent")
+        if primary:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, primary.message_id, WELCOME_DELETE_AFTER))
+        if voice_msg:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, voice_msg.message_id, WELCOME_DELETE_AFTER))
+        await maybe_send_milestone(context, chat_id, title or "", lang)
+    except Exception:
+        logger.exception("Welcome failed in chat %s for user %s", chat_id, user.id)
+    finally:
+        if voice_path.exists():
+            try:
+                voice_path.unlink()
+            except Exception:
+                pass
+
+async def on_ai_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    allowed = False
+    if chat and chat.type in {"group", "supergroup"} and user:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        allowed = member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
+    elif user:
+        allowed = is_super_admin(user.id)
+    if not allowed:
+        await human_delay_and_action(context, update)
+        await update.effective_message.reply_text("Only group admins or bot owners can use this command.")
+        return
+    await human_delay_and_action(context, update)
+    await update.effective_message.reply_text("Checking Groq status...")
+    ok, result = await asyncio.to_thread(groq_live_check)
+    checked = LAST_GROQ_STATUS["last_checked_at"] or "Never"
+    configured = "YES" if GROQ_API_KEYS else "NO"
+    enabled = "YES" if AI_HOURLY_ENABLED else "NO"
+    lang = get_group_lang(chat.id) if chat and chat.type in {"group", "supergroup"} else "en"
+    key_count = len(GROQ_API_KEYS)
+    await human_delay_and_action(context, update)
+    await update.effective_message.reply_text(
+        f"{t(lang, 'aistatus', configured=configured, enabled=enabled, checked=checked, result=('OK' if ok else 'FAILED') + f' | {result}', model=GROQ_MODEL)}\nKeys configured: {key_count}"
+    )
+
+async def on_setexamday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    raw = (update.effective_message.text or "").split(" ", 1)
+    if len(raw) < 2:
+        await human_delay_and_action(context, update)
+        await update.effective_message.reply_text("Usage:\n/setexamday YYYY-MM-DD HH:MM | Exam title")
+        return
+    try:
+        target_ts, title = parse_countdown_input(raw[1])
+        set_scheduled_event(update.effective_chat.id, "exam", title, target_ts)
+        await human_delay_and_action(context, update)
+        await update.effective_message.reply_text("Exam day reminder saved successfully.")
+    except Exception as e:
+        await human_delay_and_action(context, update)
+        await update.effective_message.reply_text(str(e))
+
+async def on_examday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    row = get_scheduled_event(update.effective_chat.id, "exam")
+    if not row:
+        await human_delay_and_action(context, update)
+        await update.effective_message.reply_text("No exam day reminder set.")
+        return
+    dt = datetime.fromtimestamp(int(row["target_ts"]), ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d %I:%M %p")
+    await human_delay_and_action(context, update)
+    await update.effective_message.reply_text(f"Exam reminder:\n{row['title']}\n{dt}")
+
+async def on_clearexamday(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    clear_scheduled_event(update.effective_chat.id, "exam")
+    await human_delay_and_action(context, update)
+    await update.effective_message.reply_text("Exam day reminder cleared.")
+
+async def post_init(application: Application):
+    delete_webhook()
+    commands = [
+        BotCommand("start", "Show bot info"),
+        BotCommand("ping", "Bot alive check"),
+        BotCommand("support", "Support group"),
+        BotCommand("myid", "Show your user id"),
+        BotCommand("aistatus", "Check Groq AI status"),
+        BotCommand("analytics", "Show group analytics"),
+        BotCommand("setvoice", "Set Bengali female voice"),
+        BotCommand("welcomestyle", "Set welcome banner theme"),
+        BotCommand("setfooter", "Set welcome footer text"),
+        BotCommand("lang", "Change group language"),
+        BotCommand("groupcount", "Owner: count groups"),
+        BotCommand("activegroups", "Owner: recent active groups"),
+        BotCommand("failedgroups", "Owner: recent failed groups"),
+        BotCommand("lastaierrors", "Owner: recent AI errors"),
+        BotCommand("broadcastphoto", "Owner: broadcast replied photo"),
+        BotCommand("broadcastvoice", "Owner: broadcast replied voice"),
+        BotCommand("hourlyclean", "Auto-delete hourly messages"),
+        BotCommand("setcountdown", "Set special event countdown"),
+        BotCommand("countdown", "Show current countdown card"),
+        BotCommand("clearcountdown", "Clear group countdown"),
+        BotCommand("setexamday", "Set exam day reminder"),
+        BotCommand("examday", "Show exam day reminder"),
+        BotCommand("clearexamday", "Clear exam day reminder"),
+        BotCommand("voice", "Toggle welcome voice"),
+        BotCommand("deleteservice", "Toggle service delete"),
+        BotCommand("hourly", "Toggle hourly texts"),
+        BotCommand("setwelcome", "Custom welcome text"),
+        BotCommand("resetwelcome", "Reset custom welcome"),
+        BotCommand("status", "Show group status"),
+        BotCommand("testwelcome", "Send test welcome"),
+        BotCommand("broadcast", "Owner broadcast"),
+    ]
+    await application.bot.set_my_commands(commands)
+
+def build_app() -> Application:
+    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    application.add_handler(CommandHandler("start", on_start))
+    application.add_handler(CommandHandler("support", on_support))
+    application.add_handler(CommandHandler("ping", on_ping))
+    application.add_handler(CommandHandler("myid", on_myid))
+    application.add_handler(CommandHandler("aistatus", on_ai_status))
+    application.add_handler(CommandHandler("analytics", on_analytics))
+    application.add_handler(CommandHandler("setvoice", on_setvoice))
+    application.add_handler(CommandHandler("welcomestyle", on_welcomestyle))
+    application.add_handler(CommandHandler("setfooter", on_setfooter))
+    application.add_handler(CommandHandler("lang", on_lang))
+    application.add_handler(CommandHandler("groupcount", on_groupcount))
+    application.add_handler(CommandHandler("activegroups", on_activegroups))
+    application.add_handler(CommandHandler("failedgroups", on_failedgroups))
+    application.add_handler(CommandHandler("lastaierrors", on_lastaierrors))
+    application.add_handler(CommandHandler("broadcastphoto", on_broadcastphoto))
+    application.add_handler(CommandHandler("broadcastvoice", on_broadcastvoice))
+    application.add_handler(CommandHandler("hourlyclean", on_hourlyclean))
+    application.add_handler(CommandHandler("setcountdown", on_setcountdown))
+    application.add_handler(CommandHandler("countdown", on_showcountdown))
+    application.add_handler(CommandHandler("clearcountdown", on_clearcountdown))
+    application.add_handler(CommandHandler("setexamday", on_setexamday))
+    application.add_handler(CommandHandler("examday", on_examday))
+    application.add_handler(CommandHandler("clearexamday", on_clearexamday))
+    application.add_handler(CommandHandler("voice", on_voice))
+    application.add_handler(CommandHandler("deleteservice", on_delete_service))
+    application.add_handler(CommandHandler("hourly", on_hourly))
+    application.add_handler(CommandHandler("setwelcome", on_setwelcome))
+    application.add_handler(CommandHandler("resetwelcome", on_resetwelcome))
+    application.add_handler(CommandHandler("status", on_status))
+    application.add_handler(CommandHandler("testwelcome", on_testwelcome))
+    application.add_handler(CommandHandler("broadcast", on_broadcast))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
+    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group))
+    return application
+# ===== end Premium v6 overrides =====
+
 
 def main():
     init_db()
