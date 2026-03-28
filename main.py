@@ -17,7 +17,7 @@ import requests
 from flask import Flask, jsonify
 import colorsys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from telegram import BotCommand, Update
+from telegram import BotCommand, Update, Message
 from telegram.constants import ChatMemberStatus, ParseMode, ChatAction
 from telegram.ext import (
     Application,
