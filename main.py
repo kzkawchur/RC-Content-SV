@@ -507,7 +507,7 @@ def phase_now() -> str:
         return "morning"
     if 12 <= h < 17:
         return "day"
-    if 17 <= h < 21:
+    if 17 <= h < 20:
         return "evening"
     return "night"
 
@@ -726,6 +726,7 @@ EN_ENDINGS = [
 
 FALLBACK_CACHE: dict[tuple[str, str], list[str]] = {}
 
+
 def build_fallback_messages(lang: str, phase: str) -> list[str]:
     key = (lang, phase)
     if key in FALLBACK_CACHE:
@@ -735,15 +736,15 @@ def build_fallback_messages(lang: str, phase: str) -> list[str]:
         for a in EN_PHASE_OPENERS[phase]:
             for b in EN_MIDDLES:
                 for c in EN_ENDINGS:
-                    text = f"{a} {b} {c}".strip()
-                    if len(text) <= AI_MAX_TEXT_LEN:
+                    text = normalize_hourly_text(f"{a} {b} {c}".strip())
+                    if is_valid_hourly_text(text, lang, phase):
                         result.append(text)
     else:
         for a in BN_PHASE_OPENERS[phase]:
             for b in BN_MIDDLES:
                 for c in BN_ENDINGS:
-                    text = f"{a} {b} {c}".strip()
-                    if len(text) <= AI_MAX_TEXT_LEN:
+                    text = normalize_hourly_text(f"{a} {b} {c}".strip())
+                    if is_valid_hourly_text(text, lang, phase):
                         result.append(text)
     seen = set()
     uniq = []
@@ -755,17 +756,77 @@ def build_fallback_messages(lang: str, phase: str) -> list[str]:
     FALLBACK_CACHE[key] = uniq
     return uniq
 
-def sanitize_ai_lines(text: str) -> list[str]:
+
+
+PHASE_BLOCKLIST = {
+    "bn": {
+        "morning": ("রাত", "রাত্রি", "শুভ রাত্রি", "শুভ সন্ধ্যা"),
+        "day": ("শুভ সকাল", "সকালের", "ভোর", "রাত", "রাত্রি", "শুভ সন্ধ্যা"),
+        "evening": ("শুভ সকাল", "সকালের", "ভোর", "শুভ রাত্রি", "রাতের"),
+        "night": ("শুভ সকাল", "সকালের", "ভোর", "দুপুর", "বিকাল", "শুভ সন্ধ্যা"),
+    },
+    "en": {
+        "morning": ("good night", "night", "evening"),
+        "day": ("good morning", "morning", "good night", "night", "evening"),
+        "evening": ("good morning", "morning", "good night", "night"),
+        "night": ("good morning", "morning", "afternoon", "daytime", "good evening", "evening"),
+    },
+}
+
+WEAK_GENERIC_PHRASES = {
+    "bn": {
+        "উজ্জ্বল থাকুন",
+        "সুখী থাকুন",
+        "শুভ সকাল",
+        "শুভ সন্ধ্যা",
+        "শুভ রাত্রি",
+        "ভালো থাকুন",
+        "আশা সবুজ থাকুক",
+        "সুরেলা দিন কাটুক",
+    },
+    "en": {
+        "stay bright",
+        "stay happy",
+        "good morning",
+        "good evening",
+        "good night",
+        "stay well",
+        "be happy",
+    },
+}
+
+def normalize_hourly_text(text: str) -> str:
+    text = re.sub(r"\s+", " ", text).strip(" -•*\t\r\n")
+    if text and text[-1] not in ".!?।":
+        text += "।" if re.search(r"[ঀ-৾]", text) else "."
+    return text
+
+def is_valid_hourly_text(line: str, lang: str, phase: str) -> bool:
+    raw = line.strip()
+    if not raw:
+        return False
+    line_lower = raw.lower()
+    if len(raw) < 18 or len(raw) > AI_MAX_TEXT_LEN:
+        return False
+    if raw in WEAK_GENERIC_PHRASES.get(lang, set()):
+        return False
+    bad = ["18+", "sex", "sexy", "dating", "kiss", "adult", "nude", "xxx", "porn"]
+    if any(b in line_lower for b in bad):
+        return False
+    blocked = PHASE_BLOCKLIST.get(lang, {}).get(phase, ())
+    if any(token.lower() in line_lower for token in blocked):
+        return False
+    if re.fullmatch(r"[\W_]*(শুভ সকাল|শুভ সন্ধ্যা|শুভ রাত্রি|good morning|good evening|good night)[\W_]*", line_lower):
+        return False
+    return True
+
+def sanitize_ai_lines(text: str, lang: str, phase: str) -> list[str]:
     lines = []
     for raw in text.splitlines():
         line = raw.strip()
         line = re.sub(r"^[\-\*\d\.\)\s]+", "", line)
-        line = re.sub(r"\s+", " ", line).strip()
-        if not line or len(line) > AI_MAX_TEXT_LEN:
-            continue
-        lowered = line.lower()
-        bad = ["18+", "sex", "sexy", "dating", "kiss", "adult", "nude", "xxx", "porn"]
-        if any(b in lowered for b in bad):
+        line = normalize_hourly_text(line)
+        if not is_valid_hourly_text(line, lang, phase):
             continue
         lines.append(line)
     uniq = []
@@ -776,16 +837,92 @@ def sanitize_ai_lines(text: str) -> list[str]:
             uniq.append(x)
     return uniq
 
+
 def _update_groq_status(ok: bool, message: str):
     LAST_GROQ_STATUS["configured"] = bool(GROQ_API_KEY)
     LAST_GROQ_STATUS["last_ok"] = ok
     LAST_GROQ_STATUS["last_error"] = message
     LAST_GROQ_STATUS["last_checked_at"] = local_now().strftime("%Y-%m-%d %I:%M:%S %p")
 
+
 def groq_generate_batch(lang: str, phase: str) -> list[str]:
     if not AI_HOURLY_ENABLED or not GROQ_API_KEY:
         _update_groq_status(False, "Groq disabled or API key missing")
         return []
+
+    phase_label = {
+        "bn": {
+            "morning": "সকাল",
+            "day": "দিন বা দুপুর",
+            "evening": "সন্ধ্যা",
+            "night": "রাত",
+        },
+        "en": {
+            "morning": "morning",
+            "day": "daytime or afternoon",
+            "evening": "evening",
+            "night": "night",
+        },
+    }
+
+    prompt = (
+        f"Write {AI_BATCH_SIZE} short premium Telegram group hourly messages in "
+        f"{'Bengali' if lang == 'bn' else 'English'}.\n"
+        f"Current time phase: {phase_label['bn' if lang == 'bn' else 'en'][phase]}.\n"
+        f"Rules:\n"
+        f"- warm, elegant, premium, tasteful, group-safe\n"
+        f"- non-sexual, non-romantic, non-political, non-religious\n"
+        f"- no flirting\n"
+        f"- no hashtags\n"
+        f"- each line must feel complete and natural\n"
+        f"- do NOT mention the wrong time phase\n"
+        f"- do NOT say good night in morning/day/evening\n"
+        f"- do NOT say good morning in day/evening/night\n"
+        f"- keep each between 18 and {AI_MAX_TEXT_LEN} characters\n"
+        f"- each line must be different\n"
+        f"- avoid robotic short phrases\n"
+        f"Return only the messages, one per line."
+    )
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": GROQ_MODEL,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You write tasteful, premium, natural Telegram group texts. "
+                            "Never mismatch time-of-day greetings. Avoid robotic one-liners."
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                "temperature": 0.85,
+                "max_tokens": 420,
+            },
+            timeout=GROQ_TIMEOUT_SECONDS,
+        )
+        data = resp.json()
+        content = data["choices"][0]["message"]["content"]
+        lines = sanitize_ai_lines(content, lang, phase)
+        if lines:
+            _update_groq_status(True, f"OK | {len(lines)} lines")
+            logger.info("Groq hourly success | lang=%s phase=%s count=%s", lang, phase, len(lines))
+            return lines
+        _update_groq_status(False, "Groq returned empty/filtered text")
+        record_failure("ai", None, "", "Groq returned empty/filtered text")
+        return []
+    except Exception as e:
+        _update_groq_status(False, f"Failed: {e}")
+        record_failure("ai", None, "", str(e))
+        logger.exception("Groq hourly failed | lang=%s phase=%s", lang, phase)
+        return []
+
     prompt = (
         f"Write {AI_BATCH_SIZE} short premium Telegram group hourly messages in "
         f"{'Bengali' if lang == 'bn' else 'English'}.\n"
@@ -869,14 +1006,27 @@ def groq_live_check() -> tuple[bool, str]:
         record_failure("ai", None, "", str(e))
         return False, str(e)
 
+
 def pick_hourly_message(chat_id: int, lang: str, phase: str, pool: list[str]) -> str:
+    cleaned_pool = [
+        normalize_hourly_text(x)
+        for x in pool
+        if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)
+    ]
+    if not cleaned_pool:
+        cleaned_pool = [
+            normalize_hourly_text(x)
+            for x in build_fallback_messages(lang, phase)
+            if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)
+        ]
     recent = recent_hourly_by_chat[chat_id]
-    choices = [x for x in pool if x not in recent]
+    choices = [x for x in cleaned_pool if x not in recent]
     if not choices:
-        choices = pool[:] or build_fallback_messages(lang, phase)
+        choices = cleaned_pool[:]
     text = random.choice(choices)
     recent.append(text)
     return text
+
 
 def pick_font(size: int, bold: bool = False):
     candidates = [
