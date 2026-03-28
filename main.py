@@ -15,7 +15,8 @@ from typing import Optional
 import edge_tts
 import requests
 from flask import Flask, jsonify
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+import colorsys
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 from telegram import BotCommand, Update
 from telegram.constants import ChatMemberStatus, ParseMode
 from telegram.ext import (
@@ -80,6 +81,15 @@ LAST_GROQ_STATUS = {
     "last_checked_at": None,
 }
 
+AI_BATCH_CACHE: dict[tuple[str, str], dict] = {}
+THEME_NAMES = [
+    "gold","neon","soft-pink","royal-blue","night-glow","lavender","pearl","emerald","ruby","sapphire",
+    "sunrise","sunset","moonlight","aurora","rose-gold","midnight","ocean","sky","mint","coral",
+    "champagne","violet","crystal","plum","ice-blue","amber","pastel","galaxy","velvet","blush",
+    "candy","steel","opal","forest","dream","bronze","silver","dusk","dawn","lotus",
+    "mist","flame","sand","berry","wave","gloss","noir","halo","frost","petal",
+]
+
 @flask_app.get("/")
 def home():
     return f"{BOT_NAME} Welcome Bot is running"
@@ -112,7 +122,10 @@ def send_message_http(chat_id: int, text: str) -> bool:
         "text": text,
         "disable_web_page_preview": True,
     })
-    return bool(data.get("ok"))
+    ok = bool(data.get("ok"))
+    if not ok:
+        record_failure("send_message", chat_id, "", str(data)[:400])
+    return ok
 
 def delete_webhook():
     tg_post("deleteWebhook", {"drop_pending_updates": False})
@@ -142,6 +155,8 @@ def init_db():
                 last_fallback_used_at INTEGER NOT NULL DEFAULT 0,
                 last_welcome_at INTEGER NOT NULL DEFAULT 0,
                 last_milestone_sent INTEGER NOT NULL DEFAULT 0,
+                welcome_style TEXT NOT NULL DEFAULT 'auto',
+                footer_text TEXT NOT NULL DEFAULT '',
                 last_primary_msg_id INTEGER,
                 last_voice_msg_id INTEGER,
                 last_hourly_at INTEGER NOT NULL DEFAULT 0,
@@ -159,6 +174,30 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS ai_generated (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lang TEXT NOT NULL,
+                phase TEXT NOT NULL,
+                source TEXT NOT NULL,
+                text TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS failure_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                kind TEXT NOT NULL,
+                chat_id INTEGER,
+                title TEXT,
+                error TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
 
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
         migrations = {
@@ -169,6 +208,8 @@ def init_db():
             "last_fallback_used_at": "INTEGER NOT NULL DEFAULT 0",
             "last_welcome_at": "INTEGER NOT NULL DEFAULT 0",
             "last_milestone_sent": "INTEGER NOT NULL DEFAULT 0",
+            "welcome_style": "TEXT NOT NULL DEFAULT 'auto'",
+            "footer_text": "TEXT NOT NULL DEFAULT ''",
         }
         for col, ddl in migrations.items():
             if col not in existing_cols:
@@ -216,6 +257,8 @@ def set_group_value(chat_id: int, field: str, value):
         "last_fallback_used_at",
         "last_welcome_at",
         "last_milestone_sent",
+        "welcome_style",
+        "footer_text",
         "last_primary_msg_id",
         "last_voice_msg_id",
         "last_hourly_at",
@@ -268,6 +311,158 @@ def selected_voice_name(lang: str, chat_id: Optional[int] = None) -> str:
         return VOICE_NAME_EN
     choice = current_voice_choice(chat_id or 0) if chat_id else "bd"
     return "bn-IN-TanishaaNeural" if choice == "in" else "bn-BD-NabanitaNeural"
+
+
+
+def current_welcome_style(chat_id: int) -> str:
+    row = get_group(chat_id)
+    value = (row["welcome_style"] if row and row["welcome_style"] else "auto").strip().lower()
+    return value if value in {"auto", "random"} or value in THEME_NAMES else "auto"
+
+def current_footer_text(chat_id: int) -> str:
+    row = get_group(chat_id)
+    return (row["footer_text"] if row and row["footer_text"] else "").strip()[:80]
+
+def theme_palette(style: str, phase: str):
+    if style in {"", "auto"}:
+        style = phase
+    elif style == "random":
+        style = random.choice(THEME_NAMES)
+    seed = sum(ord(c) for c in style) % 360
+    sat = 0.55 + (sum(ord(c) for c in style[::-1]) % 20) / 100
+    val1 = 0.24 if phase == "night" else 0.58
+    val2 = 0.86 if phase in {"morning", "day"} else 0.72
+    def hsv(h, s, v):
+        r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, max(0, min(1, s)), max(0, min(1, v)))
+        return (int(r * 255), int(g * 255), int(b * 255))
+    c1 = hsv(seed, sat, val1)
+    c2 = hsv(seed + 38, min(1, sat + 0.12), val2)
+    glow = hsv(seed + 18, 0.22, 1.0)
+    accent = hsv(seed + 10, 0.45, 0.98)
+    return c1, c2, glow, accent, style
+
+def list_theme_names_text() -> str:
+    return ", ".join(THEME_NAMES)
+
+def increment_group_counter(chat_id: int, field: str, amount: int = 1):
+    allowed = {"total_welcome_sent", "total_hourly_sent"}
+    if field not in allowed:
+        raise ValueError("Invalid counter field")
+    with db_connect() as conn:
+        conn.execute(f"UPDATE groups SET {field} = COALESCE({field}, 0) + ?, updated_at = ? WHERE chat_id = ?", (amount, int(time.time()), chat_id))
+        conn.commit()
+
+def save_generated_text(lang: str, phase: str, source: str, text: str):
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO ai_generated (lang, phase, source, text, created_at) VALUES (?, ?, ?, ?, ?)",
+            (lang, phase, source, text[:300], int(time.time())),
+        )
+        conn.commit()
+
+def record_failure(kind: str, chat_id: Optional[int], title: str, error: str):
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO failure_logs (kind, chat_id, title, error, created_at) VALUES (?, ?, ?, ?, ?)",
+            (kind[:32], chat_id, (title or "")[:120], (error or "")[:500], int(time.time())),
+        )
+        conn.commit()
+
+def count_known_groups() -> int:
+    with db_connect() as conn:
+        row = conn.execute("SELECT COUNT(*) c FROM groups").fetchone()
+        return int(row["c"] or 0)
+
+def get_active_groups(limit: int = 20):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT chat_id, title, updated_at FROM groups WHERE enabled = 1 ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+def get_recent_failed_groups(limit: int = 15):
+    with db_connect() as conn:
+        return conn.execute(
+            """
+            SELECT chat_id, title, MAX(created_at) AS last_time, COUNT(*) AS fail_count
+            FROM failure_logs
+            WHERE kind IN ('send_message', 'send_photo', 'send_voice', 'broadcast')
+            GROUP BY chat_id, title
+            ORDER BY last_time DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+def get_recent_ai_errors(limit: int = 10):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT error, created_at FROM failure_logs WHERE kind = 'ai' ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+
+def cleanup_old_temp_files(max_age_seconds: int = 1800):
+    now_ts = time.time()
+    for p in TMP_DIR.iterdir():
+        try:
+            if p.is_file() and now_ts - p.stat().st_mtime > max_age_seconds:
+                p.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+def cleanup_loop():
+    logger.info("Cleanup loop started")
+    while True:
+        try:
+            cleanup_old_temp_files()
+        except Exception:
+            logger.exception("cleanup_loop failed")
+        time.sleep(600)
+
+def get_batch_pool(lang: str, phase: str):
+    key = (lang, phase)
+    cached = AI_BATCH_CACHE.get(key)
+    now_ts = time.time()
+    if cached and now_ts - cached["created_at"] < 900 and cached.get("texts"):
+        return cached["texts"], cached["source"]
+    ai_lines = groq_generate_batch(lang, phase)
+    if ai_lines:
+        source = "ai"
+        texts = ai_lines
+    else:
+        source = "fallback"
+        texts = build_fallback_messages(lang, phase)
+    AI_BATCH_CACHE[key] = {"texts": texts, "source": source, "created_at": now_ts}
+    for line in texts[:min(len(texts), 12)]:
+        try:
+            save_generated_text(lang, phase, source, line)
+        except Exception:
+            pass
+    return texts, source
+
+async def fetch_profile_photo_bytes(bot, user_id: int):
+    try:
+        photos = await bot.get_user_profile_photos(user_id, limit=1)
+        if not photos or getattr(photos, "total_count", 0) < 1:
+            return None
+        file = await bot.get_file(photos.photos[0][-1].file_id)
+        data = await file.download_as_bytearray()
+        return bytes(data)
+    except Exception:
+        return None
+
+def build_combined_names(members) -> str:
+    names = [clean_name(m.first_name) for m in members[:5]]
+    if len(members) > 5:
+        names.append(f"+{len(members)-5}")
+    return ", ".join(names)
+
+def build_burst_text(lang: str, title: str, members) -> str:
+    group = title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
+    names = build_combined_names(members)
+    if lang == "en":
+        return f"✨ A warm welcome to {group}!\nNew members: {names}"
+    return f"✨ {group} এ আন্তরিক স্বাগতম!\nনতুন সদস্যরা: {names}"
 
 def next_milestone(member_count: int, last_sent: int) -> int:
     for milestone in (100, 500, 1000):
@@ -631,9 +826,11 @@ def groq_generate_batch(lang: str, phase: str) -> list[str]:
             logger.info("Groq hourly success | lang=%s phase=%s count=%s", lang, phase, len(lines))
             return lines
         _update_groq_status(False, "Groq returned empty/filtered text")
+        record_failure("ai", None, "", "Groq returned empty/filtered text")
         return []
     except Exception as e:
         _update_groq_status(False, f"Failed: {e}")
+        record_failure("ai", None, "", str(e))
         logger.exception("Groq hourly failed | lang=%s phase=%s", lang, phase)
         return []
 
@@ -665,9 +862,11 @@ def groq_live_check() -> tuple[bool, str]:
             return True, "Live check passed"
         msg = data.get("error", {}).get("message", "Unknown Groq response")
         _update_groq_status(False, msg)
+        record_failure("ai", None, "", msg)
         return False, msg
     except Exception as e:
         _update_groq_status(False, str(e))
+        record_failure("ai", None, "", str(e))
         return False, str(e)
 
 def pick_hourly_message(chat_id: int, lang: str, phase: str, pool: list[str]) -> str:
@@ -691,16 +890,11 @@ def pick_font(size: int, bold: bool = False):
             continue
     return ImageFont.load_default()
 
-def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
+def build_cover_bytes(first_name: str, group_title: str, lang: str, style: str = "auto", footer: str = "", profile_bytes: Optional[bytes] = None, member_count: Optional[int] = None) -> BytesIO:
     width, height = 1280, 720
     phase = phase_now()
-    palettes = {
-        "morning": ((255, 234, 167), (255, 145, 110), (255, 255, 255)),
-        "day": ((125, 235, 255), (84, 105, 255), (255, 255, 255)),
-        "evening": ((189, 116, 255), (255, 98, 174), (255, 241, 255)),
-        "night": ((16, 24, 40), (39, 102, 248), (220, 238, 255)),
-    }
-    c1, c2, glow = palettes[phase]
+    c1, c2, glow, accent, resolved_style = theme_palette(style, phase)
+
     img = Image.new("RGB", (width, height), c1)
     draw = ImageDraw.Draw(img)
     for y in range(height):
@@ -709,39 +903,69 @@ def build_cover_bytes(first_name: str, group_title: str, lang: str) -> BytesIO:
         g = int(c1[1] * (1 - blend) + c2[1] * blend)
         b = int(c1[2] * (1 - blend) + c2[2] * blend)
         draw.line((0, y, width, y), fill=(r, g, b))
+
     overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     od = ImageDraw.Draw(overlay)
     od.ellipse((40, 40, 300, 300), fill=(255, 255, 255, 70))
     od.ellipse((980, 70, 1230, 320), fill=(255, 255, 255, 55))
     od.ellipse((910, 460, 1185, 735), fill=(255, 255, 255, 45))
-    overlay = overlay.filter(ImageFilter.GaussianBlur(8))
+    overlay = overlay.filter(ImageFilter.GaussianBlur(10))
     img = Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
-    draw = ImageDraw.Draw(img)
+
     shadow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     sd = ImageDraw.Draw(shadow)
     sd.rounded_rectangle((90, 95, 1188, 628), radius=48, fill=(0, 0, 0, 95))
     shadow = shadow.filter(ImageFilter.GaussianBlur(18))
     img = Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB")
     draw = ImageDraw.Draw(img)
+
     draw.rounded_rectangle((100, 100, 1180, 620), radius=44, fill=(11, 17, 36))
-    draw.rounded_rectangle((130, 125, 156, 595), radius=12, fill=(255, 218, 122))
+    draw.rounded_rectangle((130, 125, 158, 595), radius=12, fill=accent)
+
     title_font = pick_font(64, True)
     name_font = pick_font(92, True)
     sub_font = pick_font(36, False)
     mini_font = pick_font(28, True)
-    phase_font = pick_font(24, True)
+    tiny_font = pick_font(22, True)
+
     group_text = ascii_name(group_title or ("OUR GROUP" if lang == "en" else "GROUP")).upper()
     name_text = ascii_name(first_name).upper()
     draw.text((182, 152), "WELCOME", fill=glow, font=title_font)
     draw.text((182, 252), name_text, fill=(255, 226, 170), font=name_font)
     draw.text((182, 392), f"TO {group_text}", fill=(222, 233, 255), font=sub_font)
     draw.text((182, 480), BOT_NAME.upper(), fill=(176, 255, 223), font=mini_font)
-    badge_w, badge_h = 190, 46
-    badge_x, badge_y = 955, 145
-    draw.rounded_rectangle((badge_x, badge_y, badge_x + badge_w, badge_y + badge_h), radius=22, fill=(255, 255, 255))
-    draw.text((badge_x + 26, badge_y + 10), phase.upper(), fill=(38, 52, 87), font=phase_font)
-    draw.rounded_rectangle((182, 540, 430, 552), radius=6, fill=(255, 255, 255))
-    draw.rounded_rectangle((182, 570, 334, 582), radius=6, fill=(196, 226, 255))
+
+    badge_x, badge_y = 935, 140
+    for idx, label in enumerate([phase.upper(), resolved_style.upper()[:12]]):
+        x1 = badge_x - (idx * 185)
+        draw.rounded_rectangle((x1, badge_y, x1 + 170, badge_y + 44), radius=20, fill=(255, 255, 255))
+        draw.text((x1 + 18, badge_y + 10), label, fill=(38, 52, 87), font=tiny_font)
+
+    if member_count:
+        mc_text = f"MEMBERS {member_count}"
+        draw.rounded_rectangle((880, 545, 1120, 585), radius=18, fill=(255, 255, 255))
+        draw.text((900, 554), mc_text, fill=(37, 45, 78), font=tiny_font)
+
+    footer = footer.strip()[:60] if footer else f"Powered by {BOT_NAME}"
+    draw.text((182, 552), footer, fill=(214, 229, 255), font=tiny_font)
+
+    if profile_bytes:
+        try:
+            avatar = Image.open(BytesIO(profile_bytes)).convert("RGB")
+            avatar = ImageOps.fit(avatar, (220, 220))
+            mask = Image.new("L", (220, 220), 0)
+            md = ImageDraw.Draw(mask)
+            md.ellipse((0, 0, 220, 220), fill=255)
+            ring = Image.new("RGBA", (248, 248), (0, 0, 0, 0))
+            rd = ImageDraw.Draw(ring)
+            rd.ellipse((0, 0, 248, 248), fill=accent + (255,) if len(accent)==4 else accent)
+            ring.paste(avatar, (14, 14), mask)
+            img.paste(ring.convert("RGB"), (900, 265))
+        except Exception:
+            pass
+
+    draw.rounded_rectangle((182, 603, 430, 615), radius=6, fill=(255, 255, 255))
+    draw.rounded_rectangle((182, 630, 334, 642), radius=6, fill=(196, 226, 255))
     bio = BytesIO()
     img.save(bio, format="PNG")
     bio.name = "welcome.png"
@@ -900,6 +1124,7 @@ async def send_photo_with_retry(bot, **kwargs):
             last_error = e
             if attempt == 0:
                 await asyncio.sleep(1)
+    record_failure("send_photo", kwargs.get("chat_id"), "", str(last_error))
     raise last_error
 
 async def send_voice_with_retry(bot, **kwargs):
@@ -911,6 +1136,7 @@ async def send_voice_with_retry(bot, **kwargs):
             last_error = e
             if attempt == 0:
                 await asyncio.sleep(1)
+    record_failure("send_voice", kwargs.get("chat_id"), "", str(last_error))
     raise last_error
 
 async def send_text_with_retry(bot, **kwargs):
@@ -922,6 +1148,7 @@ async def send_text_with_retry(bot, **kwargs):
             last_error = e
             if attempt == 0:
                 await asyncio.sleep(1)
+    record_failure("send_message", kwargs.get("chat_id"), "", str(last_error))
     raise last_error
 
 def build_milestone_card_bytes(group_title: str, count: int) -> BytesIO:
@@ -946,6 +1173,38 @@ def build_milestone_card_bytes(group_title: str, count: int) -> BytesIO:
     bio = BytesIO()
     img.save(bio, format="PNG")
     bio.name = "milestone.png"
+    bio.seek(0)
+    return bio
+
+
+def build_combined_welcome_card_bytes(group_title: str, lang: str, names_text: str, style: str = "auto", footer: str = "") -> BytesIO:
+    width, height = 1280, 720
+    phase = phase_now()
+    c1, c2, glow, accent, resolved_style = theme_palette(style, phase)
+    img = Image.new("RGB", (width, height), c1)
+    draw = ImageDraw.Draw(img)
+    for y in range(height):
+        blend = y / max(1, height - 1)
+        r = int(c1[0] * (1 - blend) + c2[0] * blend)
+        g = int(c1[1] * (1 - blend) + c2[1] * blend)
+        b = int(c1[2] * (1 - blend) + c2[2] * blend)
+        draw.line((0, y, width, y), fill=(r, g, b))
+    draw.rounded_rectangle((90, 90, 1190, 630), radius=48, fill=(12, 16, 31))
+    draw.rounded_rectangle((120, 120, 1140, 600), radius=36, outline=accent, width=6)
+    title_font = pick_font(64, True)
+    name_font = pick_font(42, True)
+    sub_font = pick_font(30, False)
+    footer_font = pick_font(24, True)
+    draw.text((160, 155), "WELCOME CREW", fill=glow, font=title_font)
+    draw.text((160, 280), ascii_name(group_title or "GROUP").upper(), fill=(255, 226, 170), font=name_font)
+    wrapped = names_text[:120]
+    draw.text((160, 380), wrapped, fill=(222, 233, 255), font=sub_font)
+    draw.text((160, 530), (footer or f"Powered by {BOT_NAME}")[:60], fill=(214, 229, 255), font=footer_font)
+    draw.rounded_rectangle((905, 140, 1110, 184), radius=20, fill=(255,255,255))
+    draw.text((930, 150), resolved_style.upper()[:12], fill=(38,52,87), font=footer_font)
+    bio = BytesIO()
+    img.save(bio, format="PNG")
+    bio.name = "welcome_burst.png"
     bio.seek(0)
     return bio
 
@@ -1002,7 +1261,15 @@ async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title:
     voice_msg = None
     voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
     try:
-        cover = build_cover_bytes(first_name, title or "GROUP", lang)
+        style = current_welcome_style(chat_id)
+        footer = current_footer_text(chat_id)
+        member_count = None
+        try:
+            member_count = await context.bot.get_chat_member_count(chat_id)
+        except Exception:
+            member_count = None
+        profile_bytes = await fetch_profile_photo_bytes(context.bot, user.id)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang, style=style, footer=footer, profile_bytes=profile_bytes, member_count=member_count)
         try:
             primary = await send_photo_with_retry(context.bot, chat_id=chat_id, photo=cover, caption=text_welcome, parse_mode=ParseMode.HTML)
         except Exception:
@@ -1131,6 +1398,141 @@ async def on_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     )
 
+
+async def require_owner_private(update: Update) -> bool:
+    user = update.effective_user
+    chat = update.effective_chat
+    if not user or not chat or chat.type != "private" or not is_super_admin(user.id):
+        await update.effective_message.reply_text("Only bot owners can use this command in private chat.")
+        return False
+    return True
+
+async def on_welcomestyle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    if not context.args:
+        await update.effective_message.reply_text(
+            f"Current: {current_welcome_style(chat.id)}\n\nUse:\n/welcomestyle list\n/welcomestyle random\n/welcomestyle gold"
+        )
+        return
+    value = context.args[0].strip().lower()
+    if value == "list":
+        await update.effective_message.reply_text("Available themes:\n" + list_theme_names_text())
+        return
+    if value not in {"auto", "random"} and value not in THEME_NAMES:
+        await update.effective_message.reply_text("Invalid theme.\nUse /welcomestyle list")
+        return
+    set_group_value(chat.id, "welcome_style", value)
+    await update.effective_message.reply_text(f"Welcome style set to: {value}")
+
+async def on_setfooter(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    raw = update.effective_message.text or ""
+    parts = raw.split(" ", 1)
+    if len(parts) < 2 or not parts[1].strip():
+        await update.effective_message.reply_text("Usage:\n/setfooter Powered by Maya")
+        return
+    footer = parts[1].strip()[:60]
+    set_group_value(chat.id, "footer_text", footer)
+    await update.effective_message.reply_text(f"Footer set to:\n{footer}")
+
+async def on_groupcount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    known = count_known_groups()
+    enabled = len(get_all_enabled_groups())
+    await update.effective_message.reply_text(f"Known groups: {known}\nEnabled groups: {enabled}")
+
+async def on_activegroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    rows = get_active_groups(20)
+    if not rows:
+        await update.effective_message.reply_text("No active groups found.")
+        return
+    lines = ["Recent active groups:"]
+    for r in rows:
+        lines.append(f"- {r['title'] or 'Untitled'} | {r['chat_id']} | {format_ts(int(r['updated_at'] or 0))}")
+    await update.effective_message.reply_text("\n".join(lines)[:3900])
+
+async def on_failedgroups(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    rows = get_recent_failed_groups(15)
+    if not rows:
+        await update.effective_message.reply_text("No failed groups recorded.")
+        return
+    lines = ["Recent failed groups:"]
+    for r in rows:
+        lines.append(f"- {r['title'] or 'Untitled'} | {r['chat_id']} | fails={r['fail_count']} | last={format_ts(int(r['last_time'] or 0))}")
+    await update.effective_message.reply_text("\n".join(lines)[:3900])
+
+async def on_lastaierrors(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    rows = get_recent_ai_errors(10)
+    if not rows:
+        await update.effective_message.reply_text("No recent AI errors.")
+        return
+    lines = ["Recent AI errors:"]
+    for r in rows:
+        lines.append(f"- {format_ts(int(r['created_at'] or 0))} | {r['error']}")
+    await update.effective_message.reply_text("\n".join(lines)[:3900])
+
+async def on_broadcastphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    msg = update.effective_message
+    if not msg.reply_to_message or not msg.reply_to_message.photo:
+        await msg.reply_text("Reply to a photo with /broadcastphoto optional caption")
+        return
+    caption = " ".join(context.args).strip()
+    file = await context.bot.get_file(msg.reply_to_message.photo[-1].file_id)
+    data = bytes(await file.download_as_bytearray())
+    groups = get_all_enabled_groups()
+    ok_count = fail_count = 0
+    status = await msg.reply_text(f"Broadcasting photo to {len(groups)} groups...")
+    for gid in groups:
+        try:
+            bio = BytesIO(data)
+            bio.name = "broadcast.jpg"
+            await context.bot.send_photo(chat_id=gid, photo=bio, caption=caption or None)
+            ok_count += 1
+        except Exception as e:
+            record_failure("broadcast", gid, "", f"broadcastphoto: {e}")
+            fail_count += 1
+    await status.edit_text(f"Photo broadcast finished.\nSuccess: {ok_count}\nFailed: {fail_count}")
+
+async def on_broadcastvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_owner_private(update):
+        return
+    msg = update.effective_message
+    reply = msg.reply_to_message
+    if not reply or not (reply.voice or reply.audio):
+        await msg.reply_text("Reply to a voice/audio with /broadcastvoice optional caption")
+        return
+    source = reply.voice or reply.audio
+    caption = " ".join(context.args).strip()
+    file = await context.bot.get_file(source.file_id)
+    data = bytes(await file.download_as_bytearray())
+    groups = get_all_enabled_groups()
+    ok_count = fail_count = 0
+    status = await msg.reply_text(f"Broadcasting voice to {len(groups)} groups...")
+    for gid in groups:
+        try:
+            bio = BytesIO(data)
+            bio.name = "broadcast.ogg"
+            await context.bot.send_voice(chat_id=gid, voice=bio, caption=caption or None)
+            ok_count += 1
+        except Exception as e:
+            record_failure("broadcast", gid, "", f"broadcastvoice: {e}")
+            fail_count += 1
+    await status.edit_text(f"Voice broadcast finished.\nSuccess: {ok_count}\nFailed: {fail_count}")
+
 async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_group_admin(update, context):
         return
@@ -1195,9 +1597,8 @@ async def on_hourly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     value = context.args[0].strip().lower()
     if value == "now":
         phase = phase_now()
-        ai_pool = await asyncio.to_thread(groq_generate_batch, lang, phase)
-        used_ai = bool(ai_pool)
-        pool = ai_pool or build_fallback_messages(lang, phase)
+        pool, source = await asyncio.to_thread(get_batch_pool, lang, phase)
+        used_ai = source == "ai"
         msg = pick_hourly_message(chat.id, lang, phase, pool)
         await update.effective_message.reply_text(msg)
         set_group_value(chat.id, "last_hourly_at", int(time.time()))
@@ -1299,9 +1700,36 @@ async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE
             await update.effective_message.delete()
         except Exception:
             pass
-    for member in update.effective_message.new_chat_members or []:
-        if member.is_bot:
-            continue
+
+    members = [m for m in (update.effective_message.new_chat_members or []) if not m.is_bot]
+    if not members:
+        return
+
+    if len(members) >= 5:
+        try:
+            lang = get_group_lang(chat.id)
+            names_text = build_combined_names(members)
+            card = build_combined_welcome_card_bytes(
+                chat.title or "GROUP",
+                lang,
+                names_text,
+                style=current_welcome_style(chat.id),
+                footer=current_footer_text(chat.id),
+            )
+            caption = build_burst_text(lang, chat.title or "", members)
+            msg = await send_photo_with_retry(context.bot, chat_id=chat.id, photo=card, caption=caption)
+            set_group_value(chat.id, "last_primary_msg_id", msg.message_id)
+            increment_group_counter(chat.id, "total_welcome_sent", amount=len(members))
+            set_group_value(chat.id, "last_welcome_at", int(time.time()))
+            asyncio.create_task(schedule_delete(context.bot, chat.id, msg.message_id, WELCOME_DELETE_AFTER))
+            for member in members:
+                save_join_time(chat.id, member.id)
+            await maybe_send_milestone(context, chat.id, chat.title or "", lang)
+            return
+        except Exception:
+            logger.exception("Combined welcome failed in %s", chat.id)
+
+    for member in members:
         await maybe_welcome(context, chat.id, chat.title or "", member)
         break
 
@@ -1331,13 +1759,9 @@ def hourly_loop():
                 pool_source = {}
                 langs = {get_group_lang(int(r["chat_id"])) for r in due_rows}
                 for lang in langs:
-                    ai_lines = groq_generate_batch(lang, phase)
-                    if ai_lines:
-                        pools[lang] = ai_lines
-                        pool_source[lang] = "ai"
-                    else:
-                        pools[lang] = build_fallback_messages(lang, phase)
-                        pool_source[lang] = "fallback"
+                    texts, source = get_batch_pool(lang, phase)
+                    pools[lang] = texts
+                    pool_source[lang] = source
 
                 for row in due_rows:
                     chat_id = int(row["chat_id"])
@@ -1367,7 +1791,15 @@ async def post_init(application: Application):
         BotCommand("aistatus", "Check Groq AI status"),
         BotCommand("analytics", "Show group analytics"),
         BotCommand("setvoice", "Set Bengali female voice"),
+        BotCommand("welcomestyle", "Set welcome banner theme"),
+        BotCommand("setfooter", "Set welcome footer text"),
         BotCommand("lang", "Change group language"),
+        BotCommand("groupcount", "Owner: count groups"),
+        BotCommand("activegroups", "Owner: recent active groups"),
+        BotCommand("failedgroups", "Owner: recent failed groups"),
+        BotCommand("lastaierrors", "Owner: recent AI errors"),
+        BotCommand("broadcastphoto", "Owner: broadcast replied photo"),
+        BotCommand("broadcastvoice", "Owner: broadcast replied voice"),
         BotCommand("voice", "Toggle welcome voice"),
         BotCommand("deleteservice", "Toggle service delete"),
         BotCommand("hourly", "Toggle hourly texts"),
@@ -1388,7 +1820,15 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("aistatus", on_ai_status))
     application.add_handler(CommandHandler("analytics", on_analytics))
     application.add_handler(CommandHandler("setvoice", on_setvoice))
+    application.add_handler(CommandHandler("welcomestyle", on_welcomestyle))
+    application.add_handler(CommandHandler("setfooter", on_setfooter))
     application.add_handler(CommandHandler("lang", on_lang))
+    application.add_handler(CommandHandler("groupcount", on_groupcount))
+    application.add_handler(CommandHandler("activegroups", on_activegroups))
+    application.add_handler(CommandHandler("failedgroups", on_failedgroups))
+    application.add_handler(CommandHandler("lastaierrors", on_lastaierrors))
+    application.add_handler(CommandHandler("broadcastphoto", on_broadcastphoto))
+    application.add_handler(CommandHandler("broadcastvoice", on_broadcastvoice))
     application.add_handler(CommandHandler("voice", on_voice))
     application.add_handler(CommandHandler("deleteservice", on_delete_service))
     application.add_handler(CommandHandler("hourly", on_hourly))
@@ -1406,6 +1846,7 @@ def main():
     init_db()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=hourly_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
     logger.info("Flask started on port %s", PORT)
     logger.info("Starting %s", BOT_NAME)
     app = build_app()
