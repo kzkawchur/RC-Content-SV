@@ -1503,6 +1503,32 @@ async def send_text_with_retry(bot, **kwargs):
     record_failure("send_message", kwargs.get("chat_id"), "", str(last_error))
     raise last_error
 
+async def copy_message_with_retry(bot, **kwargs):
+    last_error = None
+    for attempt in range(2):
+        try:
+            return await bot.copy_message(**kwargs)
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("copy_message", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+
+def guess_broadcast_action(msg) -> str:
+    if not msg:
+        return ChatAction.TYPING
+    if getattr(msg, "photo", None):
+        return ChatAction.UPLOAD_PHOTO
+    if getattr(msg, "video", None):
+        return ChatAction.UPLOAD_VIDEO
+    if getattr(msg, "voice", None) or getattr(msg, "audio", None):
+        return ChatAction.UPLOAD_VOICE
+    if getattr(msg, "document", None):
+        return ChatAction.UPLOAD_DOCUMENT
+    return ChatAction.TYPING
+
 def build_milestone_card_bytes(group_title: str, count: int) -> BytesIO:
     width, height = 1280, 720
     img = Image.new("RGB", (width, height), (26, 22, 45))
@@ -1836,30 +1862,12 @@ async def on_lastaierrors(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.effective_message.reply_text("\n".join(lines)[:3900])
 
 async def on_broadcastphoto(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not await require_owner_private(update):
-        return
-    msg = update.effective_message
-    if not msg.reply_to_message or not msg.reply_to_message.photo:
-        await msg.reply_text("Reply to a photo with /broadcastphoto optional caption")
-        return
-    caption = " ".join(context.args).strip()
-    file = await context.bot.get_file(msg.reply_to_message.photo[-1].file_id)
-    data = bytes(await file.download_as_bytearray())
-    groups = get_all_enabled_groups()
-    ok_count = fail_count = 0
-    status = await msg.reply_text(f"Broadcasting photo to {len(groups)} groups...")
-    for gid in groups:
-        try:
-            bio = BytesIO(data)
-            bio.name = "broadcast.jpg"
-            await context.bot.send_photo(chat_id=gid, photo=bio, caption=caption or None)
-            ok_count += 1
-        except Exception as e:
-            record_failure("broadcast", gid, "", f"broadcastphoto: {e}")
-            fail_count += 1
-    await status.edit_text(f"Photo broadcast finished.\nSuccess: {ok_count}\nFailed: {fail_count}")
+    await on_broadcast(update, context)
 
 async def on_broadcastvoice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await on_broadcast(update, context)
+
+async def on_lang(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_owner_private(update):
         return
     msg = update.effective_message
@@ -2021,23 +2029,59 @@ async def on_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.effective_user or not is_super_admin(update.effective_user.id):
         await update.effective_message.reply_text(t("en", "broadcast_owner_only"))
         return
-    raw = update.effective_message.text or ""
+
+    msg = update.effective_message
+    reply = msg.reply_to_message if msg else None
+    raw = msg.text or ""
     parts = raw.split(" ", 1)
-    if len(parts) < 2 or not parts[1].strip():
-        await update.effective_message.reply_text(t("en", "broadcast_usage"))
+    arg_text = parts[1].strip() if len(parts) > 1 and parts[1].strip() else ""
+
+    if not reply and not arg_text:
+        await msg.reply_text(
+            "Usage:\n"
+            "/broadcast your message\n\n"
+            "Or reply to any text/photo/video/voice/document and send:\n"
+            "/broadcast"
+        )
         return
+
     groups = get_all_enabled_groups()
     if not groups:
-        await update.effective_message.reply_text(t("en", "broadcast_none"))
+        await msg.reply_text(t("en", "broadcast_none"))
         return
-    status = await update.effective_message.reply_text(t("en", "broadcast_start", count=len(groups)))
+
     ok_count = 0
     fail_count = 0
+
+    if reply:
+        status = await msg.reply_text(f"Broadcasting replied content to {len(groups)} groups...")
+        action = guess_broadcast_action(reply)
+        for gid in groups:
+            try:
+                await bot_humanize(context.bot, gid, action=action, kind="reply")
+                await copy_message_with_retry(
+                    context.bot,
+                    chat_id=gid,
+                    from_chat_id=reply.chat_id,
+                    message_id=reply.message_id,
+                )
+                ok_count += 1
+            except Exception as e:
+                record_failure("broadcast", gid, "", f"broadcast_copy: {e}")
+                fail_count += 1
+        await status.edit_text(
+            f"Broadcast finished.\nMode: copy\nSuccess: {ok_count}\nFailed: {fail_count}"
+        )
+        return
+
+    status = await msg.reply_text(t("en", "broadcast_start", count=len(groups)))
     for gid in groups:
         try:
-            await context.bot.send_message(chat_id=gid, text=parts[1].strip())
+            await bot_humanize(context.bot, gid, action=ChatAction.TYPING, kind="reply")
+            await send_text_with_retry(context.bot, chat_id=gid, text=arg_text)
             ok_count += 1
-        except Exception:
+        except Exception as e:
+            record_failure("broadcast", gid, "", f"broadcast_text: {e}")
             fail_count += 1
     await status.edit_text(t("en", "broadcast_done", ok=ok_count, fail=fail_count))
 
@@ -2693,8 +2737,6 @@ async def post_init(application: Application):
         BotCommand("activegroups", "Owner: recent active groups"),
         BotCommand("failedgroups", "Owner: recent failed groups"),
         BotCommand("lastaierrors", "Owner: recent AI errors"),
-        BotCommand("broadcastphoto", "Owner: broadcast replied photo"),
-        BotCommand("broadcastvoice", "Owner: broadcast replied voice"),
         BotCommand("hourlyclean", "Auto-delete hourly messages"),
         BotCommand("setcountdown", "Set special event countdown"),
         BotCommand("countdown", "Show current countdown card"),
@@ -2706,7 +2748,7 @@ async def post_init(application: Application):
         BotCommand("resetwelcome", "Reset custom welcome"),
         BotCommand("status", "Show group status"),
         BotCommand("testwelcome", "Send test welcome"),
-        BotCommand("broadcast", "Owner broadcast"),
+        BotCommand("broadcast", "Owner: broadcast text or replied media"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -2726,8 +2768,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("activegroups", on_activegroups))
     application.add_handler(CommandHandler("failedgroups", on_failedgroups))
     application.add_handler(CommandHandler("lastaierrors", on_lastaierrors))
-    application.add_handler(CommandHandler("broadcastphoto", on_broadcastphoto))
-    application.add_handler(CommandHandler("broadcastvoice", on_broadcastvoice))
+    application.add_handler(CommandHandler("broadcastphoto", on_broadcast))
+    application.add_handler(CommandHandler("broadcastvoice", on_broadcast))
     application.add_handler(CommandHandler("hourlyclean", on_hourlyclean))
     application.add_handler(CommandHandler("setcountdown", on_setcountdown))
     application.add_handler(CommandHandler("countdown", on_showcountdown))
@@ -3523,8 +3565,6 @@ async def post_init(application: Application):
         BotCommand("activegroups", "Owner: recent active groups"),
         BotCommand("failedgroups", "Owner: recent failed groups"),
         BotCommand("lastaierrors", "Owner: recent AI errors"),
-        BotCommand("broadcastphoto", "Owner: broadcast replied photo"),
-        BotCommand("broadcastvoice", "Owner: broadcast replied voice"),
         BotCommand("hourlyclean", "Auto-delete hourly messages"),
         BotCommand("setcountdown", "Set special event countdown"),
         BotCommand("countdown", "Show current countdown card"),
@@ -3539,7 +3579,7 @@ async def post_init(application: Application):
         BotCommand("resetwelcome", "Reset custom welcome"),
         BotCommand("status", "Show group status"),
         BotCommand("testwelcome", "Send test welcome"),
-        BotCommand("broadcast", "Owner broadcast"),
+        BotCommand("broadcast", "Owner: broadcast text or replied media"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -3559,8 +3599,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("activegroups", on_activegroups))
     application.add_handler(CommandHandler("failedgroups", on_failedgroups))
     application.add_handler(CommandHandler("lastaierrors", on_lastaierrors))
-    application.add_handler(CommandHandler("broadcastphoto", on_broadcastphoto))
-    application.add_handler(CommandHandler("broadcastvoice", on_broadcastvoice))
+    application.add_handler(CommandHandler("broadcastphoto", on_broadcast))
+    application.add_handler(CommandHandler("broadcastvoice", on_broadcast))
     application.add_handler(CommandHandler("hourlyclean", on_hourlyclean))
     application.add_handler(CommandHandler("setcountdown", on_setcountdown))
     application.add_handler(CommandHandler("countdown", on_showcountdown))
