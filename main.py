@@ -3624,8 +3624,621 @@ def build_app() -> Application:
 # ===== end Premium v6 overrides =====
 
 
+
+# ===== Premium v7 behavior pack overrides =====
+
+def ensure_behavior_db():
+    with db_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sent_text_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                kind TEXT NOT NULL,
+                text_norm TEXT NOT NULL,
+                signature TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+            """
+        )
+        existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
+        migrations = {
+            "last_presence_at": "INTEGER NOT NULL DEFAULT 0",
+            "message_taste": "TEXT NOT NULL DEFAULT 'auto'",
+            "variant_cursor": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for col, ddl in migrations.items():
+            if col not in existing_cols:
+                conn.execute(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
+        conn.commit()
+
+
+def normalize_history_text(text: str) -> str:
+    s = normalize_hourly_text(text or "")
+    s = re.sub(r"\s+", " ", s).strip().lower()
+    return s[:260]
+
+
+def structure_signature(text: str) -> str:
+    raw = normalize_history_text(text)
+    if not raw:
+        return "empty"
+    words = raw.split()
+    length_bucket = "s" if len(words) <= 6 else "m" if len(words) <= 13 else "l"
+    sentence_bucket = str(max(1, len([x for x in re.split(r"[\.!?।]+", raw) if x.strip()])))
+    starts = [
+        ("greet", r"^(শুভ|hello|hi|good|warm|soft|gentle|calm|peaceful)\b"),
+        ("wish", r"^(আশা|wishing|hope|may|আজ|today|এই)\b"),
+        ("group", r"^(এই group|this group|সবাইকে|everyone)\b"),
+    ]
+    starter = "other"
+    for name, pat in starts:
+        if re.search(pat, raw, re.I):
+            starter = name
+            break
+    emoji = "e1" if re.match(r"^[^\w\s]", text or "") else "e0"
+    punct = "q" if "?" in raw else "x" if "!" in raw else "d"
+    return f"{starter}|{length_bucket}|{sentence_bucket}|{emoji}|{punct}"
+
+
+def was_recent_duplicate_text(chat_id: int, kind: str, text: str, lookback_days: int = 3) -> bool:
+    since = int(time.time()) - (lookback_days * 86400)
+    text_norm = normalize_history_text(text)
+    sig = structure_signature(text)
+    with db_connect() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM sent_text_history
+            WHERE chat_id = ? AND kind = ? AND created_at >= ?
+              AND (text_norm = ? OR signature = ?)
+            LIMIT 1
+            """,
+            (chat_id, kind, since, text_norm, sig),
+        ).fetchone()
+        return bool(row)
+
+
+def record_sent_history(chat_id: int, kind: str, text: str):
+    text_norm = normalize_history_text(text)
+    if not text_norm:
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO sent_text_history (chat_id, kind, text_norm, signature, created_at) VALUES (?, ?, ?, ?, ?)",
+            (chat_id, kind[:24], text_norm, structure_signature(text), int(time.time())),
+        )
+        conn.commit()
+
+
+def mark_presence(chat_id: int):
+    try:
+        set_group_value(chat_id, "last_presence_at", int(time.time()))
+    except Exception:
+        pass
+
+
+def get_presence_gap(chat_id: int) -> int:
+    row = get_group(chat_id)
+    if not row:
+        return 999999
+    last_ts = int(row["last_presence_at"] or 0)
+    if not last_ts:
+        return 999999
+    return max(0, int(time.time()) - last_ts)
+
+
+def presence_tier(chat_id: int) -> str:
+    gap = get_presence_gap(chat_id)
+    if gap >= 4 * 3600:
+        return "rich"
+    if gap >= 3600:
+        return "warm"
+    if gap >= 900:
+        return "normal"
+    return "short"
+
+
+group_taste_memory: dict[int, deque[str]] = defaultdict(lambda: deque(maxlen=40))
+
+
+def detect_text_taste(text: str, title: str = "") -> str:
+    sample = f"{title or ''} {(text or '')}".lower()
+    if URLISH_RE.search(sample) or "http" in sample or "t.me" in sample or "link" in sample:
+        return "minimal"
+    classy_hints = ["official", "academy", "study", "crypto", "news", "family", "community", "team"]
+    soft_hints = ["💗", "💕", "🌸", "✨", "dear", "sweet", "cute", "gentle", "soft", "calm"]
+    if any(x in sample for x in classy_hints):
+        return "classy"
+    if any(x in sample for x in soft_hints):
+        return "soft"
+    return "balanced"
+
+
+def current_message_taste(chat_id: int, title: str = "") -> str:
+    row = get_group(chat_id)
+    if row and (row["message_taste"] or "").strip().lower() not in {"", "auto"}:
+        val = row["message_taste"].strip().lower()
+        if val in {"minimal", "classy", "soft", "balanced"}:
+            return val
+    votes = list(group_taste_memory[chat_id])
+    title_vote = detect_text_taste("", title)
+    votes.append(title_vote)
+    if not votes:
+        return "balanced"
+    counts = {k: votes.count(k) for k in {"minimal", "classy", "soft", "balanced"}}
+    winner = max(counts.items(), key=lambda kv: kv[1])[0]
+    return winner
+
+
+async def track_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat and chat.type in {"group", "supergroup"}:
+        ensure_group(chat.id, chat.title or "")
+        msg = update.effective_message
+        if msg and not getattr(msg, "from_user", None) or (msg and getattr(msg.from_user, "is_bot", False)):
+            return
+        if msg:
+            body = (msg.text or msg.caption or "")[:300]
+            taste = detect_text_taste(body, chat.title or "")
+            group_taste_memory[chat.id].append(taste)
+
+
+PHASE_LOCKED_MOODS = {
+    "morning": ["motivating", "soft", "peaceful"],
+    "day": ["motivating", "classy", "energetic", "soft"],
+    "evening": ["cozy", "classy", "peaceful", "soft"],
+    "night": ["peaceful", "cozy", "soft", "classy"],
+}
+
+
+def current_mood_index(chat_id: int) -> int:
+    row = get_group(chat_id)
+    return int(row["mood_index"] or 0) if row else 0
+
+
+def next_hourly_mood(chat_id: int) -> str:
+    phase = phase_now()
+    allowed = PHASE_LOCKED_MOODS.get(phase, HOURLY_MOODS)
+    idx = current_mood_index(chat_id)
+    mood = allowed[idx % len(allowed)]
+    set_group_value(chat_id, "mood_index", (idx + 1) % max(1, len(allowed)))
+    return mood
+
+
+def peek_hourly_mood(chat_id: int) -> str:
+    phase = phase_now()
+    allowed = PHASE_LOCKED_MOODS.get(phase, HOURLY_MOODS)
+    idx = current_mood_index(chat_id)
+    return allowed[idx % len(allowed)]
+
+
+def filter_pool_by_taste(chat_id: int, pool: list[str]) -> list[str]:
+    row = get_group(chat_id)
+    title = row["title"] if row else ""
+    taste = current_message_taste(chat_id, title or "")
+    out = []
+    for text in pool:
+        emoji_count = sum(1 for ch in text if ord(ch) > 10000)
+        length = len(text)
+        if taste == "minimal":
+            if length > 95 or emoji_count > 2:
+                continue
+        elif taste == "classy":
+            if emoji_count > 3:
+                continue
+        elif taste == "soft":
+            if length < 24:
+                continue
+        out.append(text)
+    return out or pool
+
+
+def variantize_message_text(chat_id: int, lang: str, text: str, kind: str = "hourly") -> list[str]:
+    taste = current_message_taste(chat_id, (get_group(chat_id)["title"] if get_group(chat_id) else ""))
+    tier = presence_tier(chat_id)
+    base = normalize_hourly_text(text)
+    variants = [base]
+    if lang == "en":
+        if tier in {"rich", "warm"}:
+            variants.append(f"{base} Wishing everyone a beautiful moment ahead.")
+            variants.append(f"Just a little note for this group — {base}")
+        if taste == "classy":
+            variants.append(f"{base} May the mood stay elegant and steady.")
+        elif taste == "soft":
+            variants.append(f"{base} Hope the heart feels a little softer today.")
+        elif taste == "minimal":
+            variants.append(base.replace(" everyone", ""))
+    else:
+        if tier in {"rich", "warm"}:
+            variants.append(f"{base} এই group-এর সবার জন্য রইল কোমল শুভেচ্ছা।")
+            variants.append(f"আজকের জন্য শুধু এটুকুই — {base}")
+        if taste == "classy":
+            variants.append(f"{base} আজকের সময়টা হোক স্থির, সুন্দর আর মার্জিত।")
+        elif taste == "soft":
+            variants.append(f"{base} মনটা আজ একটু নরম আর হালকা থাকুক।")
+        elif taste == "minimal":
+            variants.append(base.replace("সবাইকে", ""))
+    cleaned = []
+    seen = set()
+    for v in variants:
+        v = normalize_hourly_text(v)
+        if not v or len(v) > AI_MAX_TEXT_LEN:
+            continue
+        if v not in seen:
+            seen.add(v)
+            cleaned.append(v)
+    return cleaned or [base]
+
+
+def pick_hourly_message(chat_id: int, lang: str, phase: str, pool: list[str]) -> str:
+    candidates = [normalize_hourly_text(x) for x in pool if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)]
+    if not candidates:
+        candidates = [normalize_hourly_text(x) for x in build_fallback_messages(lang, phase, mood=peek_hourly_mood(chat_id), festival_key=(current_festival() or {}).get("key", "")) if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)]
+    candidates = filter_pool_by_taste(chat_id, candidates)
+    expanded = []
+    for c in candidates:
+        expanded.extend(variantize_message_text(chat_id, lang, c, kind="hourly"))
+    final_pool = []
+    for cand in expanded:
+        if not was_recent_duplicate_text(chat_id, "hourly", cand, lookback_days=3):
+            final_pool.append(cand)
+    if not final_pool:
+        final_pool = expanded or candidates or build_fallback_messages(lang, phase, mood=peek_hourly_mood(chat_id), festival_key=(current_festival() or {}).get("key", ""))
+    recent = recent_hourly_by_chat[chat_id]
+    choices = [x for x in final_pool if x not in recent and structure_signature(x) not in {structure_signature(y) for y in recent}]
+    if not choices:
+        choices = final_pool
+    text = random.choice(choices)
+    recent.append(text)
+    record_sent_history(chat_id, "hourly", text)
+    return text
+
+
+async def human_delay_and_action(context: ContextTypes.DEFAULT_TYPE, update: Update, action: str = "typing"):
+    chat = update.effective_chat if update else None
+    if chat:
+        await bot_humanize(context.bot, chat.id, action=action, kind="reply")
+
+
+async def bot_humanize(bot, chat_id: int, action: str = "typing", kind: str = "reply"):
+    gap = get_presence_gap(chat_id)
+    try:
+        await bot.send_chat_action(chat_id=chat_id, action=action)
+    except Exception:
+        pass
+    if not HUMAN_DELAY_ENABLED:
+        return
+    if gap >= 4 * 3600:
+        delay = random.uniform(2.4, 4.2) if kind == "reply" else random.uniform(1.8, 3.1)
+    elif gap >= 1800:
+        delay = random.uniform(1.6, 2.8) if kind == "reply" else random.uniform(1.2, 2.1)
+    elif gap >= 600:
+        delay = random.uniform(1.0, 1.9) if kind == "reply" else random.uniform(0.9, 1.5)
+    else:
+        delay = random.uniform(0.6, 1.2) if kind == "reply" else random.uniform(0.5, 1.0)
+    if delay > 2.2:
+        await asyncio.sleep(delay / 2)
+        try:
+            await bot.send_chat_action(chat_id=chat_id, action=action)
+        except Exception:
+            pass
+        await asyncio.sleep(delay / 2)
+    else:
+        await asyncio.sleep(delay)
+
+
+async def send_photo_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.UPLOAD_PHOTO, "photo")
+            photo = kwargs.get("photo")
+            if attempt > 0 and hasattr(photo, "seek"):
+                photo.seek(0)
+            result = await bot.send_photo(**kwargs)
+            if chat_id:
+                mark_presence(chat_id)
+                caption = kwargs.get("caption") or ""
+                if caption:
+                    record_sent_history(chat_id, "photo_caption", re.sub(r"<[^>]+>", "", caption))
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("send_photo", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+
+async def send_voice_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.UPLOAD_VOICE, "voice")
+            result = await bot.send_voice(**kwargs)
+            if chat_id:
+                mark_presence(chat_id)
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+                kwargs["caption"] = kwargs.get("caption") or ""
+    record_failure("send_voice", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+
+async def send_text_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(2):
+        try:
+            if chat_id:
+                await bot_humanize(bot, chat_id, ChatAction.TYPING, "reply")
+            send_kwargs = dict(kwargs)
+            if attempt > 0:
+                send_kwargs.pop("parse_mode", None)
+                send_kwargs.pop("disable_web_page_preview", None)
+            result = await bot.send_message(**send_kwargs)
+            if chat_id:
+                mark_presence(chat_id)
+                txt = send_kwargs.get("text") or ""
+                if txt:
+                    record_sent_history(chat_id, "text", re.sub(r"<[^>]+>", "", txt))
+            return result
+        except Exception as e:
+            last_error = e
+            if attempt == 0:
+                await asyncio.sleep(1)
+    record_failure("send_message", kwargs.get("chat_id"), "", str(last_error))
+    raise last_error
+
+
+def send_message_http_full(chat_id: int, text: str) -> tuple[bool, int | None]:
+    http_humanize(chat_id, "typing", "auto")
+    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
+    data = tg_post("sendMessage", payload)
+    ok = bool(data.get("ok"))
+    mid = data.get("result", {}).get("message_id") if ok else None
+    if ok:
+        mark_presence(chat_id)
+        record_sent_history(chat_id, "http_text", text)
+        return ok, mid
+    # silent fallback retry without preview flags
+    data2 = tg_post("sendMessage", {"chat_id": chat_id, "text": text})
+    ok2 = bool(data2.get("ok"))
+    mid2 = data2.get("result", {}).get("message_id") if ok2 else None
+    if ok2:
+        mark_presence(chat_id)
+        record_sent_history(chat_id, "http_text", text)
+        return ok2, mid2
+    record_failure("send_message", chat_id, "", str(data2 or data)[:400])
+    return False, None
+
+
+def build_text_styles(lang: str, mention_name: str, safe_group: str, phase: str) -> list[str]:
+    if lang == "en":
+        bank = {
+            "morning": [
+                f"🌼 Good morning {mention_name}. Welcome to {safe_group}.",
+                f"✨ A bright morning welcome to {mention_name} in {safe_group}.",
+                f"☀️ {mention_name}, morning feels warmer with you in {safe_group}.",
+                f"💛 Warm morning wishes, {mention_name}. Welcome to {safe_group}.",
+            ],
+            "day": [
+                f"🌸 Welcome {mention_name}. Glad to have you in {safe_group}.",
+                f"✨ {mention_name}, a graceful daytime welcome to {safe_group}.",
+                f"💫 A warm hello to {mention_name} in {safe_group}.",
+                f"🌷 {mention_name}, happy to see you in {safe_group} today.",
+            ],
+            "evening": [
+                f"🌙 Good evening {mention_name}. Welcome to {safe_group}.",
+                f"✨ {mention_name}, an elegant evening welcome to {safe_group}.",
+                f"🌆 {mention_name}, evening feels gentler with you in {safe_group}.",
+                f"💜 Soft evening wishes and welcome, {mention_name}.",
+            ],
+            "night": [
+                f"🌌 Good night {mention_name}. Welcome to {safe_group}.",
+                f"💙 {mention_name}, a calm night welcome to {safe_group}.",
+                f"⭐ {mention_name}, peaceful night wishes and welcome.",
+                f"✨ A quiet and warm night welcome to {mention_name} in {safe_group}.",
+            ],
+        }
+    else:
+        bank = {
+            "morning": [
+                f"🌼 শুভ সকাল {mention_name}। {safe_group} এ তোমাকে স্বাগতম।",
+                f"✨ সকালের কোমল শুভেচ্ছা, {mention_name}। {safe_group} এ স্বাগতম।",
+                f"☀️ {mention_name}, সকালটা আরও সুন্দর হলো তোমাকে পেয়ে।",
+                f"💛 মিষ্টি সকালের শুভেচ্ছা, {mention_name}। {safe_group} এ স্বাগতম।",
+            ],
+            "day": [
+                f"🌸 স্বাগতম {mention_name}। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
+                f"✨ {mention_name}, দিনের নরম শুভেচ্ছা। {safe_group} এ স্বাগতম।",
+                f"💫 {mention_name}, তোমাকে পেয়ে {safe_group} আরও উজ্জ্বল লাগছে।",
+                f"🌷 আন্তরিক শুভেচ্ছা, {mention_name}। {safe_group} এ স্বাগতম।",
+            ],
+            "evening": [
+                f"🌙 শুভ সন্ধ্যা {mention_name}। {safe_group} এ তোমাকে স্বাগতম।",
+                f"✨ সন্ধ্যার নরম আলোয় তোমাকে স্বাগতম, {mention_name}।",
+                f"🌆 {mention_name}, সন্ধ্যাটায় তোমাকে পেয়ে ভালো লাগছে।",
+                f"💜 মৃদু সন্ধ্যার শুভেচ্ছা রইল, {mention_name}।",
+            ],
+            "night": [
+                f"🌌 শুভ রাত্রি {mention_name}। {safe_group} এ তোমাকে স্বাগতম।",
+                f"💙 রাতের শান্ত শুভেচ্ছা রইল, {mention_name}।",
+                f"⭐ {mention_name}, তোমাকে পেয়ে রাতটা আরও কোমল লাগছে।",
+                f"✨ নিঃশব্দ উষ্ণ শুভেচ্ছা, {mention_name}। {safe_group} এ স্বাগতম।",
+            ],
+        }
+    return bank[phase]
+
+
+def welcome_texts(lang: str, mention_name: str, first_name: str, group_title: str, custom_text: Optional[str]) -> tuple[str, str]:
+    phase = phase_now()
+    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
+    if custom_text:
+        text = custom_text.replace("{name}", mention_name).replace("{group}", safe_group).replace("{phase}", phase)
+        voice = f"Hello {first_name}, welcome to {safe_group}." if lang == "en" else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।"
+        return text, voice
+    pool = build_text_styles(lang, mention_name, safe_group, phase)
+    taste = current_message_taste(0, safe_group) if not group_title else None
+    # chat_id is not passed here; the selector below will be refined by maybe_welcome after building text.
+    text = random.choice(pool)
+    voice = f"Hello {first_name}, welcome to {safe_group}." if lang == "en" else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।"
+    return text, voice
+
+
+async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, user):
+    ensure_group(chat_id, title or "")
+    group = get_group(chat_id)
+    if not group or int(group["enabled"]) != 1 or user.is_bot:
+        return
+    if is_recent_duplicate(chat_id, user.id):
+        return
+    if time.time() - get_last_join_time(chat_id, user.id) < REJOIN_IGNORE_SECONDS:
+        return
+
+    lang = get_group_lang(chat_id)
+    first_name = clean_name(user.first_name)
+    mention_name = user.mention_html(first_name)
+    save_join_time(chat_id, user.id)
+
+    burst_mode = is_join_burst(chat_id)
+    if burst_mode:
+        try:
+            compact = t(lang, "burst_compact", name=mention_name, group=(title or ("our group" if lang == "en" else "আমাদের গ্রুপ")))
+            variants = variantize_message_text(chat_id, lang, compact, kind="welcome")
+            compact = next((v for v in variants if not was_recent_duplicate_text(chat_id, "welcome", v, 2)), variants[0])
+            msg = await send_text_with_retry(context.bot, chat_id=chat_id, text=compact, parse_mode=ParseMode.HTML)
+            record_sent_history(chat_id, "welcome", compact)
+            set_group_value(chat_id, "last_primary_msg_id", msg.message_id)
+            increment_group_counter(chat_id, "total_welcome_sent")
+            set_group_value(chat_id, "last_welcome_at", int(time.time()))
+            asyncio.create_task(schedule_delete(context.bot, chat_id, msg.message_id, WELCOME_DELETE_AFTER))
+            await maybe_send_milestone(context, chat_id, title or "", lang)
+        except Exception:
+            logger.exception("Compact burst welcome failed in %s", chat_id)
+        return
+
+    text_welcome, voice_text = welcome_texts(lang, mention_name, first_name, title or "", group["custom_welcome"])
+    variants = variantize_message_text(chat_id, lang, text_welcome, kind="welcome")
+    text_welcome = next((v for v in variants if not was_recent_duplicate_text(chat_id, "welcome", v, 2)), variants[0])
+    voice_text = personalize_voice_text(voice_text, first_name, lang)
+    await delete_previous_welcome(context, chat_id)
+
+    primary = None
+    voice_msg = None
+    voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
+    try:
+        style = current_welcome_style(chat_id)
+        footer = current_footer_text(chat_id)
+        style, footer, festival = effective_style_footer(chat_id, style, footer)
+        if festival and len(text_welcome) < 900:
+            fest_name = festival["name_bn"] if lang == "bn" else festival["name_en"]
+            text_welcome = f"{text_welcome}\n\n✨ {fest_name}"
+        member_count = None
+        try:
+            member_count = await context.bot.get_chat_member_count(chat_id)
+        except Exception:
+            member_count = None
+        profile_bytes = await fetch_profile_photo_bytes(context.bot, user.id)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang, style=style, footer=footer, profile_bytes=profile_bytes, member_count=member_count)
+        try:
+            primary = await send_photo_with_retry(context.bot, chat_id=chat_id, photo=cover, caption=text_welcome, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Photo welcome failed in chat %s, switching to text-only", chat_id)
+            primary = await send_text_with_retry(context.bot, chat_id=chat_id, text=re.sub(r"<[^>]+>", "", text_welcome))
+
+        if int(group["voice_enabled"]) == 1 and primary:
+            try:
+                voice_name = selected_voice_name(lang, chat_id)
+                await make_voice_file(voice_text, voice_name, voice_path)
+                voice_msg = await send_voice_with_retry(context.bot, chat_id=chat_id, voice=voice_path.read_bytes(), caption=t(lang, "welcome_voice_caption"))
+            except Exception:
+                logger.exception("Voice welcome failed in chat %s; keeping banner/text only", chat_id)
+
+        set_group_value(chat_id, "last_primary_msg_id", primary.message_id if primary else None)
+        set_group_value(chat_id, "last_voice_msg_id", voice_msg.message_id if voice_msg else None)
+        set_group_value(chat_id, "updated_at", int(time.time()))
+        set_group_value(chat_id, "last_welcome_at", int(time.time()))
+        increment_group_counter(chat_id, "total_welcome_sent")
+        record_sent_history(chat_id, "welcome", re.sub(r"<[^>]+>", "", text_welcome))
+        if primary:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, primary.message_id, WELCOME_DELETE_AFTER))
+        if voice_msg:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, voice_msg.message_id, WELCOME_DELETE_AFTER))
+        await maybe_send_milestone(context, chat_id, title or "", lang)
+    except Exception:
+        logger.exception("Welcome failed in chat %s for user %s", chat_id, user.id)
+    finally:
+        if voice_path.exists():
+            try:
+                voice_path.unlink()
+            except Exception:
+                pass
+
+
+def keyword_reply_variants(lang: str, matched: str, chat_id: int) -> list[str]:
+    base = KEYWORD_REPLIES["en" if lang == "en" else "bn"][matched]
+    out = []
+    for item in base:
+        out.extend(variantize_message_text(chat_id, lang, item, kind="keyword"))
+    seen = []
+    used = set()
+    for x in out:
+        if x not in used:
+            seen.append(x)
+            used.add(x)
+    return seen or base
+
+
+async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or chat.type not in {"group", "supergroup"} or not msg or not user or user.is_bot:
+        return
+    ensure_group(chat.id, chat.title or "")
+    if not current_keyword_mode(chat.id):
+        return
+    if is_linkish_message(msg):
+        return
+    matched = keyword_reply_match(msg.text or "")
+    if not matched:
+        return
+    now_ts = time.time()
+    if now_ts - keyword_last_chat_at.get(chat.id, 0) < KEYWORD_COOLDOWN_SECONDS:
+        return
+    if now_ts - keyword_last_user_at.get((chat.id, user.id), 0) < KEYWORD_USER_COOLDOWN_SECONDS:
+        return
+    if random.random() > KEYWORD_REPLY_CHANCE:
+        return
+    lang = get_group_lang(chat.id)
+    options = [x for x in keyword_reply_variants(lang, matched, chat.id) if not was_recent_duplicate_text(chat.id, "keyword", x, 2)]
+    if not options:
+        options = keyword_reply_variants(lang, matched, chat.id)
+    reply_text = random.choice(options)
+    keyword_last_chat_at[chat.id] = now_ts
+    keyword_last_user_at[(chat.id, user.id)] = now_ts
+    try:
+        await bot_humanize(context.bot, chat.id, ChatAction.TYPING, "reply")
+        sent = await msg.reply_text(reply_text)
+        mark_presence(chat.id)
+        record_sent_history(chat.id, "keyword", reply_text)
+    except Exception:
+        logger.exception("Keyword reply failed in %s", chat.id)
+
+# ===== end Premium v7 behavior pack overrides =====
+
+
 def main():
     init_db()
+    ensure_behavior_db()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=hourly_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
