@@ -1,4 +1,5 @@
 import asyncio
+import html
 import logging
 import os
 import random
@@ -17,11 +18,12 @@ import requests
 from flask import Flask, jsonify
 import colorsys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from telegram import BotCommand, Update, Message
+from telegram import BotCommand, Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ChatMemberStatus, ParseMode, ChatAction
 from telegram.ext import (
     Application,
     ApplicationBuilder,
+    CallbackQueryHandler,
     ChatMemberHandler,
     CommandHandler,
     ContextTypes,
@@ -2749,6 +2751,7 @@ async def post_init(application: Application):
         BotCommand("status", "Show group status"),
         BotCommand("testwelcome", "Send test welcome"),
         BotCommand("broadcast", "Owner: broadcast text or replied media"),
+        BotCommand("xo", "Play X-O game"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -3616,6 +3619,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("status", on_status))
     application.add_handler(CommandHandler("testwelcome", on_testwelcome))
     application.add_handler(CommandHandler("broadcast", on_broadcast))
+    application.add_handler(CommandHandler("xo", on_xo))
+    application.add_handler(CallbackQueryHandler(on_xo_callback, pattern=r"^xo\|"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
@@ -4740,9 +4745,359 @@ async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title:
 # ===== end Aura Themes + Story Welcome Pack overrides =====
 
 
+
+
+# ===== XO game pack =====
+XO_EMPTY = "·"
+XO_WIN_LINES = (
+    (0, 1, 2), (3, 4, 5), (6, 7, 8),
+    (0, 3, 6), (1, 4, 7), (2, 5, 8),
+    (0, 4, 8), (2, 4, 6),
+)
+
+
+def ensure_xo_db():
+    with db_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS xo_games (
+                game_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER,
+                creator_id INTEGER NOT NULL,
+                creator_name TEXT NOT NULL,
+                player_x_id INTEGER NOT NULL,
+                player_x_name TEXT NOT NULL,
+                player_o_id INTEGER,
+                player_o_name TEXT,
+                mode TEXT NOT NULL,
+                board TEXT NOT NULL,
+                turn TEXT NOT NULL,
+                status TEXT NOT NULL,
+                winner TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+
+def xo_now() -> int:
+    return int(time.time())
+
+
+def xo_make_id() -> str:
+    return f"xo{xo_now()}{random.randint(1000, 9999)}"
+
+
+def xo_create_game(chat_id: int, creator_id: int, creator_name: str, mode: str) -> str:
+    game_id = xo_make_id()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO xo_games (
+                game_id, chat_id, message_id, creator_id, creator_name,
+                player_x_id, player_x_name, player_o_id, player_o_name,
+                mode, board, turn, status, winner, created_at, updated_at
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                game_id, chat_id, creator_id, creator_name,
+                creator_id, creator_name,
+                mode, " " * 9, "X", "waiting" if mode == "pvp" else "active", xo_now(), xo_now(),
+            ),
+        )
+        if mode == "bot":
+            conn.execute(
+                "UPDATE xo_games SET player_o_id = ?, player_o_name = ?, updated_at = ? WHERE game_id = ?",
+                (0, BOT_NAME, xo_now(), game_id),
+            )
+        conn.commit()
+    return game_id
+
+
+def xo_get_game(game_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM xo_games WHERE game_id = ?", (game_id,)).fetchone()
+
+
+def xo_set_message_id(game_id: str, message_id: int):
+    with db_connect() as conn:
+        conn.execute("UPDATE xo_games SET message_id = ?, updated_at = ? WHERE game_id = ?", (message_id, xo_now(), game_id))
+        conn.commit()
+
+
+def xo_update_players(game_id: str, player_o_id: int, player_o_name: str):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE xo_games SET player_o_id = ?, player_o_name = ?, status = 'active', updated_at = ? WHERE game_id = ?",
+            (player_o_id, player_o_name, xo_now(), game_id),
+        )
+        conn.commit()
+
+
+def xo_save_state(game_id: str, board: str, turn: str, status: str, winner: Optional[str] = None):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE xo_games SET board = ?, turn = ?, status = ?, winner = ?, updated_at = ? WHERE game_id = ?",
+            (board, turn, status, winner, xo_now(), game_id),
+        )
+        conn.commit()
+
+
+def xo_player_symbol(game, user_id: int) -> Optional[str]:
+    if int(game["player_x_id"]) == int(user_id):
+        return "X"
+    if game["player_o_id"] is not None and int(game["player_o_id"]) == int(user_id):
+        return "O"
+    return None
+
+
+def xo_display_cell(ch: str) -> str:
+    if ch == "X":
+        return "❌"
+    if ch == "O":
+        return "⭕"
+    return XO_EMPTY
+
+
+def xo_board_markup(game) -> InlineKeyboardMarkup:
+    board = game["board"]
+    rows = []
+    for r in range(3):
+        btns = []
+        for c in range(3):
+            idx = r * 3 + c
+            label = xo_display_cell(board[idx])
+            data = f"xo|{game['game_id']}|tap|{idx}"
+            btns.append(InlineKeyboardButton(label, callback_data=data))
+        rows.append(btns)
+    if game["status"] == "waiting":
+        rows.append([
+            InlineKeyboardButton("Join", callback_data=f"xo|{game['game_id']}|join|0"),
+            InlineKeyboardButton("Cancel", callback_data=f"xo|{game['game_id']}|cancel|0"),
+        ])
+    elif game["status"] in {"active", "done", "cancelled"}:
+        rows.append([
+            InlineKeyboardButton("Rematch", callback_data=f"xo|{game['game_id']}|rematch|0"),
+            InlineKeyboardButton("Close", callback_data=f"xo|{game['game_id']}|close|0"),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+
+def xo_check_winner(board: str) -> Optional[str]:
+    for a, b, c in XO_WIN_LINES:
+        if board[a] != " " and board[a] == board[b] == board[c]:
+            return board[a]
+    return None
+
+
+def xo_is_draw(board: str) -> bool:
+    return " " not in board and xo_check_winner(board) is None
+
+
+def xo_turn_name(game) -> str:
+    if game["turn"] == "X":
+        return game["player_x_name"] or "Player X"
+    return game["player_o_name"] or "Player O"
+
+
+def xo_render_text(game, note: str = "") -> str:
+    x_name = html.escape(game["player_x_name"] or "Player X")
+    o_name = html.escape(game["player_o_name"] or (BOT_NAME if game["mode"] == "bot" else "Waiting..."))
+    lines = [
+        "🎮 <b>X-O / Tic-Tac-Toe</b>",
+        f"❌ X: <b>{x_name}</b>",
+        f"⭕ O: <b>{o_name}</b>",
+    ]
+    status = game["status"]
+    if status == "waiting":
+        lines.append("\nSecond player, tap <b>Join</b> to start.")
+    elif status == "active":
+        turn_icon = "❌" if game["turn"] == "X" else "⭕"
+        lines.append(f"\nTurn: {turn_icon} <b>{html.escape(xo_turn_name(game))}</b>")
+    elif status == "done":
+        if game["winner"] == "draw":
+            lines.append("\nResult: <b>Draw</b>")
+        else:
+            win_name = game["player_x_name"] if game["winner"] == "X" else game["player_o_name"]
+            lines.append(f"\nWinner: <b>{html.escape(win_name or 'Winner')}</b>")
+    elif status == "cancelled":
+        lines.append("\nGame closed.")
+    if note:
+        lines.append(f"\n{html.escape(note)}")
+    return "\n".join(lines)
+
+
+def xo_apply_move(board: str, idx: int, symbol: str) -> str:
+    return board[:idx] + symbol + board[idx + 1:]
+
+
+def xo_best_bot_move(board: str) -> int:
+    free = [i for i, ch in enumerate(board) if ch == " "]
+    if not free:
+        return -1
+    for symbol in ("O", "X"):
+        for idx in free:
+            test = xo_apply_move(board, idx, symbol)
+            if xo_check_winner(test) == symbol:
+                return idx
+    if 4 in free:
+        return 4
+    corners = [i for i in (0, 2, 6, 8) if i in free]
+    if corners:
+        return random.choice(corners)
+    return random.choice(free)
+
+
+async def on_xo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+    mode = "bot" if (context.args and context.args[0].strip().lower() == "bot") else "pvp"
+    creator_name = clean_name(user.full_name or user.first_name or "Player")
+    game_id = xo_create_game(chat.id, user.id, creator_name, mode)
+    game = xo_get_game(game_id)
+    note = "You are playing against Maya." if mode == "bot" else "Open challenge created."
+    if mode == "bot":
+        sent = await msg.reply_text(
+            xo_render_text(game, note),
+            reply_markup=xo_board_markup(game),
+            parse_mode=ParseMode.HTML,
+        )
+    else:
+        sent = await msg.reply_text(
+            xo_render_text(game, note),
+            reply_markup=xo_board_markup(game),
+            parse_mode=ParseMode.HTML,
+        )
+    xo_set_message_id(game_id, sent.message_id)
+
+
+async def xo_edit_game(query, game, note: str = ""):
+    await query.edit_message_text(
+        xo_render_text(game, note),
+        reply_markup=xo_board_markup(game),
+        parse_mode=ParseMode.HTML,
+    )
+
+
+async def xo_run_bot_if_needed(query, game):
+    if game["mode"] != "bot" or game["status"] != "active" or game["turn"] != "O":
+        return xo_get_game(game["game_id"])
+    board = game["board"]
+    idx = xo_best_bot_move(board)
+    if idx < 0:
+        return game
+    board = xo_apply_move(board, idx, "O")
+    winner = xo_check_winner(board)
+    if winner:
+        xo_save_state(game["game_id"], board, "O", "done", winner)
+    elif xo_is_draw(board):
+        xo_save_state(game["game_id"], board, "O", "done", "draw")
+    else:
+        xo_save_state(game["game_id"], board, "X", "active", None)
+    return xo_get_game(game["game_id"])
+
+
+async def on_xo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user or not query.data:
+        return
+    await query.answer()
+    try:
+        _, game_id, action, value = query.data.split("|", 3)
+    except ValueError:
+        return
+    game = xo_get_game(game_id)
+    if not game:
+        await query.answer("Game not found.", show_alert=True)
+        return
+    if action == "join":
+        if game["status"] != "waiting":
+            await query.answer("This game already started.", show_alert=True)
+            return
+        if int(game["creator_id"]) == int(user.id):
+            await query.answer("Another player needs to join.", show_alert=True)
+            return
+        xo_update_players(game_id, user.id, clean_name(user.full_name or user.first_name or "Player"))
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Game started.")
+        return
+    if action == "cancel":
+        if int(game["creator_id"]) != int(user.id):
+            await query.answer("Only the creator can cancel.", show_alert=True)
+            return
+        xo_save_state(game_id, game["board"], game["turn"], "cancelled", None)
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Challenge cancelled.")
+        return
+    if action == "close":
+        if user.id not in {int(game["creator_id"]), int(game["player_x_id"]), int(game["player_o_id"] or -1)}:
+            await query.answer("Only players can close this game.", show_alert=True)
+            return
+        xo_save_state(game_id, game["board"], game["turn"], "cancelled", None)
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Game closed.")
+        return
+    if action == "rematch":
+        if user.id not in {int(game["player_x_id"]), int(game["player_o_id"] or -1)}:
+            await query.answer("Only players can rematch.", show_alert=True)
+            return
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE xo_games SET board = ?, turn = 'X', status = ?, winner = NULL, updated_at = ? WHERE game_id = ?",
+                (" " * 9, "active" if game["mode"] == "bot" or game["player_o_id"] is not None else "waiting", xo_now(), game_id),
+            )
+            conn.commit()
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Rematch started.")
+        return
+    if action != "tap":
+        return
+    if game["status"] != "active":
+        await query.answer("This game is not active.", show_alert=True)
+        return
+    symbol = xo_player_symbol(game, user.id)
+    if not symbol:
+        await query.answer("You are not part of this game.", show_alert=True)
+        return
+    if symbol != game["turn"]:
+        await query.answer("Wait for your turn.", show_alert=True)
+        return
+    idx = int(value)
+    board = game["board"]
+    if idx < 0 or idx > 8 or board[idx] != " ":
+        await query.answer("That cell is already used.", show_alert=True)
+        return
+    board = xo_apply_move(board, idx, symbol)
+    winner = xo_check_winner(board)
+    if winner:
+        xo_save_state(game_id, board, symbol, "done", winner)
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Nice move.")
+        return
+    if xo_is_draw(board):
+        xo_save_state(game_id, board, symbol, "done", "draw")
+        game = xo_get_game(game_id)
+        await xo_edit_game(query, game, "Draw game.")
+        return
+    next_turn = "O" if symbol == "X" else "X"
+    xo_save_state(game_id, board, next_turn, "active", None)
+    game = xo_get_game(game_id)
+    if game["mode"] == "bot" and next_turn == "O":
+        game = await xo_run_bot_if_needed(query, game)
+    await xo_edit_game(query, game, "")
+# ===== end XO game pack =====
+
 def main():
     init_db()
     ensure_behavior_db()
+    ensure_xo_db()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=hourly_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
