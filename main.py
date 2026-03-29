@@ -4236,6 +4236,510 @@ async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ===== end Premium v7 behavior pack overrides =====
 
 
+
+
+# ===== Aura Themes + Story Welcome Pack overrides =====
+THEME_NAMES = list(dict.fromkeys(THEME_NAMES + ["crystal-morning", "soft-bloom", "velvet-night"]))
+
+AURA_CORE_THEMES = ["moonlight", "rose-gold", "velvet-night", "crystal-morning", "soft-bloom"]
+AURA_PHASE_THEMES = {
+    "morning": "crystal-morning",
+    "day": "soft-bloom",
+    "evening": "rose-gold",
+    "night": "moonlight",
+}
+AURA_ALIAS_MAP = {
+    "crystal-morning": "crystal",
+    "soft-bloom": "petal",
+    "velvet-night": "velvet",
+}
+AURA_PERSONAS = {
+    "moonlight": {
+        "footer_bn": ["Moonlight hush by Maya", "নরম চাঁদের আলোয় Maya", "চুপচাপ কোমলতা — Maya"],
+        "footer_en": ["Moonlight hush by Maya", "Soft moonlit calm by Maya", "A quiet glow by Maya"],
+        "hourly_bn": ["রাতের মতো নরম থাকুক সময়টা।", "চারপাশে একটু শান্তি থাকুক।", "মুহূর্তটা যেন মৃদু আর স্থির থাকে।"],
+        "hourly_en": ["May the moment stay quiet and gentle.", "A little moonlit calm for this group.", "Let the mood stay soft and steady."],
+    },
+    "rose-gold": {
+        "footer_bn": ["Rose Gold glow by Maya", "নরম সোনালি আভা — Maya", "মোলায়েম আভা — Maya"],
+        "footer_en": ["Rose Gold glow by Maya", "A warm glow by Maya", "Soft golden warmth by Maya"],
+        "hourly_bn": ["সময়টা থাকুক উষ্ণ আর মার্জিত।", "আজকের vibe হোক একটু উজ্জ্বল আর সুন্দর।", "নরম আভায় ভালো থাকুক সবাই।"],
+        "hourly_en": ["May the vibe stay warm and elegant.", "A soft golden glow for this group.", "Wishing everyone a brighter, warmer moment."],
+    },
+    "velvet-night": {
+        "footer_bn": ["Velvet Night by Maya", "গভীর নরম রাত — Maya", "গাঢ় শান্তি — Maya"],
+        "footer_en": ["Velvet Night by Maya", "Deep calm by Maya", "A velvet hush by Maya"],
+        "hourly_bn": ["গভীর শান্তিতে কাটুক এই সময়টা।", "কিছু মুহূর্ত শুধু নীরবতার জন্য থাক।", "স্থির আর নরম থাকুক আজকের mood।"],
+        "hourly_en": ["Let the mood stay deep, calm, and velvet-soft.", "A little deeper calm for everyone here.", "May the night feel steady and gentle."],
+    },
+    "crystal-morning": {
+        "footer_bn": ["Crystal Morning by Maya", "স্বচ্ছ সকালের আলো — Maya", "উজ্জ্বল কোমল সকাল — Maya"],
+        "footer_en": ["Crystal Morning by Maya", "Clear morning light by Maya", "A bright soft morning by Maya"],
+        "hourly_bn": ["সকালের আলোয় মনটাও স্বচ্ছ থাকুক।", "উজ্জ্বল শুরু হোক দিনের।", "সকালটা হোক হালকা আর নির্মল।"],
+        "hourly_en": ["May the morning feel clear and bright.", "A fresh beginning for the day.", "Let the morning stay light and crystal-soft."],
+    },
+    "soft-bloom": {
+        "footer_bn": ["Soft Bloom by Maya", "নরম ফুলেল ছোঁয়া — Maya", "মোলায়েম প্রস্ফুটন — Maya"],
+        "footer_en": ["Soft Bloom by Maya", "A gentle bloom by Maya", "Soft bloom and warmth by Maya"],
+        "hourly_bn": ["দিনটা নরম প্রস্ফুটনের মতো কাটুক।", "মনটা আজ একটু হালকা থাকুক।", "শান্ত উষ্ণতায় ভরে থাকুক সময়টা।"],
+        "hourly_en": ["May the day bloom gently.", "A soft little moment for everyone here.", "Let the hours feel warm and lightly blooming."],
+    },
+}
+
+
+def current_welcome_style(chat_id: int) -> str:
+    row = get_group(chat_id)
+    value = (row["welcome_style"] if row and row["welcome_style"] else "auto").strip().lower()
+    return value if value in {"auto", "random"} or value in THEME_NAMES else "auto"
+
+
+def resolve_aura_theme(style: str, phase: str) -> str:
+    style = (style or "auto").strip().lower()
+    if style in {"", "auto"}:
+        return AURA_PHASE_THEMES.get(phase, "soft-bloom")
+    if style == "random":
+        return random.choice(AURA_CORE_THEMES)
+    return style
+
+
+def current_effective_aura(chat_id: int, phase: Optional[str] = None) -> str:
+    phase = phase or phase_now()
+    return resolve_aura_theme(current_welcome_style(chat_id), phase)
+
+
+def aura_footer_for(chat_id: int, lang: str, phase: Optional[str] = None) -> str:
+    aura = current_effective_aura(chat_id, phase)
+    persona = AURA_PERSONAS.get(aura, AURA_PERSONAS["soft-bloom"])
+    pool = persona["footer_en"] if lang == "en" else persona["footer_bn"]
+    return random.choice(pool)
+
+
+def aura_hourly_phrase(chat_id: int, lang: str, phase: Optional[str] = None) -> str:
+    aura = current_effective_aura(chat_id, phase)
+    persona = AURA_PERSONAS.get(aura, AURA_PERSONAS["soft-bloom"])
+    pool = persona["hourly_en"] if lang == "en" else persona["hourly_bn"]
+    return random.choice(pool)
+
+
+def theme_palette(style: str, phase: str):
+    style = resolve_aura_theme(style, phase)
+    handcrafted = {
+        "moonlight": ((34, 44, 79), (99, 121, 196), (236, 239, 255), (191, 206, 255)),
+        "rose-gold": ((138, 80, 106), (243, 171, 164), (255, 240, 228), (255, 214, 196)),
+        "velvet-night": ((21, 16, 36), (87, 64, 124), (234, 228, 255), (189, 166, 255)),
+        "crystal-morning": ((111, 177, 231), (240, 246, 255), (255, 255, 255), (212, 233, 255)),
+        "soft-bloom": ((246, 187, 205), (255, 233, 240), (255, 252, 254), (255, 217, 230)),
+    }
+    if style in handcrafted:
+        c1, c2, glow, accent = handcrafted[style]
+        return c1, c2, glow, accent, style
+
+    base_style = AURA_ALIAS_MAP.get(style, style)
+    if base_style == "random":
+        base_style = random.choice(AURA_CORE_THEMES)
+    seed = sum(ord(c) for c in base_style) % 360
+    sat = 0.55 + (sum(ord(c) for c in base_style[::-1]) % 20) / 100
+    val1 = 0.24 if phase == "night" else 0.58
+    val2 = 0.86 if phase in {"morning", "day"} else 0.72
+
+    def hsv(h, s, v):
+        r, g, b = colorsys.hsv_to_rgb((h % 360) / 360.0, max(0, min(1, s)), max(0, min(1, v)))
+        return (int(r * 255), int(g * 255), int(b * 255))
+
+    c1 = hsv(seed, sat, val1)
+    c2 = hsv(seed + 38, min(1, sat + 0.12), val2)
+    glow = hsv(seed + 18, 0.22, 1.0)
+    accent = hsv(seed + 10, 0.45, 0.98)
+    return c1, c2, glow, accent, style
+
+
+def effective_style_footer(chat_id: int, style: str, footer: str):
+    phase = phase_now()
+    resolved_style = resolve_aura_theme(style, phase)
+    resolved_footer = footer.strip() if footer else aura_footer_for(chat_id, get_group_lang(chat_id), phase)
+    festival = current_festival() if current_festival_mode(chat_id) else None
+    if festival:
+        resolved_style = festival.get("theme") or resolved_style
+        fest_name = festival["name_bn"] if get_group_lang(chat_id) == "bn" else festival["name_en"]
+        if not footer:
+            resolved_footer = f"{fest_name} | {aura_footer_for(chat_id, get_group_lang(chat_id), phase)}"
+    return resolved_style, resolved_footer[:80], festival
+
+
+def aura_story_variants(lang: str, mention_name: str, safe_group: str, phase: str, aura: str) -> list[str]:
+    if lang == "en":
+        stories = {
+            "morning": [
+                f"🌼 Morning light brushed gently across {safe_group}, and right then {mention_name} arrived. Welcome.",
+                f"☀️ A crystal-soft morning opened over {safe_group}; {mention_name} stepped in with it. Welcome.",
+                f"✨ The day began quietly in {safe_group}, and {mention_name} became part of that first glow.",
+            ],
+            "day": [
+                f"🌸 The day was already warm in {safe_group}, then {mention_name} arrived and made it feel fuller.",
+                f"✨ A soft bloom settled over {safe_group}, and {mention_name} arrived right inside that gentle moment.",
+                f"💫 In the middle of the day, {safe_group} gained a little more warmth with {mention_name}.",
+            ],
+            "evening": [
+                f"🌙 Evening gold touched {safe_group}, and then {mention_name} arrived. A graceful welcome.",
+                f"🌆 As the light softened around {safe_group}, {mention_name} stepped into the scene. Welcome.",
+                f"✨ The evening grew warmer the moment {mention_name} joined {safe_group}.",
+            ],
+            "night": [
+                f"🌌 A quiet moonlit hush rested over {safe_group}, and {mention_name} arrived into it. Welcome.",
+                f"💙 Night had already gone soft in {safe_group}; then {mention_name} came in, calm and welcome.",
+                f"⭐ Under a velvet night, {safe_group} quietly opened its door to {mention_name}.",
+            ],
+        }
+    else:
+        stories = {
+            "morning": [
+                f"🌼 সকালের আলো ধীরে ধীরে {safe_group} ছুঁয়ে গেল, আর ঠিক তখনই এসে পৌঁছালে {mention_name}। স্বাগতম।",
+                f"☀️ স্বচ্ছ এক সকাল {safe_group} জুড়ে খুলে গেল, আর সেই আলোয় এসে পড়লে {mention_name}।",
+                f"✨ দিনের প্রথম নরম উজ্জ্বলতায় {safe_group} তোমাকে আপন করে নিল, {mention_name}।",
+            ],
+            "day": [
+                f"🌸 দিনের নরম উষ্ণতার ভেতর {safe_group} আরও সুন্দর হলো, কারণ এলে {mention_name}।",
+                f"✨ দুপুরের হালকা আলোয় {safe_group} যেন একটু বেশি প্রস্ফুটিত হলো, {mention_name} তোমাকে পেয়ে।",
+                f"💫 সময়টা চলছিল নিজের ছন্দে, তারপর {mention_name} এসে {safe_group}-কে আরেকটু মোলায়েম করে দিল।",
+            ],
+            "evening": [
+                f"🌙 সন্ধ্যার সোনালি আভা নেমেছিল {safe_group} জুড়ে, আর ঠিক তখনই এলে {mention_name}।",
+                f"🌆 নরম সন্ধ্যার আলোয় {safe_group} তোমাকে গ্রহণ করল খুব শান্তভাবে, {mention_name}।",
+                f"✨ আজকের সন্ধ্যাটায় {safe_group} একটু বেশি মায়াময় লাগছে, কারণ এলে {mention_name}।",
+            ],
+            "night": [
+                f"🌌 চুপচাপ চাঁদের আলোয় ভেজা {safe_group}-এ এসে পৌঁছালে {mention_name}। স্বাগতম।",
+                f"💙 রাতের নরম নীরবতায় {safe_group} তোমাকে খুব শান্তভাবে গ্রহণ করল, {mention_name}।",
+                f"⭐ মখমলি এক রাতের ভেতর {safe_group}-এ এলে {mention_name}, আর মুহূর্তটা হয়ে উঠল আরও কোমল।",
+            ],
+        }
+    return stories[phase]
+
+
+def build_text_styles(lang: str, mention_name: str, safe_group: str, phase: str, chat_id: int = 0) -> list[str]:
+    aura = current_effective_aura(chat_id, phase) if chat_id else resolve_aura_theme("auto", phase)
+    story = aura_story_variants(lang, mention_name, safe_group, phase, aura)
+    if lang == "en":
+        elegant = {
+            "morning": [
+                f"🌼 Good morning {mention_name}. A graceful welcome to {safe_group}.",
+                f"✨ Morning opened softly in {safe_group}; welcome, {mention_name}.",
+                f"☀️ {mention_name}, a crystal-bright welcome to {safe_group}.",
+            ],
+            "day": [
+                f"🌸 Welcome {mention_name}. {safe_group} feels warmer with you here.",
+                f"✨ A soft-bloom welcome to {mention_name} in {safe_group}.",
+                f"💫 Delighted to have you here, {mention_name}. Welcome to {safe_group}.",
+            ],
+            "evening": [
+                f"🌙 Good evening {mention_name}. A rose-gold welcome to {safe_group}.",
+                f"✨ The evening feels softer with you in {safe_group}, {mention_name}.",
+                f"🌆 Warm evening wishes and welcome, {mention_name}.",
+            ],
+            "night": [
+                f"🌌 Good night {mention_name}. A moonlit welcome to {safe_group}.",
+                f"💙 A calm velvet welcome to {mention_name} in {safe_group}.",
+                f"⭐ Quiet warmth and a gentle welcome to you, {mention_name}.",
+            ],
+        }
+    else:
+        elegant = {
+            "morning": [
+                f"🌼 শুভ সকাল {mention_name}। {safe_group} এ তোমাকে আন্তরিক স্বাগতম।",
+                f"✨ সকালের স্বচ্ছ আলোয় তোমাকে স্বাগতম, {mention_name}।",
+                f"☀️ {mention_name}, {safe_group} আজ তোমাকে পেয়ে আরও উজ্জ্বল।",
+            ],
+            "day": [
+                f"🌸 স্বাগতম {mention_name}। {safe_group} এ তোমাকে পেয়ে ভালো লাগছে।",
+                f"✨ {safe_group} আজ একটু বেশি কোমল লাগছে, কারণ এলে {mention_name}।",
+                f"💫 নরম এক শুভেচ্ছা রইল তোমার জন্য, {mention_name}।",
+            ],
+            "evening": [
+                f"🌙 শুভ সন্ধ্যা {mention_name}। {safe_group} এ তোমাকে স্বাগতম।",
+                f"✨ সন্ধ্যার সোনালি আভায় তোমাকে স্বাগতম, {mention_name}।",
+                f"🌆 {mention_name}, {safe_group} এ আজকের সন্ধ্যাটায় তোমাকে পেয়ে ভালো লাগছে।",
+            ],
+            "night": [
+                f"🌌 শুভ রাত্রি {mention_name}। {safe_group} এ তোমাকে স্বাগতম।",
+                f"💙 চাঁদের নরম আলোয় তোমার জন্য রইল এক শান্ত স্বাগতম, {mention_name}।",
+                f"⭐ রাতের মখমলি নীরবতায় তোমাকে স্বাগত, {mention_name}।",
+            ],
+        }
+    pool = story + elegant[phase]
+    # keep it beautiful and non-repetitive
+    seen, out = set(), []
+    for x in pool:
+        x = x.strip()
+        if x and x not in seen:
+            seen.add(x)
+            out.append(x)
+    return out
+
+
+def welcome_texts(lang: str, mention_name: str, first_name: str, group_title: str, custom_text: Optional[str], chat_id: int = 0) -> tuple[str, str]:
+    phase = phase_now()
+    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
+    aura = current_effective_aura(chat_id, phase) if chat_id else resolve_aura_theme("auto", phase)
+    if custom_text:
+        text = custom_text.replace("{name}", mention_name).replace("{group}", safe_group).replace("{phase}", phase)
+    else:
+        pool = build_text_styles(lang, mention_name, safe_group, phase, chat_id=chat_id)
+        candidates = [x for x in pool if not was_recent_duplicate_text(chat_id, "welcome", x, 2)] if chat_id else pool
+        text = random.choice(candidates or pool)
+
+    if lang == "en":
+        voice_bank = {
+            "moonlight": [
+                f"Hello {first_name}. A quiet moonlit welcome to {safe_group}.",
+                f"{first_name}, welcome softly into {safe_group}.",
+            ],
+            "rose-gold": [
+                f"Hello {first_name}. A warm glowing welcome to {safe_group}.",
+                f"{first_name}, welcome with a little golden warmth to {safe_group}.",
+            ],
+            "velvet-night": [
+                f"Hello {first_name}. A deep calm welcome to {safe_group}.",
+                f"{first_name}, welcome gently into this velvet night mood in {safe_group}.",
+            ],
+            "crystal-morning": [
+                f"Hello {first_name}. A crystal-bright morning welcome to {safe_group}.",
+                f"{first_name}, welcome into the clear morning light of {safe_group}.",
+            ],
+            "soft-bloom": [
+                f"Hello {first_name}. A soft blooming welcome to {safe_group}.",
+                f"{first_name}, welcome into the gentle warmth of {safe_group}.",
+            ],
+        }
+    else:
+        voice_bank = {
+            "moonlight": [
+                f"হ্যালো {first_name}। চাঁদের নরম আলোয় {safe_group} এ তোমাকে স্বাগতম।",
+                f"{first_name}, {safe_group} এ তোমার জন্য রইল এক শান্ত স্বাগতম।",
+            ],
+            "rose-gold": [
+                f"হ্যালো {first_name}। সোনালি নরম আভায় {safe_group} এ তোমাকে স্বাগতম।",
+                f"{first_name}, {safe_group} এ তোমার জন্য রইল উষ্ণ আর সুন্দর এক স্বাগতম।",
+            ],
+            "velvet-night": [
+                f"হ্যালো {first_name}। মখমলি নরম রাতের ভেতর {safe_group} এ তোমাকে স্বাগতম।",
+                f"{first_name}, শান্ত গভীরতায় ভরা {safe_group} তোমাকে আপন করে নিল।",
+            ],
+            "crystal-morning": [
+                f"হ্যালো {first_name}। স্বচ্ছ সকালের আলোয় {safe_group} এ তোমাকে স্বাগতম।",
+                f"{first_name}, উজ্জ্বল কোমল এক সকাল থেকে তোমার জন্য রইল শুভেচ্ছা।",
+            ],
+            "soft-bloom": [
+                f"হ্যালো {first_name}। নরম প্রস্ফুটনের মতো {safe_group} এ তোমাকে স্বাগতম।",
+                f"{first_name}, {safe_group} তোমাকে খুব কোমল এক শুভেচ্ছায় গ্রহণ করল।",
+            ],
+        }
+    voice = random.choice(voice_bank.get(aura, voice_bank["soft-bloom"]))
+    return text, voice
+
+
+def personalize_voice_text(voice_text: str, first_name: str, lang: str, chat_id: int = 0) -> str:
+    variant = voice_name_variant(first_name, lang)
+    aura = current_effective_aura(chat_id, phase_now()) if chat_id else resolve_aura_theme("auto", phase_now())
+    if lang == "en":
+        prefix_bank = {
+            "moonlight": [f"Hello {variant}. ", f"{variant}, softly now. "],
+            "rose-gold": [f"Hello {variant}. ", f"{variant}, warmly. "],
+            "velvet-night": [f"{variant}, gently. ", f"Hello {variant}. "],
+            "crystal-morning": [f"Hello {variant}. ", f"{variant}, bright morning. "],
+            "soft-bloom": [f"Hello {variant}. ", f"{variant}, softly. "],
+        }
+    else:
+        prefix_bank = {
+            "moonlight": [f"হ্যালো {variant}। ", f"{variant}, নরম করে বলি। "],
+            "rose-gold": [f"হ্যালো {variant}। ", f"{variant}, উষ্ণ শুভেচ্ছা। "],
+            "velvet-night": [f"{variant}, শান্তভাবে শোনো। ", f"হ্যালো {variant}। "],
+            "crystal-morning": [f"হ্যালো {variant}। ", f"{variant}, উজ্জ্বল সকাল। "],
+            "soft-bloom": [f"হ্যালো {variant}। ", f"{variant}, কোমল শুভেচ্ছা। "],
+        }
+    prefix = random.choice(prefix_bank.get(aura, prefix_bank["soft-bloom"]))
+    lower = voice_text.lower()
+    if lower.startswith(("hello", "hi", "হ্যালো", first_name.lower())):
+        return voice_text
+    return f"{prefix}{voice_text}"
+
+
+def variantize_message_text(chat_id: int, lang: str, text: str, kind: str = "hourly") -> list[str]:
+    taste = current_message_taste(chat_id, (get_group(chat_id)["title"] if get_group(chat_id) else ""))
+    tier = presence_tier(chat_id)
+    aura = current_effective_aura(chat_id, phase_now())
+    base = normalize_hourly_text(text)
+    variants = [base]
+
+    if lang == "en":
+        if tier in {"rich", "warm"}:
+            variants.append(f"{base} Wishing everyone a beautiful moment ahead.")
+            variants.append(f"Just a little note for this group — {base}")
+        if taste == "classy":
+            variants.append(f"{base} May the mood stay elegant and steady.")
+        elif taste == "soft":
+            variants.append(f"{base} Hope the heart feels a little softer today.")
+        elif taste == "minimal":
+            variants.append(base.replace(" everyone", ""))
+    else:
+        if tier in {"rich", "warm"}:
+            variants.append(f"{base} এই group-এর সবার জন্য রইল কোমল শুভেচ্ছা।")
+            variants.append(f"আজকের জন্য শুধু এটুকুই — {base}")
+        if taste == "classy":
+            variants.append(f"{base} আজকের সময়টা হোক স্থির, সুন্দর আর মার্জিত।")
+        elif taste == "soft":
+            variants.append(f"{base} মনটা আজ একটু নরম আর হালকা থাকুক।")
+        elif taste == "minimal":
+            variants.append(base.replace("সবাইকে", "").strip())
+
+    if kind in {"hourly", "welcome"}:
+        aura_line = aura_hourly_phrase(chat_id, lang, phase_now())
+        if lang == "en":
+            if aura == "moonlight":
+                variants.append(f"{base} {aura_line}")
+            elif aura == "rose-gold":
+                variants.append(f"{base} {aura_line}")
+            elif aura == "crystal-morning":
+                variants.append(f"{aura_line} {base}")
+            else:
+                variants.append(f"{base} {aura_line}")
+        else:
+            if aura == "crystal-morning":
+                variants.append(f"{aura_line} {base}")
+            else:
+                variants.append(f"{base} {aura_line}")
+
+    cleaned = []
+    seen = set()
+    for v in variants:
+        v = normalize_hourly_text(v)
+        if not v or len(v) > AI_MAX_TEXT_LEN:
+            continue
+        if v not in seen:
+            seen.add(v)
+            cleaned.append(v)
+    return cleaned or [base]
+
+
+def pick_hourly_message(chat_id: int, lang: str, phase: str, pool: list[str]) -> str:
+    candidates = [normalize_hourly_text(x) for x in pool if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)]
+    if not candidates:
+        candidates = [normalize_hourly_text(x) for x in build_fallback_messages(lang, phase, mood=peek_hourly_mood(chat_id), festival_key=(current_festival() or {}).get("key", "")) if is_valid_hourly_text(normalize_hourly_text(x), lang, phase)]
+    candidates = filter_pool_by_taste(chat_id, candidates)
+
+    expanded = []
+    for c in candidates:
+        expanded.extend(variantize_message_text(chat_id, lang, c, kind="hourly"))
+
+    final_pool = []
+    for cand in expanded:
+        if not was_recent_duplicate_text(chat_id, "hourly", cand, lookback_days=3):
+            final_pool.append(cand)
+    if not final_pool:
+        final_pool = expanded or candidates or build_fallback_messages(lang, phase, mood=peek_hourly_mood(chat_id), festival_key=(current_festival() or {}).get("key", ""))
+
+    recent = recent_hourly_by_chat[chat_id]
+    recent_sigs = {structure_signature(y) for y in recent}
+    choices = [x for x in final_pool if x not in recent and structure_signature(x) not in recent_sigs]
+    if not choices:
+        choices = final_pool
+    text = random.choice(choices)
+    recent.append(text)
+    record_sent_history(chat_id, "hourly", text)
+    return text
+
+
+async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, user):
+    ensure_group(chat_id, title or "")
+    group = get_group(chat_id)
+    if not group or int(group["enabled"]) != 1 or user.is_bot:
+        return
+    if is_recent_duplicate(chat_id, user.id):
+        return
+    if time.time() - get_last_join_time(chat_id, user.id) < REJOIN_IGNORE_SECONDS:
+        return
+
+    lang = get_group_lang(chat_id)
+    first_name = clean_name(user.first_name)
+    mention_name = user.mention_html(first_name)
+    save_join_time(chat_id, user.id)
+
+    burst_mode = is_join_burst(chat_id)
+    if burst_mode:
+        try:
+            compact = t(lang, "burst_compact", name=mention_name, group=(title or ("our group" if lang == "en" else "আমাদের গ্রুপ")))
+            variants = variantize_message_text(chat_id, lang, compact, kind="welcome")
+            compact = next((v for v in variants if not was_recent_duplicate_text(chat_id, "welcome", v, 2)), variants[0])
+            msg = await send_text_with_retry(context.bot, chat_id=chat_id, text=compact, parse_mode=ParseMode.HTML)
+            record_sent_history(chat_id, "welcome", compact)
+            set_group_value(chat_id, "last_primary_msg_id", msg.message_id)
+            increment_group_counter(chat_id, "total_welcome_sent")
+            set_group_value(chat_id, "last_welcome_at", int(time.time()))
+            asyncio.create_task(schedule_delete(context.bot, chat_id, msg.message_id, WELCOME_DELETE_AFTER))
+            await maybe_send_milestone(context, chat_id, title or "", lang)
+        except Exception:
+            logger.exception("Compact burst welcome failed in %s", chat_id)
+        return
+
+    text_welcome, voice_text = welcome_texts(lang, mention_name, first_name, title or "", group["custom_welcome"], chat_id=chat_id)
+    variants = variantize_message_text(chat_id, lang, text_welcome, kind="welcome")
+    text_welcome = next((v for v in variants if not was_recent_duplicate_text(chat_id, "welcome", v, 2)), variants[0])
+    voice_text = personalize_voice_text(voice_text, first_name, lang, chat_id=chat_id)
+    await delete_previous_welcome(context, chat_id)
+
+    primary = None
+    voice_msg = None
+    voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
+    try:
+        style = current_welcome_style(chat_id)
+        footer = current_footer_text(chat_id)
+        style, footer, festival = effective_style_footer(chat_id, style, footer)
+        if festival and len(text_welcome) < 900:
+            fest_name = festival["name_bn"] if lang == "bn" else festival["name_en"]
+            text_welcome = f"{text_welcome}\n\n✨ {fest_name}"
+        member_count = None
+        try:
+            member_count = await context.bot.get_chat_member_count(chat_id)
+        except Exception:
+            member_count = None
+        profile_bytes = await fetch_profile_photo_bytes(context.bot, user.id)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang, style=style, footer=footer, profile_bytes=profile_bytes, member_count=member_count)
+        try:
+            primary = await send_photo_with_retry(context.bot, chat_id=chat_id, photo=cover, caption=text_welcome, parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Photo welcome failed in chat %s, switching to text-only", chat_id)
+            primary = await send_text_with_retry(context.bot, chat_id=chat_id, text=re.sub(r"<[^>]+>", "", text_welcome))
+
+        if int(group["voice_enabled"]) == 1 and primary:
+            try:
+                voice_name = selected_voice_name(lang, chat_id)
+                await make_voice_file(voice_text, voice_name, voice_path)
+                voice_msg = await send_voice_with_retry(context.bot, chat_id=chat_id, voice=voice_path.read_bytes(), caption=t(lang, "welcome_voice_caption"))
+            except Exception:
+                logger.exception("Voice welcome failed in chat %s; keeping banner/text only", chat_id)
+
+        set_group_value(chat_id, "last_primary_msg_id", primary.message_id if primary else None)
+        set_group_value(chat_id, "last_voice_msg_id", voice_msg.message_id if voice_msg else None)
+        set_group_value(chat_id, "updated_at", int(time.time()))
+        set_group_value(chat_id, "last_welcome_at", int(time.time()))
+        increment_group_counter(chat_id, "total_welcome_sent")
+        record_sent_history(chat_id, "welcome", re.sub(r"<[^>]+>", "", text_welcome))
+        if primary:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, primary.message_id, WELCOME_DELETE_AFTER))
+        if voice_msg:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, voice_msg.message_id, WELCOME_DELETE_AFTER))
+        await maybe_send_milestone(context, chat_id, title or "", lang)
+    except Exception:
+        logger.exception("Welcome failed in chat %s for user %s", chat_id, user.id)
+    finally:
+        if voice_path.exists():
+            try:
+                voice_path.unlink()
+            except Exception:
+                pass
+
+# ===== end Aura Themes + Story Welcome Pack overrides =====
+
+
 def main():
     init_db()
     ensure_behavior_db()
