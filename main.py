@@ -230,6 +230,28 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS rps_games (
+                game_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER,
+                creator_id INTEGER NOT NULL,
+                creator_name TEXT NOT NULL,
+                player1_id INTEGER NOT NULL,
+                player1_name TEXT NOT NULL,
+                player2_id INTEGER,
+                player2_name TEXT,
+                mode TEXT NOT NULL,
+                p1_choice TEXT,
+                p2_choice TEXT,
+                status TEXT NOT NULL,
+                winner TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
 
         existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
         migrations = {
@@ -2722,6 +2744,335 @@ def hourly_loop():
             logger.exception("hourly_loop failed")
         time.sleep(60)
 
+
+
+def rps_make_id() -> str:
+    return f"rps{int(time.time() * 1000)}{random.randint(100, 999)}"
+
+
+def rps_now() -> int:
+    return int(time.time())
+
+
+def rps_create_game(chat_id: int, creator_id: int, creator_name: str, mode: str) -> str:
+    game_id = rps_make_id()
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO rps_games (
+                game_id, chat_id, message_id, creator_id, creator_name,
+                player1_id, player1_name, player2_id, player2_name,
+                mode, p1_choice, p2_choice, status, winner, created_at, updated_at
+            ) VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, NULL, ?, ?)
+            """,
+            (
+                game_id, chat_id, creator_id, creator_name,
+                creator_id, creator_name,
+                0 if mode == "bot" else None,
+                BOT_NAME if mode == "bot" else None,
+                mode,
+                "choosing" if mode == "bot" else "waiting",
+                rps_now(), rps_now(),
+            ),
+        )
+        conn.commit()
+    return game_id
+
+
+def rps_get_game(game_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM rps_games WHERE game_id = ?", (game_id,)).fetchone()
+
+
+def rps_set_message_id(game_id: str, message_id: int):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE rps_games SET message_id = ?, updated_at = ? WHERE game_id = ?",
+            (message_id, rps_now(), game_id),
+        )
+        conn.commit()
+
+
+def rps_update_player2(game_id: str, user_id: int, user_name: str):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE rps_games SET player2_id = ?, player2_name = ?, status = 'choosing', updated_at = ? WHERE game_id = ?",
+            (user_id, user_name, rps_now(), game_id),
+        )
+        conn.commit()
+
+
+def rps_save_state(game_id: str, p1_choice: Optional[str], p2_choice: Optional[str], status: str, winner: Optional[str] = None):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE rps_games SET p1_choice = ?, p2_choice = ?, status = ?, winner = ?, updated_at = ? WHERE game_id = ?",
+            (p1_choice, p2_choice, status, winner, rps_now(), game_id),
+        )
+        conn.commit()
+
+
+def rps_delete_game(game_id: str):
+    with db_connect() as conn:
+        conn.execute("DELETE FROM rps_games WHERE game_id = ?", (game_id,))
+        conn.commit()
+
+
+def rps_choice_label(choice: Optional[str]) -> str:
+    mapping = {
+        "rock": "🪨 Rock",
+        "paper": "📄 Paper",
+        "scissors": "✂️ Scissors",
+    }
+    return mapping.get((choice or "").lower(), "—")
+
+
+def rps_hidden_status(choice: Optional[str]) -> str:
+    return "✅ Ready" if choice else "⌛ Choosing..."
+
+
+def rps_winner(p1_choice: str, p2_choice: str) -> str:
+    if p1_choice == p2_choice:
+        return "draw"
+    wins = {
+        ("rock", "scissors"),
+        ("paper", "rock"),
+        ("scissors", "paper"),
+    }
+    return "p1" if (p1_choice, p2_choice) in wins else "p2"
+
+
+def rps_render_text(game, note: str = "") -> str:
+    mode_text = "Bot Match" if game["mode"] == "bot" else "Player vs Player"
+    p2_name = game["player2_name"] or (BOT_NAME if game["mode"] == "bot" else "Waiting...")
+    lines = [
+        "🎮 <b>Rock Paper Scissors</b>",
+        f"<i>{html.escape(mode_text)}</i>",
+        "",
+        f"👤 <b>{html.escape(game['player1_name'] or 'Player 1')}</b>",
+    ]
+    if game["status"] == "waiting":
+        lines.append("   ✅ Ready")
+    elif game["status"] == "choosing":
+        lines.append(f"   {rps_hidden_status(game['p1_choice'])}")
+    else:
+        lines.append(f"   {html.escape(rps_choice_label(game['p1_choice']))}")
+
+    lines.append("")
+    lines.append(f"🤝 <b>{html.escape(p2_name)}</b>")
+    if game["status"] == "waiting":
+        lines.append("   ⌛ Waiting to join...")
+    elif game["status"] == "choosing":
+        lines.append(f"   {rps_hidden_status(game['p2_choice'])}")
+    else:
+        lines.append(f"   {html.escape(rps_choice_label(game['p2_choice']))}")
+
+    if game["status"] == "waiting":
+        lines += ["", "Open challenge created."]
+    elif game["status"] == "choosing":
+        lines += ["", "Choices stay hidden until both players pick."]
+    elif game["status"] == "done":
+        lines.append("")
+        if game["winner"] == "draw":
+            lines.append("⚖️ <b>Draw!</b>")
+        elif game["winner"] == "p1":
+            lines.append(f"🏆 <b>{html.escape(game['player1_name'])} wins!</b>")
+        elif game["winner"] == "p2":
+            lines.append(f"🏆 <b>{html.escape(game['player2_name'] or BOT_NAME)} wins!</b>")
+
+    if note:
+        lines += ["", html.escape(note)]
+    return "\n".join(lines)
+
+
+def rps_markup(game) -> InlineKeyboardMarkup:
+    gid = game["game_id"]
+    if game["status"] == "waiting":
+        return InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Join", callback_data=f"rps|{gid}|join|0"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"rps|{gid}|cancel|0"),
+            ]
+        ])
+    if game["status"] == "choosing":
+        return InlineKeyboardMarkup([
+            [InlineKeyboardButton("🪨 Rock", callback_data=f"rps|{gid}|pick|rock")],
+            [InlineKeyboardButton("📄 Paper", callback_data=f"rps|{gid}|pick|paper")],
+            [InlineKeyboardButton("✂️ Scissors", callback_data=f"rps|{gid}|pick|scissors")],
+            [InlineKeyboardButton("🔒 Close", callback_data=f"rps|{gid}|close|0")],
+        ])
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("🔁 Rematch", callback_data=f"rps|{gid}|rematch|0"),
+            InlineKeyboardButton("🗑 Close", callback_data=f"rps|{gid}|close|0"),
+        ]
+    ])
+
+
+async def rps_safe_answer(query, text: str = "", alert: bool = False):
+    try:
+        await query.answer(text=text[:180] if text else None, show_alert=alert)
+    except Exception:
+        pass
+
+
+async def rps_delete_message(context: ContextTypes.DEFAULT_TYPE, game) -> bool:
+    try:
+        await context.bot.delete_message(chat_id=int(game["chat_id"]), message_id=int(game["message_id"]))
+        return True
+    except Exception:
+        return False
+
+
+async def rps_close_message(context: ContextTypes.DEFAULT_TYPE, query, game, note: str):
+    rps_save_state(game["game_id"], game["p1_choice"], game["p2_choice"], "cancelled", None)
+    deleted = await rps_delete_message(context, game)
+    if not deleted:
+        try:
+            await query.edit_message_text(
+                f"🎮 <b>Rock Paper Scissors</b>\n\n{html.escape(note)}",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception:
+            pass
+    rps_delete_game(game["game_id"])
+
+
+async def on_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user:
+        return
+    mode = "bot" if (context.args and context.args[0].strip().lower() == "bot") else "pvp"
+    creator_name = clean_name(user.full_name or user.first_name or "Player")
+    game_id = rps_create_game(chat.id, user.id, creator_name, mode)
+    game = rps_get_game(game_id)
+    note = "Choose your move against Maya." if mode == "bot" else "Open challenge created."
+    try:
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except Exception:
+        pass
+    sent = await msg.reply_text(
+        rps_render_text(game, note),
+        reply_markup=rps_markup(game),
+        parse_mode=ParseMode.HTML,
+    )
+    rps_set_message_id(game_id, sent.message_id)
+
+
+async def on_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user = update.effective_user
+    if not query or not user or not query.data:
+        return
+    try:
+        _, game_id, action, value = query.data.split("|", 3)
+    except ValueError:
+        await rps_safe_answer(query, "Invalid action.", alert=True)
+        return
+
+    game = rps_get_game(game_id)
+    if not game:
+        await rps_safe_answer(query, "Game not found.", alert=True)
+        return
+
+    player_ids = {int(game["player1_id"])}
+    if game["player2_id"] is not None:
+        player_ids.add(int(game["player2_id"]))
+
+    if action == "join":
+        if game["status"] != "waiting":
+            await rps_safe_answer(query, "This game already started.", alert=True)
+            return
+        if int(game["creator_id"]) == int(user.id):
+            await rps_safe_answer(query, "Another player needs to join.", alert=True)
+            return
+        rps_update_player2(game_id, user.id, clean_name(user.full_name or user.first_name or "Player"))
+        game = rps_get_game(game_id)
+        await rps_safe_answer(query, "Joined.")
+        await query.edit_message_text(rps_render_text(game, "Both players can choose now."), reply_markup=rps_markup(game), parse_mode=ParseMode.HTML)
+        return
+
+    if action == "cancel":
+        if int(game["creator_id"]) != int(user.id):
+            await rps_safe_answer(query, "Only the creator can cancel.", alert=True)
+            return
+        await rps_safe_answer(query, "Challenge cancelled.")
+        await rps_close_message(context, query, game, "Challenge cancelled.")
+        return
+
+    if action == "close":
+        if int(user.id) not in player_ids:
+            await rps_safe_answer(query, "Only players can close this game.", alert=True)
+            return
+        await rps_safe_answer(query, "Game closed.")
+        await rps_close_message(context, query, game, "Game closed.")
+        return
+
+    if action == "rematch":
+        if int(user.id) not in player_ids:
+            await rps_safe_answer(query, "Only players can rematch.", alert=True)
+            return
+        if game["mode"] == "pvp" and (game["player2_id"] is None or int(game["player2_id"]) <= 0):
+            await rps_safe_answer(query, "Another player needs to join first.", alert=True)
+            return
+        rps_save_state(game_id, None, None, "choosing", None)
+        game = rps_get_game(game_id)
+        await rps_safe_answer(query, "Rematch started.")
+        await query.edit_message_text(rps_render_text(game, "New round. Choices stay hidden until both pick."), reply_markup=rps_markup(game), parse_mode=ParseMode.HTML)
+        return
+
+    if action == "pick":
+        if game["status"] != "choosing":
+            await rps_safe_answer(query, "This round is not active.", alert=True)
+            return
+        if value not in {"rock", "paper", "scissors"}:
+            await rps_safe_answer(query, "Invalid move.", alert=True)
+            return
+
+        uid = int(user.id)
+        p1_id = int(game["player1_id"])
+        p2_id = int(game["player2_id"] or 0)
+        p1_choice = game["p1_choice"]
+        p2_choice = game["p2_choice"]
+
+        if uid == p1_id:
+            if p1_choice:
+                await rps_safe_answer(query, "You already chose.", alert=True)
+                return
+            p1_choice = value
+        elif game["mode"] == "pvp" and uid == p2_id:
+            if p2_choice:
+                await rps_safe_answer(query, "You already chose.", alert=True)
+                return
+            p2_choice = value
+        else:
+            await rps_safe_answer(query, "Only the two players can choose.", alert=True)
+            return
+
+        if game["mode"] == "bot":
+            p2_choice = random.choice(["rock", "paper", "scissors"])
+            winner = rps_winner(p1_choice, p2_choice)
+            rps_save_state(game_id, p1_choice, p2_choice, "done", winner)
+            game = rps_get_game(game_id)
+            await rps_safe_answer(query, "Move locked.")
+            await query.edit_message_text(rps_render_text(game, "Round finished."), reply_markup=rps_markup(game), parse_mode=ParseMode.HTML)
+            return
+
+        if p1_choice and p2_choice:
+            winner = rps_winner(p1_choice, p2_choice)
+            rps_save_state(game_id, p1_choice, p2_choice, "done", winner)
+            game = rps_get_game(game_id)
+            await rps_safe_answer(query, "Move locked.")
+            await query.edit_message_text(rps_render_text(game, "Both choices locked. Result revealed."), reply_markup=rps_markup(game), parse_mode=ParseMode.HTML)
+            return
+
+        rps_save_state(game_id, p1_choice, p2_choice, "choosing", None)
+        game = rps_get_game(game_id)
+        await rps_safe_answer(query, "Choice locked.")
+        await query.edit_message_text(rps_render_text(game, "One choice locked. Waiting for the other player."), reply_markup=rps_markup(game), parse_mode=ParseMode.HTML)
+        return
+
 async def post_init(application: Application):
     delete_webhook()
     commands = [
@@ -2751,7 +3102,9 @@ async def post_init(application: Application):
         BotCommand("status", "Show group status"),
         BotCommand("testwelcome", "Send test welcome"),
         BotCommand("broadcast", "Owner: broadcast text or replied media"),
-        BotCommand("xo", "Play XO | /xo bot"),
+        BotCommand("xo", "Play X-O / use /xo bot"),
+        BotCommand("rps", "Play RPS / use /rps bot"),
+        BotCommand("luckybox", "Open a Lucky Box game"),
     ]
     await application.bot.set_my_commands(commands)
 
@@ -3620,7 +3973,11 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("testwelcome", on_testwelcome))
     application.add_handler(CommandHandler("broadcast", on_broadcast))
     application.add_handler(CommandHandler("xo", on_xo))
+    application.add_handler(CommandHandler("rps", on_rps))
+    application.add_handler(CommandHandler("luckybox", on_luckybox))
     application.add_handler(CallbackQueryHandler(on_xo_callback, pattern=r"^xo\|"))
+    application.add_handler(CallbackQueryHandler(on_rps_callback, pattern=r"^rps\|"))
+    application.add_handler(CallbackQueryHandler(on_luckybox_callback, pattern=r"^lb\|"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
     application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
     application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
@@ -5161,405 +5518,376 @@ async def on_xo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 
+# ===== Lucky Box game pack =====
+def ensure_luckybox_db():
+    with db_connect() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS luckybox_rounds (
+                game_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER,
+                creator_id INTEGER NOT NULL,
+                creator_name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                winning_box INTEGER NOT NULL,
+                winner_id INTEGER,
+                winner_name TEXT,
+                total_boxes INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS luckybox_plays (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                game_id TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                user_name TEXT NOT NULL,
+                box_index INTEGER NOT NULL,
+                result_kind TEXT NOT NULL,
+                result_text TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                UNIQUE(game_id, user_id),
+                UNIQUE(game_id, box_index)
+            )
+            """
+        )
+        conn.commit()
 
-# ===== RPS game pack =====
 
-RPS_GAMES: dict[str, dict] = {}
-RPS_CHOICES = {"rock": "🪨 Rock", "paper": "📄 Paper", "scissors": "✂️ Scissors"}
-RPS_BEATS = {"rock": "scissors", "paper": "rock", "scissors": "paper"}
-
-
-def rps_now() -> int:
+def lb_now() -> int:
     return int(time.time())
 
 
-def rps_make_id() -> str:
-    return f"rps{rps_now()}{random.randint(1000, 9999)}"
+def lb_make_id() -> str:
+    return f"lb{lb_now()}{random.randint(1000,9999)}"
 
 
-def rps_create_game(chat_id: int, creator_id: int, creator_name: str, mode: str) -> dict:
-    game_id = rps_make_id()
-    game = {
-        "game_id": game_id,
-        "chat_id": chat_id,
-        "creator_id": creator_id,
-        "creator_name": creator_name,
-        "mode": mode,
-        "player1_id": creator_id,
-        "player1_name": creator_name,
-        "player2_id": 0 if mode == "bot" else None,
-        "player2_name": BOT_NAME if mode == "bot" else None,
-        "status": "choosing" if mode == "bot" else "waiting",
-        "p1_choice": None,
-        "p2_choice": None,
-        "winner": None,
-        "message_id": None,
-        "updated_at": rps_now(),
+def lb_create_round(chat_id: int, creator_id: int, creator_name: str, total_boxes: int = 5) -> str:
+    game_id = lb_make_id()
+    winning_box = random.randint(0, max(0, total_boxes - 1))
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO luckybox_rounds (
+                game_id, chat_id, message_id, creator_id, creator_name, status,
+                winning_box, winner_id, winner_name, total_boxes, created_at, updated_at
+            ) VALUES (?, ?, NULL, ?, ?, 'active', ?, NULL, NULL, ?, ?, ?)
+            """,
+            (game_id, chat_id, creator_id, creator_name, winning_box, total_boxes, lb_now(), lb_now()),
+        )
+        conn.commit()
+    return game_id
+
+
+def lb_get_round(game_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM luckybox_rounds WHERE game_id = ?", (game_id,)).fetchone()
+
+
+def lb_set_message_id(game_id: str, message_id: int):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE luckybox_rounds SET message_id = ?, updated_at = ? WHERE game_id = ?",
+            (message_id, lb_now(), game_id),
+        )
+        conn.commit()
+
+
+def lb_get_plays(game_id: str):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM luckybox_plays WHERE game_id = ? ORDER BY box_index ASC, id ASC",
+            (game_id,),
+        ).fetchall()
+
+
+def lb_user_play(game_id: str, user_id: int):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM luckybox_plays WHERE game_id = ? AND user_id = ?",
+            (game_id, user_id),
+        ).fetchone()
+
+
+def lb_box_play(game_id: str, box_index: int):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM luckybox_plays WHERE game_id = ? AND box_index = ?",
+            (game_id, box_index),
+        ).fetchone()
+
+
+def lb_record_play(game_id: str, user_id: int, user_name: str, box_index: int, result_kind: str, result_text: str):
+    with db_connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO luckybox_plays (
+                game_id, user_id, user_name, box_index, result_kind, result_text, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (game_id, user_id, user_name, box_index, result_kind, result_text, lb_now()),
+        )
+        conn.commit()
+
+
+def lb_finish_round(game_id: str, winner_id: int, winner_name: str):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE luckybox_rounds SET status = 'done', winner_id = ?, winner_name = ?, updated_at = ? WHERE game_id = ?",
+            (winner_id, winner_name, lb_now(), game_id),
+        )
+        conn.commit()
+
+
+def lb_reset_round(game_id: str):
+    round_row = lb_get_round(game_id)
+    if not round_row:
+        return
+    winning_box = random.randint(0, max(0, int(round_row['total_boxes']) - 1))
+    with db_connect() as conn:
+        conn.execute("DELETE FROM luckybox_plays WHERE game_id = ?", (game_id,))
+        conn.execute(
+            """
+            UPDATE luckybox_rounds
+            SET status = 'active', winning_box = ?, winner_id = NULL, winner_name = NULL, updated_at = ?
+            WHERE game_id = ?
+            """,
+            (winning_box, lb_now(), game_id),
+        )
+        conn.commit()
+
+
+def lb_delete_round(game_id: str):
+    with db_connect() as conn:
+        conn.execute("DELETE FROM luckybox_plays WHERE game_id = ?", (game_id,))
+        conn.execute("DELETE FROM luckybox_rounds WHERE game_id = ?", (game_id,))
+        conn.commit()
+
+
+def lb_result_text(lang: str, result_kind: str, box_num: int) -> str:
+    pool = {
+        'jackpot': [
+            f"🎉 Jackpot! তুমি Lucky Box {box_num} খুলে today\'s glow winner হয়েছো.",
+            f"🏆 Lucky Box {box_num} তোমার জন্য jackpot লুকিয়ে রেখেছিল.",
+            f"✨ তোমার pick একদম ঠিক ছিল — Box {box_num} was the lucky one.",
+        ],
+        'miss': [
+            f"😅 Box {box_num} empty vibe দিল — একটু হলে luck ধরে ফেলতে.",
+            f"🎁 Box {box_num} আজ শুধু suspense দিল, reward না.",
+            f"🌫️ Box {box_num} close one ছিল, but not the lucky one.",
+            f"🫠 Box {box_num} খুলে cute disappointment পাওয়া গেল.",
+            f"🍀 আজ luck পাশ দিয়ে হেঁটে গেল — Box {box_num} না.",
+        ],
     }
-    RPS_GAMES[game_id] = game
-    return game
+    return random.choice(pool[result_kind])
 
 
-def rps_get_game(game_id: str):
-    return RPS_GAMES.get(game_id)
-
-
-def rps_set_message_id(game_id: str, message_id: int):
-    game = RPS_GAMES.get(game_id)
-    if game:
-        game["message_id"] = message_id
-        game["updated_at"] = rps_now()
-
-
-def rps_delete_game(game_id: str):
-    RPS_GAMES.pop(game_id, None)
-
-
-def rps_choices_ready(game: dict) -> bool:
-    return bool(game.get("p1_choice")) and bool(game.get("p2_choice"))
-
-
-def rps_result_text(game: dict) -> tuple[str, Optional[int]]:
-    p1 = game.get("p1_choice")
-    p2 = game.get("p2_choice")
-    if not p1 or not p2:
-        return "", None
-    if p1 == p2:
-        return "🤝 Draw game.", None
-    if RPS_BEATS[p1] == p2:
-        return f"🏆 {game['player1_name']} wins!", int(game["player1_id"])
-    return f"🏆 {game['player2_name']} wins!", int(game["player2_id"] or 0)
-
-
-def rps_wait_label(chosen: Optional[str]) -> str:
-    return "✅ Locked" if chosen else "⌛ Waiting"
-
-
-def rps_render_text(game: dict, note: str = "") -> str:
-    lines = ["🎮 <b>Rock • Paper • Scissors</b>"]
-    if game["mode"] == "bot":
-        lines.append(f"🤖 Mode: <b>{html.escape(BOT_NAME)}</b> battle")
-    else:
-        lines.append("👥 Mode: <b>Player vs Player</b>")
-    lines.append(f"\n🅰️ <b>{html.escape(game['player1_name'])}</b>")
-    if game["status"] == "waiting":
-        lines.append("🅱️ <i>Waiting for player 2...</i>")
-    else:
-        lines.append(f"🅱️ <b>{html.escape(game['player2_name'] or 'Player 2')}</b>")
-
-    if game["status"] == "waiting":
-        lines.append("\nTap <b>Join</b> to start, or creator can cancel.")
-    elif game["status"] == "choosing":
-        if game["mode"] == "bot":
-            lines.append("\nChoose your move. The bot will reveal after you lock yours.")
-        else:
-            lines.append("\nBoth players choose secretly. Choices stay hidden until both lock.")
-            lines.append(f"🅰️ {html.escape(game['player1_name'])}: {rps_wait_label(game['p1_choice'])}")
-            lines.append(f"🅱️ {html.escape(game['player2_name'] or 'Player 2')}: {rps_wait_label(game['p2_choice'])}")
-    else:
-        p1_label = RPS_CHOICES.get(game.get("p1_choice"), "—")
-        p2_label = RPS_CHOICES.get(game.get("p2_choice"), "—")
-        lines.append("\n<b>Result</b>")
-        lines.append(f"🅰️ {html.escape(game['player1_name'])}: {p1_label}")
-        lines.append(f"🅱️ {html.escape(game['player2_name'] or 'Player 2')}: {p2_label}")
-        result_line, _ = rps_result_text(game)
-        if result_line:
-            lines.append(result_line)
-
+def lb_render_text(round_row, note: str = "") -> str:
+    creator = html.escape(round_row['creator_name'])
+    plays = lb_get_plays(round_row['game_id'])
+    opened = len(plays)
+    total = int(round_row['total_boxes'])
+    winner_name = html.escape(round_row['winner_name'] or "")
+    lines = [
+        "🎁 <b>Lucky Box</b>",
+        f"Creator: <b>{creator}</b>",
+        f"Opened: <b>{opened}/{total}</b>",
+    ]
+    if round_row['status'] == 'active':
+        lines.append("One lucky box hides today\'s win. Each player can open only one box.")
+    elif round_row['status'] == 'done':
+        lines.append(f"🏆 Winner: <b>{winner_name}</b>")
+    elif round_row['status'] == 'closed':
+        lines.append("Round closed.")
     if note:
-        lines.append(f"\n<i>{html.escape(note)}</i>")
+        lines.append("")
+        lines.append(html.escape(note))
+    if plays:
+        preview = []
+        for row in plays[:5]:
+            mark = "🏆" if row['result_kind'] == 'jackpot' else '❌'
+            preview.append(f"{mark} {html.escape(row['user_name'])} → Box {int(row['box_index']) + 1}")
+        lines.append("")
+        lines.append("Recent opens:")
+        lines.extend(preview)
     return "\n".join(lines)
 
 
-def rps_markup(game: dict) -> InlineKeyboardMarkup:
+def lb_markup(round_row) -> InlineKeyboardMarkup:
+    gid = round_row['game_id']
+    plays = {int(r['box_index']): r for r in lb_get_plays(gid)}
     rows = []
-    if game["status"] == "waiting":
+    row = []
+    for idx in range(int(round_row['total_boxes'])):
+        if idx in plays:
+            label = f"🏆 {idx + 1}" if plays[idx]['result_kind'] == 'jackpot' and round_row['status'] == 'done' else f"📦 {idx + 1}"
+            cb = f"lb|{gid}|noop|{idx}"
+        else:
+            label = f"🎁 Box {idx + 1}"
+            cb = f"lb|{gid}|pick|{idx}"
+        row.append(InlineKeyboardButton(label, callback_data=cb))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    if round_row['status'] == 'active':
         rows.append([
-            InlineKeyboardButton("🤝 Join", callback_data=f"rps|{game['game_id']}|join|0"),
-            InlineKeyboardButton("✖️ Cancel", callback_data=f"rps|{game['game_id']}|cancel|0"),
-        ])
-    elif game["status"] == "choosing":
-        rows.append([
-            InlineKeyboardButton("🪨 Rock", callback_data=f"rps|{game['game_id']}|pick|rock"),
-            InlineKeyboardButton("📄 Paper", callback_data=f"rps|{game['game_id']}|pick|paper"),
-            InlineKeyboardButton("✂️ Scissors", callback_data=f"rps|{game['game_id']}|pick|scissors"),
-        ])
-        rows.append([
-            InlineKeyboardButton("🗑 Close", callback_data=f"rps|{game['game_id']}|close|0"),
+            InlineKeyboardButton("🔄 New Round", callback_data=f"lb|{gid}|reroll|0"),
+            InlineKeyboardButton("🗑 Close", callback_data=f"lb|{gid}|close|0"),
         ])
     else:
         rows.append([
-            InlineKeyboardButton("🔄 Rematch", callback_data=f"rps|{game['game_id']}|rematch|0"),
-            InlineKeyboardButton("🗑 Close", callback_data=f"rps|{game['game_id']}|close|0"),
+            InlineKeyboardButton("🔄 New Round", callback_data=f"lb|{gid}|reroll|0"),
+            InlineKeyboardButton("🗑 Close", callback_data=f"lb|{gid}|close|0"),
         ])
     return InlineKeyboardMarkup(rows)
 
 
-async def rps_safe_answer(query, text: str = "", alert: bool = False):
+async def lb_safe_answer(query, text: str = "", alert: bool = False):
     try:
-        await query.answer(text=text, show_alert=alert)
+        await query.answer(text=text[:180] if text else None, show_alert=alert)
     except Exception:
         pass
 
 
-async def rps_delete_message(context: ContextTypes.DEFAULT_TYPE, game: dict) -> bool:
+async def lb_delete_message(context: ContextTypes.DEFAULT_TYPE, round_row) -> bool:
     try:
-        if game.get("message_id"):
-            await context.bot.delete_message(chat_id=game["chat_id"], message_id=game["message_id"])
-            return True
+        await context.bot.delete_message(chat_id=int(round_row['chat_id']), message_id=int(round_row['message_id']))
+        return True
     except Exception:
-        pass
-    return False
+        return False
 
 
-async def rps_close_game_message(context: ContextTypes.DEFAULT_TYPE, query, game: dict, note: str):
-    game["status"] = "closed"
-    deleted = await rps_delete_message(context, game)
+async def lb_close_message(context: ContextTypes.DEFAULT_TYPE, query, round_row, note: str):
+    with db_connect() as conn:
+        conn.execute("UPDATE luckybox_rounds SET status = 'closed', updated_at = ? WHERE game_id = ?", (lb_now(), round_row['game_id']))
+        conn.commit()
+    deleted = await lb_delete_message(context, round_row)
     if not deleted:
         try:
-            await query.edit_message_text(f"🗑 {html.escape(note)}")
+            await query.edit_message_text(f"🎁 <b>Lucky Box</b>\n\n{html.escape(note)}", parse_mode=ParseMode.HTML)
         except Exception:
             pass
-    rps_delete_game(game["game_id"])
+    lb_delete_round(round_row['game_id'])
 
 
-async def on_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_luckybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message
     chat = update.effective_chat
     user = update.effective_user
-    if not chat or not user:
+    if not msg or not chat or not user:
         return
-    mode = "bot" if context.args and context.args[0].strip().lower() == "bot" else "pvp"
     creator_name = clean_name(user.full_name or user.first_name or "Player")
-    game = rps_create_game(chat.id, user.id, creator_name, mode)
-    note = "Battle the bot." if mode == "bot" else "Challenge created. Waiting for another player."
-    sent = await update.effective_message.reply_text(
-        rps_render_text(game, note),
-        reply_markup=rps_markup(game),
-        parse_mode=ParseMode.HTML,
-    )
-    rps_set_message_id(game["game_id"], sent.message_id)
-
-
-async def rps_edit_game(query, game: dict, note: str = ""):
+    game_id = lb_create_round(chat.id, user.id, creator_name, 5)
+    round_row = lb_get_round(game_id)
     try:
-        await query.edit_message_text(
-            rps_render_text(game, note),
-            reply_markup=rps_markup(game),
-            parse_mode=ParseMode.HTML,
-        )
+        await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
     except Exception:
         pass
+    sent = await msg.reply_text(
+        lb_render_text(round_row, "Pick one box. One lucky box is hiding the win."),
+        reply_markup=lb_markup(round_row),
+        parse_mode=ParseMode.HTML,
+    )
+    lb_set_message_id(game_id, sent.message_id)
 
 
-async def rps_run_bot(game: dict):
-    if game["mode"] != "bot" or game["status"] != "choosing" or not game.get("p1_choice"):
-        return game
-    game["p2_choice"] = random.choice(list(RPS_CHOICES.keys()))
-    game["status"] = "done"
-    game["winner"] = rps_result_text(game)[1]
-    game["updated_at"] = rps_now()
-    return game
-
-
-async def on_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def on_luckybox_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user = update.effective_user
     if not query or not user or not query.data:
         return
-    parts = query.data.split("|", 3)
-    if len(parts) != 4:
-        await rps_safe_answer(query, "Invalid game action.", alert=True)
+    try:
+        _, game_id, action, value = query.data.split("|", 3)
+    except ValueError:
+        await lb_safe_answer(query, "Invalid action.", alert=True)
         return
-    _, game_id, action, value = parts
-    game = rps_get_game(game_id)
-    if not game:
-        await rps_safe_answer(query, "Game not found.", alert=True)
+    round_row = lb_get_round(game_id)
+    if not round_row:
+        await lb_safe_answer(query, "Lucky Box not found.", alert=True)
         return
 
-    if action == "join":
-        if game["mode"] != "pvp":
-            await rps_safe_answer(query, "This is a bot battle.", alert=True)
+    if action == 'noop':
+        await lb_safe_answer(query, "This box is already opened.", alert=True)
+        return
+
+    if action == 'close':
+        if int(user.id) != int(round_row['creator_id']):
+            await lb_safe_answer(query, "Only the creator can close this round.", alert=True)
             return
-        if game["status"] != "waiting":
-            await rps_safe_answer(query, "This game already started.", alert=True)
+        await lb_safe_answer(query, "Lucky Box closed.")
+        await lb_close_message(context, query, round_row, "Lucky Box round closed.")
+        return
+
+    if action == 'reroll':
+        if int(user.id) != int(round_row['creator_id']):
+            await lb_safe_answer(query, "Only the creator can start a new round.", alert=True)
             return
-        if user.id == game["creator_id"]:
-            await rps_safe_answer(query, "Another player needs to join.", alert=True)
-            return
-        game["player2_id"] = user.id
-        game["player2_name"] = clean_name(user.full_name or user.first_name or "Player")
-        game["status"] = "choosing"
-        game["updated_at"] = rps_now()
-        await rps_safe_answer(query, "Joined.")
-        await rps_edit_game(query, game, "Game started. Choose secretly.")
+        lb_reset_round(game_id)
+        round_row = lb_get_round(game_id)
+        await lb_safe_answer(query, "New round started.")
+        await query.edit_message_text(
+            lb_render_text(round_row, "Fresh boxes are ready. Pick again."),
+            reply_markup=lb_markup(round_row),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    if action == "cancel":
-        if user.id != game["creator_id"]:
-            await rps_safe_answer(query, "Only the creator can cancel.", alert=True)
-            return
-        if game["status"] != "waiting":
-            await rps_safe_answer(query, "Game already started.", alert=True)
-            return
-        await rps_safe_answer(query, "Challenge cancelled.")
-        await rps_close_game_message(context, query, game, "Challenge cancelled.")
+    if action != 'pick':
+        await lb_safe_answer(query)
         return
 
-    if action == "close":
-        allowed_ids = {int(game["player1_id"])}
-        if game.get("player2_id"):
-            allowed_ids.add(int(game["player2_id"]))
-        if user.id not in allowed_ids and user.id != game["creator_id"]:
-            await rps_safe_answer(query, "Only players can close this game.", alert=True)
-            return
-        await rps_safe_answer(query, "Game closed.")
-        await rps_close_game_message(context, query, game, "Game closed.")
+    if round_row['status'] != 'active':
+        await lb_safe_answer(query, "This round is not active.", alert=True)
         return
 
-    if action == "rematch":
-        allowed_ids = {int(game["player1_id"])}
-        if game.get("player2_id"):
-            allowed_ids.add(int(game["player2_id"]))
-        if user.id not in allowed_ids:
-            await rps_safe_answer(query, "Only players can rematch.", alert=True)
-            return
-        game["p1_choice"] = None
-        game["p2_choice"] = None
-        game["winner"] = None
-        game["status"] = "choosing" if game["mode"] == "bot" or game.get("player2_id") else "waiting"
-        game["updated_at"] = rps_now()
-        await rps_safe_answer(query, "Rematch started.")
-        await rps_edit_game(query, game, "New round started.")
+    if lb_user_play(game_id, user.id):
+        await lb_safe_answer(query, "You already opened one box in this round.", alert=True)
         return
 
-    if action != "pick":
-        await rps_safe_answer(query)
+    idx = int(value)
+    if lb_box_play(game_id, idx):
+        await lb_safe_answer(query, "That box is already opened.", alert=True)
         return
 
-    if game["status"] != "choosing":
-        await rps_safe_answer(query, "This game is not active.", alert=True)
-        return
-    if value not in RPS_CHOICES:
-        await rps_safe_answer(query, "Invalid move.", alert=True)
-        return
-
-    if user.id == int(game["player1_id"]):
-        if game.get("p1_choice"):
-            await rps_safe_answer(query, "You already locked your move.", alert=True)
-            return
-        game["p1_choice"] = value
-    elif game["mode"] == "pvp" and user.id == int(game.get("player2_id") or 0):
-        if game.get("p2_choice"):
-            await rps_safe_answer(query, "You already locked your move.", alert=True)
-            return
-        game["p2_choice"] = value
-    else:
-        await rps_safe_answer(query, "You are not part of this game.", alert=True)
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    if idx == int(round_row['winning_box']):
+        result_kind = 'jackpot'
+        result_text = lb_result_text('bn', 'jackpot', idx + 1)
+        lb_record_play(game_id, user.id, uname, idx, result_kind, result_text)
+        lb_finish_round(game_id, user.id, uname)
+        round_row = lb_get_round(game_id)
+        await lb_safe_answer(query, result_text, alert=True)
+        await query.edit_message_text(
+            lb_render_text(round_row, f"{uname} opened the lucky box."),
+            reply_markup=lb_markup(round_row),
+            parse_mode=ParseMode.HTML,
+        )
         return
 
-    if game["mode"] == "bot":
-        game = await rps_run_bot(game)
-        await rps_safe_answer(query, "Move locked.")
-        await rps_edit_game(query, game, "Round finished.")
-        return
-
-    game["updated_at"] = rps_now()
-    if rps_choices_ready(game):
-        game["status"] = "done"
-        game["winner"] = rps_result_text(game)[1]
-        await rps_safe_answer(query, "Move locked.")
-        await rps_edit_game(query, game, "Both moves are in.")
-        return
-
-    await rps_safe_answer(query, "Move locked.")
-    await rps_edit_game(query, game, "Waiting for the other player.")
-
-# ===== end RPS game pack =====
-
-
-async def post_init(application: Application):
-    delete_webhook()
-    commands = [
-        BotCommand("start", "Show bot info"),
-        BotCommand("ping", "Bot alive check"),
-        BotCommand("support", "Support group"),
-        BotCommand("myid", "Show your user id"),
-        BotCommand("aistatus", "Check Groq AI status"),
-        BotCommand("analytics", "Show group analytics"),
-        BotCommand("setvoice", "Set Bengali female voice"),
-        BotCommand("welcomestyle", "Set welcome banner theme"),
-        BotCommand("setfooter", "Set welcome footer text"),
-        BotCommand("lang", "Change group language"),
-        BotCommand("groupcount", "Owner: count groups"),
-        BotCommand("activegroups", "Owner: recent active groups"),
-        BotCommand("failedgroups", "Owner: recent failed groups"),
-        BotCommand("lastaierrors", "Owner: recent AI errors"),
-        BotCommand("hourlyclean", "Auto-delete hourly messages"),
-        BotCommand("setcountdown", "Set special event countdown"),
-        BotCommand("countdown", "Show current countdown card"),
-        BotCommand("clearcountdown", "Clear group countdown"),
-        BotCommand("voice", "Toggle welcome voice"),
-        BotCommand("deleteservice", "Toggle service delete"),
-        BotCommand("hourly", "Toggle hourly texts"),
-        BotCommand("setwelcome", "Custom welcome text"),
-        BotCommand("resetwelcome", "Reset custom welcome"),
-        BotCommand("status", "Show group status"),
-        BotCommand("testwelcome", "Send test welcome"),
-        BotCommand("broadcast", "Owner: broadcast text or replied media"),
-        BotCommand("xo", "Play X-O / use /xo bot"),
-        BotCommand("rps", "Play RPS / use /rps bot"),
-    ]
-    await application.bot.set_my_commands(commands)
-
-
-def build_app() -> Application:
-    application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-    application.add_handler(CommandHandler("start", on_start))
-    application.add_handler(CommandHandler("support", on_support))
-    application.add_handler(CommandHandler("ping", on_ping))
-    application.add_handler(CommandHandler("myid", on_myid))
-    application.add_handler(CommandHandler("aistatus", on_ai_status))
-    application.add_handler(CommandHandler("analytics", on_analytics))
-    application.add_handler(CommandHandler("setvoice", on_setvoice))
-    application.add_handler(CommandHandler("welcomestyle", on_welcomestyle))
-    application.add_handler(CommandHandler("setfooter", on_setfooter))
-    application.add_handler(CommandHandler("lang", on_lang))
-    application.add_handler(CommandHandler("groupcount", on_groupcount))
-    application.add_handler(CommandHandler("activegroups", on_activegroups))
-    application.add_handler(CommandHandler("failedgroups", on_failedgroups))
-    application.add_handler(CommandHandler("lastaierrors", on_lastaierrors))
-    application.add_handler(CommandHandler("broadcastphoto", on_broadcast))
-    application.add_handler(CommandHandler("broadcastvoice", on_broadcast))
-    application.add_handler(CommandHandler("hourlyclean", on_hourlyclean))
-    application.add_handler(CommandHandler("setcountdown", on_setcountdown))
-    application.add_handler(CommandHandler("countdown", on_showcountdown))
-    application.add_handler(CommandHandler("clearcountdown", on_clearcountdown))
-    application.add_handler(CommandHandler("setexamday", on_setexamday))
-    application.add_handler(CommandHandler("examday", on_examday))
-    application.add_handler(CommandHandler("clearexamday", on_clearexamday))
-    application.add_handler(CommandHandler("voice", on_voice))
-    application.add_handler(CommandHandler("deleteservice", on_delete_service))
-    application.add_handler(CommandHandler("hourly", on_hourly))
-    application.add_handler(CommandHandler("setwelcome", on_setwelcome))
-    application.add_handler(CommandHandler("resetwelcome", on_resetwelcome))
-    application.add_handler(CommandHandler("status", on_status))
-    application.add_handler(CommandHandler("testwelcome", on_testwelcome))
-    application.add_handler(CommandHandler("broadcast", on_broadcast))
-    application.add_handler(CommandHandler("xo", on_xo))
-    application.add_handler(CommandHandler("rps", on_rps))
-    application.add_handler(CallbackQueryHandler(on_xo_callback, pattern=r"^xo\|"))
-    application.add_handler(CallbackQueryHandler(on_rps_callback, pattern=r"^rps\|"))
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
-    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group))
-    return application
+    result_kind = 'miss'
+    result_text = lb_result_text('bn', 'miss', idx + 1)
+    lb_record_play(game_id, user.id, uname, idx, result_kind, result_text)
+    round_row = lb_get_round(game_id)
+    await lb_safe_answer(query, result_text, alert=True)
+    await query.edit_message_text(
+        lb_render_text(round_row, f"{uname} opened Box {idx + 1}. The lucky one is still hiding."),
+        reply_markup=lb_markup(round_row),
+        parse_mode=ParseMode.HTML,
+    )
+# ===== end Lucky Box game pack =====
 
 
 def main():
     init_db()
     ensure_behavior_db()
     ensure_xo_db()
+    ensure_luckybox_db()
     threading.Thread(target=run_flask, daemon=True).start()
     threading.Thread(target=hourly_loop, daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
