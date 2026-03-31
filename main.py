@@ -18,7 +18,17 @@ import requests
 from flask import Flask, jsonify
 import colorsys
 from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
-from telegram import BotCommand, Update, Message, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    BotCommand,
+    Update,
+    Message,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    BotCommandScopeDefault,
+    BotCommandScopeAllPrivateChats,
+    BotCommandScopeAllGroupChats,
+    BotCommandScopeAllChatAdministrators,
+)
 from telegram.constants import ChatMemberStatus, ParseMode, ChatAction
 from telegram.ext import (
     Application,
@@ -3106,7 +3116,21 @@ async def post_init(application: Application):
         BotCommand("rps", "Play RPS / use /rps bot"),
         BotCommand("luckybox", "Open a Lucky Box game"),
     ]
-    await application.bot.set_my_commands(commands)
+
+    scopes = [
+        BotCommandScopeDefault(),
+        BotCommandScopeAllPrivateChats(),
+        BotCommandScopeAllGroupChats(),
+        BotCommandScopeAllChatAdministrators(),
+    ]
+
+    for scope in scopes:
+        try:
+            await application.bot.set_my_commands(commands, scope=scope)
+        except Exception:
+            logger.exception("Failed to set bot commands for scope: %s", scope)
+
+    logger.info("Bot command menus synced for default/private/group/admin scopes")
 
 def build_app() -> Application:
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
