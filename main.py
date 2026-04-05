@@ -3382,19 +3382,925 @@ async def on_luckybox_callback(update: Update, context: ContextTypes.DEFAULT_TYP
     note_str = f"<b>{uname}</b> opened Box {idx+1} — {info['emoji']} {info.get('label','')}"
     await lb_edit(query, round_row, note_str)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW GAME PACK — Quiz · Number Guess · Truth or Dare · Word Chain · Coin Leaderboard
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Extended Game DB ─────────────────────────────────────────────────────────
+def init_extra_games_db():
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS quiz_sessions (
+            session_id TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER,
+            creator_id INTEGER NOT NULL,
+            creator_name TEXT NOT NULL,
+            lang TEXT NOT NULL DEFAULT 'en',
+            category TEXT NOT NULL DEFAULT 'mixed',
+            q_index INTEGER NOT NULL DEFAULT 0,
+            score_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'active',
+            current_answer TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS quiz_answered (
+            session_id TEXT NOT NULL,
+            q_index INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            PRIMARY KEY (session_id, q_index, user_id)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS guess_games (
+            game_id TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER,
+            creator_id INTEGER NOT NULL,
+            secret INTEGER NOT NULL,
+            tries_left INTEGER NOT NULL DEFAULT 7,
+            last_guess INTEGER,
+            hint TEXT,
+            status TEXT NOT NULL DEFAULT 'active',
+            winner_id INTEGER,
+            winner_name TEXT,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS wordchain_games (
+            game_id TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER,
+            lang TEXT NOT NULL DEFAULT 'en',
+            last_word TEXT,
+            last_user_id INTEGER,
+            last_user_name TEXT,
+            used_words TEXT NOT NULL DEFAULT '[]',
+            score_json TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'active',
+            round_count INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS game_leaderboard (
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL DEFAULT '',
+            quiz_wins INTEGER NOT NULL DEFAULT 0,
+            quiz_correct INTEGER NOT NULL DEFAULT 0,
+            guess_wins INTEGER NOT NULL DEFAULT 0,
+            wordchain_words INTEGER NOT NULL DEFAULT 0,
+            rps_wins INTEGER NOT NULL DEFAULT 0,
+            xo_wins INTEGER NOT NULL DEFAULT 0,
+            coins INTEGER NOT NULL DEFAULT 0,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (user_id, chat_id)
+        )""")
+        conn.commit()
+
+def lb_update_leaderboard(user_id: int, chat_id: int, user_name: str, **kwargs):
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO game_leaderboard (user_id,chat_id,user_name,updated_at) VALUES (?,?,?,?)",
+            (user_id, chat_id, user_name[:40], now)
+        )
+        conn.execute("UPDATE game_leaderboard SET user_name=?,updated_at=? WHERE user_id=? AND chat_id=?",
+                     (user_name[:40], now, user_id, chat_id))
+        for col, val in kwargs.items():
+            allowed = {"quiz_wins","quiz_correct","guess_wins","wordchain_words","rps_wins","xo_wins","coins"}
+            if col in allowed and isinstance(val, int):
+                conn.execute(
+                    f"UPDATE game_leaderboard SET {col}={col}+?,updated_at=? WHERE user_id=? AND chat_id=?",
+                    (val, now, user_id, chat_id)
+                )
+        conn.commit()
+
+def get_chat_leaderboard(chat_id: int, limit: int = 10):
+    with db_connect() as conn:
+        return conn.execute(
+            """SELECT user_name,quiz_wins,guess_wins,wordchain_words,rps_wins,xo_wins,coins,
+               (quiz_wins*3 + guess_wins*3 + wordchain_words + rps_wins*2 + xo_wins*2) as total_score
+               FROM game_leaderboard WHERE chat_id=?
+               ORDER BY total_score DESC LIMIT ?""",
+            (chat_id, limit)
+        ).fetchall()
+
+# ─── /leaderboard command ─────────────────────────────────────────────────────
+async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not chat or not msg: return
+    rows = get_chat_leaderboard(chat.id)
+    if not rows:
+        await msg.reply_text("📊 No game data yet! Play /quiz, /guess, /rps, /xo or /wordchain to get on the board.")
+        return
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    lines  = ["🏆 <b>Game Leaderboard</b>", "━━━━━━━━━━━━━━━━━━"]
+    for i, r in enumerate(rows):
+        score = r["total_score"] or 0
+        medal = medals[i] if i < len(medals) else f"{i+1}."
+        lines.append(f"{medal} <b>{html.escape(r['user_name'])}</b>  •  {score} pts  🪙 {r['coins']}")
+    lines += ["","<i>Quiz Win=3pts · Guess Win=3pts · RPS/XO Win=2pts · Word=1pt</i>"]
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+# ─── QUIZ GAME (/quiz) ────────────────────────────────────────────────────────
+import json as _json
+
+QUIZ_QUESTIONS = {
+    "en": [
+        {"q":"🌍 What is the capital of Bangladesh?","opts":["Dhaka","Chittagong","Khulna","Rajshahi"],"ans":0},
+        {"q":"🔢 What is 15 × 8?","opts":["110","120","125","130"],"ans":1},
+        {"q":"🌊 What is the longest river in the world?","opts":["Amazon","Nile","Yangtze","Mississippi"],"ans":1},
+        {"q":"🪐 Which planet is closest to the Sun?","opts":["Venus","Earth","Mercury","Mars"],"ans":2},
+        {"q":"🏆 Who wrote Romeo and Juliet?","opts":["Dickens","Shakespeare","Tolstoy","Hemingway"],"ans":1},
+        {"q":"🧬 What is the powerhouse of the cell?","opts":["Nucleus","Ribosome","Mitochondria","Vacuole"],"ans":2},
+        {"q":"🌐 How many continents are on Earth?","opts":["5","6","7","8"],"ans":2},
+        {"q":"⚡ Who invented the telephone?","opts":["Edison","Tesla","Bell","Marconi"],"ans":2},
+        {"q":"🎵 How many notes are in a musical octave?","opts":["6","7","8","9"],"ans":2},
+        {"q":"🏋️ How many players are on a football team?","opts":["9","10","11","12"],"ans":2},
+        {"q":"🌙 How long does it take the Moon to orbit Earth?","opts":["7 days","14 days","28 days","365 days"],"ans":2},
+        {"q":"🐋 What is the largest animal on Earth?","opts":["Elephant","Blue Whale","Giraffe","Great White Shark"],"ans":1},
+        {"q":"🔴 What color do you get mixing red and white?","opts":["Orange","Purple","Pink","Maroon"],"ans":2},
+        {"q":"💻 What does CPU stand for?","opts":["Central Processing Unit","Computer Power Unit","Core Program Unit","Central Power Unit"],"ans":0},
+        {"q":"🌿 What gas do plants absorb during photosynthesis?","opts":["Oxygen","Nitrogen","Carbon Dioxide","Hydrogen"],"ans":2},
+        {"q":"🗼 In which country is the Eiffel Tower?","opts":["Italy","Spain","Germany","France"],"ans":3},
+        {"q":"🎯 How many sides does a hexagon have?","opts":["5","6","7","8"],"ans":1},
+        {"q":"🚀 Who was the first human to walk on the Moon?","opts":["Buzz Aldrin","Neil Armstrong","Yuri Gagarin","John Glenn"],"ans":1},
+        {"q":"🌡️ At what temperature does water boil?","opts":["90°C","95°C","100°C","110°C"],"ans":2},
+        {"q":"🦁 What is a group of lions called?","opts":["Pack","Herd","Pride","Flock"],"ans":2},
+    ],
+    "bn": [
+        {"q":"🌍 বাংলাদেশের রাজধানী কোনটি?","opts":["চট্টগ্রাম","ঢাকা","খুলনা","রাজশাহী"],"ans":1},
+        {"q":"🔢 ১৫ × ৮ = কত?","opts":["১১০","১২০","১২৫","১৩০"],"ans":1},
+        {"q":"🌊 পদ্মা নদী কোথায় গিয়ে মিশেছে?","opts":["মেঘনায়","যমুনায়","ব্রহ্মপুত্রে","বুড়িগঙ্গায়"],"ans":0},
+        {"q":"🪐 সৌরজগতের সবচেয়ে বড় গ্রহ কোনটি?","opts":["শনি","বৃহস্পতি","ইউরেনাস","নেপচুন"],"ans":1},
+        {"q":"📚 রবীন্দ্রনাথ ঠাকুর কোন সালে নোবেল পান?","opts":["১৯১০","১৯১১","১৯১২","১৯১৩"],"ans":3},
+        {"q":"🧬 কোষের শক্তিঘর বলা হয় কাকে?","opts":["নিউক্লিয়াস","রাইবোজোম","মাইটোকন্ড্রিয়া","ভ্যাকুওল"],"ans":2},
+        {"q":"🌐 পৃথিবীতে মহাদেশ কতটি?","opts":["৫","৬","৭","৮"],"ans":2},
+        {"q":"⚡ বাংলাদেশ কত সালে স্বাধীন হয়?","opts":["১৯৬৯","১৯৭০","১৯৭১","১৯৭২"],"ans":2},
+        {"q":"🐋 পৃথিবীর সবচেয়ে বড় প্রাণী কোনটি?","opts":["হাতি","নীল তিমি","জিরাফ","হাঙর"],"ans":1},
+        {"q":"🌙 চাঁদ পৃথিবীকে একবার প্রদক্ষিণ করতে কতদিন লাগে?","opts":["৭ দিন","১৪ দিন","২৮ দিন","৩৬৫ দিন"],"ans":2},
+        {"q":"🏆 বাংলাদেশের জাতীয় ফুল কোনটি?","opts":["গোলাপ","শাপলা","কদম","বকুল"],"ans":1},
+        {"q":"🌿 সালোকসংশ্লেষণে গাছ কোন গ্যাস শোষণ করে?","opts":["অক্সিজেন","নাইট্রোজেন","কার্বন ডাই অক্সাইড","হাইড্রোজেন"],"ans":2},
+        {"q":"🎯 ষড়ভুজের বাহু কতটি?","opts":["৪","৫","৬","৮"],"ans":2},
+        {"q":"💻 CPU-এর পূর্ণরূপ কী?","opts":["Central Processing Unit","Computer Power Unit","Core Program Unit","Central Power Unit"],"ans":0},
+        {"q":"🏅 অলিম্পিকে সোনার পদক কোন ধাতুর তৈরি?","opts":["সোনা","রুপা","তামা","সবগুলো"],"ans":1},
+        {"q":"🌡️ কত তাপমাত্রায় পানি ফোটে?","opts":["৯০°C","৯৫°C","১০০°C","১১০°C"],"ans":2},
+        {"q":"🦁 সিংহের দলকে কী বলে?","opts":["Pack","Herd","Pride","Flock"],"ans":2},
+        {"q":"🚀 প্রথম মহাকাশচারী কে?","opts":["নীল আর্মস্ট্রং","ইউরি গ্যাগারিন","বাজ অলড্রিন","জন গ্লেন"],"ans":1},
+        {"q":"🎵 সপ্তকে কতটি স্বর থাকে?","opts":["৫","৬","৭","৮"],"ans":2},
+        {"q":"🌍 আমাজন বন কোন দেশে অবস্থিত?","opts":["আর্জেন্টিনা","ব্রাজিল","কলম্বিয়া","পেরু"],"ans":1},
+    ],
+}
+QUIZ_OPTS_EMOJI = ["🅰️","🅱️","🅲️","🅳️"]
+QUIZ_CORRECT_LINES = ["✅ Correct! Well done!","🎯 Spot on!","🌟 That's right!","💡 Brilliant!","🔥 Nailed it!"]
+QUIZ_WRONG_LINES   = ["❌ Wrong answer!","😬 Not quite!","💭 Close but no cigar!","🫠 Better luck next one!"]
+QUIZ_TIMEOUT_LINES = ["⏰ Time's up! Nobody got that one.","⏳ Too slow! Moving on.","🕐 Clock ran out!"]
+
+def _quiz_now(): return int(time.time())
+def _quiz_id():  return f"qz{_quiz_now()}{random.randint(100,999)}"
+
+def quiz_get(session_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM quiz_sessions WHERE session_id=?", (session_id,)).fetchone()
+
+def quiz_set_msg(session_id: str, message_id: int):
+    with db_connect() as conn:
+        conn.execute("UPDATE quiz_sessions SET message_id=?,updated_at=? WHERE session_id=?",
+                     (message_id, _quiz_now(), session_id)); conn.commit()
+
+def quiz_mark_answered(session_id: str, q_index: int, user_id: int):
+    with db_connect() as conn:
+        conn.execute("INSERT OR IGNORE INTO quiz_answered (session_id,q_index,user_id) VALUES (?,?,?)",
+                     (session_id, q_index, user_id)); conn.commit()
+
+def quiz_has_answered(session_id: str, q_index: int, user_id: int) -> bool:
+    with db_connect() as conn:
+        return bool(conn.execute(
+            "SELECT 1 FROM quiz_answered WHERE session_id=? AND q_index=? AND user_id=?",
+            (session_id, q_index, user_id)).fetchone())
+
+def quiz_add_score(session_id: str, user_id: int, user_name: str, delta: int):
+    sess = quiz_get(session_id)
+    if not sess: return
+    scores = _json.loads(sess["score_json"] or "{}")
+    key = str(user_id)
+    entry = scores.get(key, {"name": user_name, "score": 0})
+    entry["score"] = entry["score"] + delta
+    entry["name"]  = user_name
+    scores[key] = entry
+    with db_connect() as conn:
+        conn.execute("UPDATE quiz_sessions SET score_json=?,updated_at=? WHERE session_id=?",
+                     (_json.dumps(scores), _quiz_now(), session_id)); conn.commit()
+
+def quiz_advance(session_id: str) -> int:
+    sess = quiz_get(session_id)
+    if not sess: return -1
+    new_idx = int(sess["q_index"]) + 1
+    with db_connect() as conn:
+        conn.execute("UPDATE quiz_sessions SET q_index=?,updated_at=? WHERE session_id=?",
+                     (new_idx, _quiz_now(), session_id)); conn.commit()
+    return new_idx
+
+def quiz_set_answer(session_id: str, answer: str):
+    with db_connect() as conn:
+        conn.execute("UPDATE quiz_sessions SET current_answer=?,updated_at=? WHERE session_id=?",
+                     (answer, _quiz_now(), session_id)); conn.commit()
+
+def quiz_finish(session_id: str):
+    with db_connect() as conn:
+        conn.execute("UPDATE quiz_sessions SET status='done',updated_at=? WHERE session_id=?",
+                     (_quiz_now(), session_id)); conn.commit()
+
+def quiz_render_question(sess, q: dict, q_num: int, total: int) -> str:
+    scores = _json.loads(sess["score_json"] or "{}")
+    score_line = "  ".join(
+        f"{html.escape(v['name'])}: {v['score']}" for v in
+        sorted(scores.values(), key=lambda x: -x["score"])[:5]
+    )
+    lines = [
+        f"🧠 <b>Quiz</b>  Q{q_num}/{total}",
+        "━━━━━━━━━━━━━━━━━━",
+        f"<b>{html.escape(q['q'])}</b>",
+        "",
+    ]
+    for i, opt in enumerate(q["opts"]):
+        lines.append(f"{QUIZ_OPTS_EMOJI[i]} {html.escape(opt)}")
+    lines += ["", "⏱ 20 seconds to answer!"]
+    if score_line:
+        lines += ["", f"📊 {score_line}"]
+    return "\n".join(lines)
+
+def quiz_markup(session_id: str, q_index: int, opts: list) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"{QUIZ_OPTS_EMOJI[i]} {opts[i][:20]}",
+                              callback_data=f"quiz|{session_id}|ans|{i}")]
+        for i in range(len(opts))
+    ] + [[InlineKeyboardButton("🛑 End Quiz", callback_data=f"quiz|{session_id}|end|0")]])
+
+def quiz_final_render(sess) -> str:
+    scores = _json.loads(sess["score_json"] or "{}")
+    sorted_scores = sorted(scores.values(), key=lambda x: -x["score"])
+    medals = ["🥇","🥈","🥉"]
+    lines = ["🏆 <b>Quiz Finished!</b>", "━━━━━━━━━━━━━━━━━━"]
+    if not sorted_scores:
+        lines.append("No one scored. Better luck next time!")
+    else:
+        for i, entry in enumerate(sorted_scores[:10]):
+            m = medals[i] if i < 3 else f"{i+1}."
+            lines.append(f"{m} <b>{html.escape(entry['name'])}</b> — {entry['score']} pts")
+    lines += ["", "<i>Play again with /quiz!</i>"]
+    return "\n".join(lines)
+
+QUIZ_TOTAL_Q = 8
+_quiz_tasks: dict[str, asyncio.Task] = {}
+
+async def _quiz_question_cycle(bot, session_id: str, chat_id: int, message_id: int, lang: str):
+    questions = QUIZ_QUESTIONS.get(lang, QUIZ_QUESTIONS["en"])
+    random.shuffle(questions)
+    qs = questions[:QUIZ_TOTAL_Q]
+    for i, q in enumerate(qs):
+        sess = quiz_get(session_id)
+        if not sess or sess["status"] != "active":
+            return
+        quiz_set_answer(session_id, str(q["ans"]))
+        text = quiz_render_question(sess, q, i+1, QUIZ_TOTAL_Q)
+        markup = quiz_markup(session_id, i, q["opts"])
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                                        text=text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except: pass
+        await asyncio.sleep(20)  # 20 seconds per question
+        # Check if answered
+        sess = quiz_get(session_id)
+        if not sess or sess["status"] != "active":
+            return
+        # Show answer
+        correct_text = q["opts"][q["ans"]]
+        timeout_line = random.choice(QUIZ_TIMEOUT_LINES)
+        reveal_text = (f"{timeout_line}\n✅ Answer: <b>{html.escape(correct_text)}</b>")
+        try:
+            await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                                        text=reveal_text, parse_mode=ParseMode.HTML)
+        except: pass
+        await asyncio.sleep(3)
+        quiz_advance(session_id)
+    # Final
+    quiz_finish(session_id)
+    sess = quiz_get(session_id)
+    final = quiz_final_render(sess)
+    # Update leaderboard
+    scores = _json.loads(sess["score_json"] or "{}")
+    sorted_s = sorted(scores.items(), key=lambda x: -x[1]["score"])
+    if sorted_s:
+        winner_id = int(sorted_s[0][0])
+        lb_update_leaderboard(winner_id, chat_id, sorted_s[0][1]["name"], quiz_wins=1)
+    for uid, entry in scores.items():
+        lb_update_leaderboard(int(uid), chat_id, entry["name"],
+                              quiz_correct=entry["score"], coins=entry["score"]*5)
+    try:
+        await bot.edit_message_text(chat_id=chat_id, message_id=message_id,
+                                    text=final, parse_mode=ParseMode.HTML)
+    except: pass
+
+async def on_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message; chat = update.effective_chat; user = update.effective_user
+    if not msg or not chat or not user: return
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    session_id = _quiz_id()
+    creator_name = clean_name(user.full_name or user.first_name or "Player")
+    now = _quiz_now()
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT INTO quiz_sessions (session_id,chat_id,message_id,creator_id,creator_name,
+               lang,q_index,score_json,status,created_at,updated_at) VALUES (?,?,NULL,?,?,?,0,'{}','active',?,?)""",
+            (session_id, chat.id, user.id, creator_name, lang, now, now)
+        ); conn.commit()
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    questions = QUIZ_QUESTIONS.get(lang, QUIZ_QUESTIONS["en"])
+    q = random.choice(questions)
+    quiz_set_answer(session_id, str(q["ans"]))
+    sess = quiz_get(session_id)
+    text = quiz_render_question(sess, q, 1, QUIZ_TOTAL_Q)
+    markup = quiz_markup(session_id, 0, q["opts"])
+    sent = await msg.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+    quiz_set_msg(session_id, sent.message_id)
+    task = asyncio.create_task(_quiz_question_cycle(context.bot, session_id, chat.id, sent.message_id, lang))
+    _quiz_tasks[session_id] = task
+
+async def on_quiz_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; user = update.effective_user
+    if not query or not user or not query.data: return
+    try: _, session_id, action, value = query.data.split("|", 3)
+    except: await query.answer("Invalid.", True); return
+    sess = quiz_get(session_id)
+    if not sess or sess["status"] != "active":
+        await query.answer("Quiz not active.", True); return
+    if action == "end":
+        if int(user.id) != int(sess["creator_id"]):
+            await query.answer("Only the quiz creator can end it.", True); return
+        quiz_finish(session_id)
+        task = _quiz_tasks.pop(session_id, None)
+        if task: task.cancel()
+        final = quiz_final_render(quiz_get(session_id))
+        await query.answer("Quiz ended.")
+        try: await query.edit_message_text(final, parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if action != "ans": await query.answer(); return
+    q_index = int(sess["q_index"])
+    if quiz_has_answered(session_id, q_index, user.id):
+        await query.answer("You already answered this question!", True); return
+    correct_ans = int(sess["current_answer"] or -1)
+    chosen = int(value)
+    quiz_mark_answered(session_id, q_index, user.id)
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    if chosen == correct_ans:
+        quiz_add_score(session_id, user.id, uname, 1)
+        await query.answer(f"✅ {random.choice(QUIZ_CORRECT_LINES)} +1 point", show_alert=False)
+    else:
+        await query.answer(f"❌ {random.choice(QUIZ_WRONG_LINES)}", show_alert=False)
+    # Refresh scoreboard
+    sess = quiz_get(session_id)
+    if sess and sess["status"] == "active":
+        questions = QUIZ_QUESTIONS.get(sess["lang"], QUIZ_QUESTIONS["en"])
+        q_list = questions[:QUIZ_TOTAL_Q]
+        if q_index < len(q_list):
+            q = q_list[q_index]
+            text = quiz_render_question(sess, q, q_index+1, QUIZ_TOTAL_Q)
+            try: await query.edit_message_text(text, reply_markup=quiz_markup(session_id, q_index, q["opts"]), parse_mode=ParseMode.HTML)
+            except: pass
+
+# ─── NUMBER GUESS GAME (/guess) ───────────────────────────────────────────────
+_GUESS_MAX = 100
+_GUESS_TRIES = 7
+
+def _guess_id():  return f"gs{int(time.time())}{random.randint(100,999)}"
+def _guess_now(): return int(time.time())
+
+def guess_get(game_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM guess_games WHERE game_id=?", (game_id,)).fetchone()
+
+def guess_hint(secret: int, guess: int, tries_left: int) -> str:
+    diff = abs(secret - guess)
+    direction = "⬆️ Higher" if guess < secret else "⬇️ Lower"
+    if diff == 0:    return "🎯 EXACT!"
+    if diff <= 3:    heat = "🔥🔥🔥 Burning hot!"
+    elif diff <= 8:  heat = "🔥🔥 Very warm!"
+    elif diff <= 15: heat = "🌡️ Warm"
+    elif diff <= 25: heat = "😐 Getting warmer"
+    elif diff <= 40: heat = "🧊 Cold"
+    else:            heat = "🥶 Freezing!"
+    return f"{direction}  •  {heat}  •  {tries_left} tries left"
+
+def guess_render(game, note: str = "") -> str:
+    tries_left = int(game["tries_left"])
+    last = game["last_guess"]
+    hint_text = game["hint"] or ""
+    lives = "❤️" * tries_left + "🖤" * (_GUESS_TRIES - tries_left)
+    lines = [
+        "🎲 <b>Number Guess</b>",
+        f"Range: <b>1 – {_GUESS_MAX}</b>  •  Max tries: <b>{_GUESS_TRIES}</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Lives: {lives}",
+    ]
+    if last is not None:
+        lines.append(f"Last guess: <b>{last}</b>")
+    if hint_text:
+        lines.append(f"Hint: {hint_text}")
+    if game["status"] == "active":
+        lines += ["", "Reply to this message with your guess (1-100)!"]
+    elif game["status"] == "won":
+        lines += ["", f"🏆 <b>{html.escape(game['winner_name'] or 'Winner')} wins!</b>  Secret was <b>{game['secret']}</b>"]
+    elif game["status"] == "lost":
+        lines += ["", f"💀 Out of tries! Secret was <b>{game['secret']}</b>"]
+    if note:
+        lines += ["", f"<i>{html.escape(note)}</i>"]
+    return "\n".join(lines)
+
+def guess_markup(game_id: str, status: str) -> InlineKeyboardMarkup:
+    if status == "active":
+        return InlineKeyboardMarkup([[
+            InlineKeyboardButton("💡 Hint Range", callback_data=f"guess|{game_id}|hint|0"),
+            InlineKeyboardButton("🏳️ Give Up",   callback_data=f"guess|{game_id}|giveup|0"),
+        ]])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔄 Play Again", callback_data=f"guess|{game_id}|again|0"),
+    ]])
+
+_guess_reply_watchers: dict[int, str] = {}  # chat_id -> game_id
+
+async def on_guess(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message; chat = update.effective_chat; user = update.effective_user
+    if not msg or not chat or not user: return
+    game_id = _guess_id()
+    secret  = random.randint(1, _GUESS_MAX)
+    now = _guess_now()
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT INTO guess_games (game_id,chat_id,message_id,creator_id,secret,
+               tries_left,status,created_at,updated_at) VALUES (?,?,NULL,?,?,?,'active',?,?)""",
+            (game_id, chat.id, user.id, secret, _GUESS_TRIES, now, now)
+        ); conn.commit()
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    game = guess_get(game_id)
+    sent = await msg.reply_text(guess_render(game, "Game started! Make your first guess."),
+                                reply_markup=guess_markup(game_id, "active"), parse_mode=ParseMode.HTML)
+    with db_connect() as conn:
+        conn.execute("UPDATE guess_games SET message_id=?,updated_at=? WHERE game_id=?",
+                     (sent.message_id, now, game_id)); conn.commit()
+    _guess_reply_watchers[chat.id] = game_id
+
+async def on_guess_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handles plain number replies for active guess games."""
+    chat = update.effective_chat; msg = update.effective_message; user = update.effective_user
+    if not chat or not msg or not user or user.is_bot: return
+    game_id = _guess_reply_watchers.get(chat.id)
+    if not game_id: return
+    game = guess_get(game_id)
+    if not game or game["status"] != "active": return
+    text = (msg.text or "").strip()
+    if not text.isdigit(): return
+    guess_val = int(text)
+    if not (1 <= guess_val <= _GUESS_MAX): return
+    secret = int(game["secret"])
+    tries_left = int(game["tries_left"]) - 1
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    now = _guess_now()
+    if guess_val == secret:
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE guess_games SET tries_left=?,last_guess=?,hint=?,status='won',winner_id=?,winner_name=?,updated_at=? WHERE game_id=?",
+                (tries_left, guess_val, "🎯 EXACT!", user.id, uname, now, game_id)
+            ); conn.commit()
+        del _guess_reply_watchers[chat.id]
+        lb_update_leaderboard(user.id, chat.id, uname, guess_wins=1, coins=30)
+        game = guess_get(game_id)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat.id, message_id=game["message_id"],
+                text=guess_render(game, f"🎉 {html.escape(uname)} guessed it in {_GUESS_TRIES-tries_left} tries!"),
+                reply_markup=guess_markup(game_id, "won"), parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if tries_left <= 0:
+        hint = guess_hint(secret, guess_val, 0)
+        with db_connect() as conn:
+            conn.execute(
+                "UPDATE guess_games SET tries_left=0,last_guess=?,hint=?,status='lost',updated_at=? WHERE game_id=?",
+                (guess_val, hint, now, game_id)
+            ); conn.commit()
+        del _guess_reply_watchers[chat.id]
+        game = guess_get(game_id)
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat.id, message_id=game["message_id"],
+                text=guess_render(game, "No more tries! Better luck next time."),
+                reply_markup=guess_markup(game_id, "lost"), parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    hint = guess_hint(secret, guess_val, tries_left)
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE guess_games SET tries_left=?,last_guess=?,hint=?,updated_at=? WHERE game_id=?",
+            (tries_left, guess_val, hint, now, game_id)
+        ); conn.commit()
+    game = guess_get(game_id)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat.id, message_id=game["message_id"],
+            text=guess_render(game), reply_markup=guess_markup(game_id, "active"),
+            parse_mode=ParseMode.HTML)
+    except: pass
+
+async def on_guess_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; user = update.effective_user
+    if not query or not user or not query.data: return
+    try: _, game_id, action, _ = query.data.split("|", 3)
+    except: await query.answer("Invalid.", True); return
+    game = guess_get(game_id)
+    if not game: await query.answer("Game not found.", True); return
+    if action == "hint":
+        secret = int(game["secret"])
+        lo = max(1, secret - random.randint(5, 20))
+        hi = min(_GUESS_MAX, secret + random.randint(5, 20))
+        await query.answer(f"💡 The number is between {lo} and {hi}", show_alert=True); return
+    if action == "giveup":
+        now = _guess_now()
+        with db_connect() as conn:
+            conn.execute("UPDATE guess_games SET status='lost',updated_at=? WHERE game_id=?", (now, game_id)); conn.commit()
+        _guess_reply_watchers.pop(int(game["chat_id"]), None)
+        game = guess_get(game_id)
+        await query.answer("You gave up!")
+        try: await query.edit_message_text(guess_render(game, "Game surrendered."),
+                                           reply_markup=guess_markup(game_id,"lost"), parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if action == "again":
+        chat_id = int(game["chat_id"]); now = _guess_now()
+        new_id  = _guess_id()
+        with db_connect() as conn:
+            conn.execute(
+                "INSERT INTO guess_games (game_id,chat_id,message_id,creator_id,secret,tries_left,status,created_at,updated_at) VALUES (?,?,?,?,?,?,'active',?,?)",
+                (new_id, chat_id, game["message_id"], user.id, random.randint(1,_GUESS_MAX), _GUESS_TRIES, now, now)
+            ); conn.commit()
+        _guess_reply_watchers[chat_id] = new_id
+        new_game = guess_get(new_id)
+        await query.answer("New game started!")
+        try: await query.edit_message_text(guess_render(new_game, "New game! Make your guess."),
+                                           reply_markup=guess_markup(new_id,"active"), parse_mode=ParseMode.HTML)
+        except: pass
+
+# ─── TRUTH OR DARE (/tod) ─────────────────────────────────────────────────────
+TOD_TRUTHS_EN = [
+    "What is the most embarrassing thing you've ever done?",
+    "Have you ever cheated in a game?",
+    "What's your biggest fear?",
+    "Have you ever lied to get out of trouble?",
+    "What's a secret you've never told anyone?",
+    "Have you ever had a crush on someone in this group?",
+    "What's the most childish thing you still do?",
+    "What would you do with 1 million dollars?",
+    "Have you ever blamed someone else for something you did?",
+    "What's your biggest regret?",
+    "What's the weirdest dream you've ever had?",
+    "Have you ever stalked someone's social media for hours?",
+    "What's the longest you've gone without showering?",
+    "Have you ever pretended to be sick to avoid something?",
+    "What's your most embarrassing moment at school or work?",
+]
+TOD_DARES_EN = [
+    "Send a voice message saying 'I love you' to the last person you texted.",
+    "Write 10 compliments about the person above you in this chat.",
+    "Change your profile picture to a potato for 1 hour.",
+    "Send the most embarrassing photo from your gallery.",
+    "Write a 3-line poem about the group admin.",
+    "Post your current screen time stats.",
+    "Type everything in CAPS for the next 10 messages.",
+    "Send a selfie right now without any filters.",
+    "Say something nice about the last person who messaged in this group.",
+    "Change your bio to 'I lost a dare game' for 30 minutes.",
+    "Speak in rhymes for the next 5 minutes.",
+    "Send a voice message of you singing for 10 seconds.",
+    "Write the first 5 app names that appear on your phone screen.",
+    "Respond to every message with an animal sound for 5 minutes.",
+    "Tag 3 people in this group and say one nice thing about each.",
+]
+TOD_TRUTHS_BN = [
+    "তুমি কি কখনো কোনো খেলায় চিটিং করেছ?",
+    "তোমার সবচেয়ে বড় ভয় কোনটা?",
+    "তুমি কি কখনো মিথ্যা বলে বিপদ এড়িয়েছ?",
+    "এই group-এ কারো প্রতি কি কোনোদিন crush ছিল?",
+    "তুমি কি এখনো ছোটবেলার কোনো অভ্যাস ধরে রেখেছ?",
+    "তোমার সবচেয়ে বিব্রতকর মুহূর্ত কোনটা?",
+    "যদি ১ কোটি টাকা পেতে, কী করতে?",
+    "তুমি কি কখনো কারো social media ঘণ্টার পর ঘণ্টা ঘেঁটেছ?",
+    "তোমার সবচেয়ে বড় অনুতাপ কী?",
+    "সবচেয়ে অদ্ভুত স্বপ্ন কোনটা দেখেছিলে?",
+    "তুমি কি কখনো অসুস্থতার ভান করে কিছু এড়িয়েছ?",
+    "তোমার ফোনে সবচেয়ে বেশি কোন app চালাও?",
+    "তোমার লুকানো কোনো talent আছে?",
+    "তুমি কি কখনো কাউকে দোষ দিয়েছ নিজের কাজের জন্য?",
+    "তোমার সবচেয়ে লজ্জাজনক মুহূর্ত কখন হয়েছিল?",
+]
+TOD_DARES_BN = [
+    "সর্বশেষ যে মানুষকে message করেছিলে তাকে একটা voice message পাঠাও 'আমি তোমাকে ভালোবাসি' বলে।",
+    "group-এর উপরের জনকে ১০টা compliment লেখো।",
+    "১ ঘণ্টার জন্য profile picture আলু বানাও।",
+    "গ্যালারি থেকে সবচেয়ে বিব্রতকর ছবিটা পাঠাও।",
+    "group admin-কে নিয়ে ৩ লাইনের কবিতা লেখো।",
+    "এখন screen time stats পোস্ট করো।",
+    "পরের ১০টা message সব CAPS-এ টাইপ করো।",
+    "এখনই কোনো filter ছাড়া selfie তোলো।",
+    "শেষ যে message করেছে তার সম্পর্কে কিছু ভালো বলো।",
+    "৩০ মিনিটের জন্য bio-তে 'Dare game-এ হেরেছি' লেখো।",
+    "৫ মিনিট সব কথা ছড়ায় বলো।",
+    "১০ সেকেন্ড গান গেয়ে voice message পাঠাও।",
+    "ফোনের স্ক্রিনে যে ৫টা app দেখা যাচ্ছে সেগুলোর নাম লেখো।",
+    "পরের ৫ মিনিট সব reply-এ প্রাণীর শব্দ ব্যবহার করো।",
+    "group-এর ৩ জনকে tag করে প্রত্যেকের সম্পর্কে একটা ভালো কথা বলো।",
+]
+
+async def on_tod(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message; chat = update.effective_chat; user = update.effective_user
+    if not msg or not chat or not user: return
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    uname = html.escape(clean_name(user.full_name or user.first_name or "Player"))
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("😇 Truth", callback_data=f"tod|{lang}|truth|{user.id}"),
+        InlineKeyboardButton("😈 Dare",  callback_data=f"tod|{lang}|dare|{user.id}"),
+    ]])
+    await msg.reply_text(
+        f"🎭 <b>Truth or Dare</b>\n━━━━━━━━━━━━━━━━━━\n"
+        f"<b>{uname}</b>, choose your fate!\n\n"
+        f"😇 Truth — answer honestly\n😈 Dare — complete the challenge",
+        reply_markup=markup, parse_mode=ParseMode.HTML)
+
+async def on_tod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; user = update.effective_user
+    if not query or not user or not query.data: return
+    try: _, lang, kind, requester_id = query.data.split("|", 3)
+    except: await query.answer("Invalid.", True); return
+    try: await context.bot.send_chat_action(chat_id=query.message.chat_id, action=ChatAction.TYPING)
+    except: pass
+    uname = html.escape(clean_name(user.full_name or user.first_name or "Player"))
+    if kind == "truth":
+        pool = TOD_TRUTHS_EN if lang == "en" else TOD_TRUTHS_BN
+        prompt = random.choice(pool)
+        icon, label = "😇", "Truth"
+    else:
+        pool = TOD_DARES_EN if lang == "en" else TOD_DARES_BN
+        prompt = random.choice(pool)
+        icon, label = "😈", "Dare"
+    replay_markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("🔁 Another Truth", callback_data=f"tod|{lang}|truth|{user.id}"),
+        InlineKeyboardButton("🔁 Another Dare",  callback_data=f"tod|{lang}|dare|{user.id}"),
+    ]])
+    await query.answer(f"{icon} {label} selected!")
+    try:
+        await query.edit_message_text(
+            f"🎭 <b>Truth or Dare</b>  •  {icon} {label}\n━━━━━━━━━━━━━━━━━━\n"
+            f"<b>{uname}</b>, your {label.lower()}:\n\n"
+            f"<i>{html.escape(prompt)}</i>",
+            reply_markup=replay_markup, parse_mode=ParseMode.HTML)
+    except: pass
+
+# ─── WORD CHAIN (/wordchain) ──────────────────────────────────────────────────
+_WC_COMMON_EN = [
+    "apple","elephant","tiger","rabbit","ball","leaf","fish","hand","door","night",
+    "table","eagle","lion","nose","echo","orange","green","night","tree","earth",
+    "heart","torch","house","egg","game","engine","ice","east","ant","top",
+    "pen","nail","lamp","pot","train","noon","net","ten","neck","king",
+]
+_WC_COMMON_BN = [
+    "আম","মাছ","ছাগল","লাঠি","ঠাকুর","রাত","তারা","রাজা","জল","লেখা",
+    "আলো","ওষুধ","ধান","নদী","দিন","নাম","মাঠ","ঠান্ডা","ডাল","লাউ",
+    "আকাশ","শীত","তেল","লবণ","নারী","রাস্তা","তালা","আঙুল","লাল","লেবু",
+]
+
+def _wc_id():  return f"wc{int(time.time())}{random.randint(100,999)}"
+def _wc_now(): return int(time.time())
+
+def wc_get(game_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM wordchain_games WHERE game_id=?", (game_id,)).fetchone()
+
+def wc_render(game, note: str = "") -> str:
+    scores = _json.loads(game["score_json"] or "{}")
+    used   = _json.loads(game["used_words"] or "[]")
+    sorted_scores = sorted(scores.values(), key=lambda x: -x["score"])
+    lines = [
+        f"🔗 <b>Word Chain</b>  •  {'Bangla' if game['lang']=='bn' else 'English'}",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Words played: <b>{len(used)}</b>",
+    ]
+    if game["last_word"]:
+        lines.append(f"Last word: <b>{html.escape(game['last_word'])}</b>")
+        lw = game["last_word"]
+        next_letter = lw[-1].upper() if game["lang"]=="en" else lw[-1]
+        lines.append(f"Next must start with: <b>{next_letter}</b>")
+    if sorted_scores:
+        sb = "  ".join(f"{html.escape(v['name'])}: {v['score']}" for v in sorted_scores[:5])
+        lines += ["", f"📊 {sb}"]
+    if game["status"] == "active":
+        lines += ["", "Reply with a word that starts with the correct letter!",
+                  "No repeats. You have 30 seconds per turn."]
+    elif game["status"] == "done":
+        lines.append("\n<i>Game over!</i>")
+    if note:
+        lines += ["", f"<i>{html.escape(note)}</i>"]
+    return "\n".join(lines)
+
+def wc_markup(game_id: str, status: str) -> InlineKeyboardMarkup:
+    if status == "active":
+        return InlineKeyboardMarkup([[InlineKeyboardButton("🛑 End Game", callback_data=f"wc|{game_id}|end|0")]])
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔄 New Game", callback_data=f"wc|{game_id}|again|0")]])
+
+_wc_watchers: dict[int, str]  = {}   # chat_id -> game_id
+_wc_timers:   dict[str, float] = {}  # game_id -> last_word_time
+
+async def on_wordchain(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.effective_message; chat = update.effective_chat; user = update.effective_user
+    if not msg or not chat or not user: return
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    game_id = _wc_id(); now = _wc_now()
+    starter = random.choice(_WC_COMMON_BN if lang == "bn" else _WC_COMMON_EN)
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT INTO wordchain_games (game_id,chat_id,message_id,lang,last_word,
+               last_user_id,last_user_name,used_words,score_json,status,round_count,created_at,updated_at)
+               VALUES (?,?,NULL,?,?,?,?,?,?,'active',0,?,?)""",
+            (game_id, chat.id, lang, starter, 0, BOT_NAME,
+             _json.dumps([starter]), "{}", now, now)
+        ); conn.commit()
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    game = wc_get(game_id)
+    _wc_watchers[chat.id] = game_id
+    _wc_timers[game_id] = now
+    sent = await msg.reply_text(
+        wc_render(game, f"I start with: '{starter}'. Your turn!"),
+        reply_markup=wc_markup(game_id, "active"), parse_mode=ParseMode.HTML)
+    with db_connect() as conn:
+        conn.execute("UPDATE wordchain_games SET message_id=?,updated_at=? WHERE game_id=?",
+                     (sent.message_id, now, game_id)); conn.commit()
+
+async def on_wordchain_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat; msg = update.effective_message; user = update.effective_user
+    if not chat or not msg or not user or user.is_bot: return
+    game_id = _wc_watchers.get(chat.id)
+    if not game_id: return
+    game = wc_get(game_id)
+    if not game or game["status"] != "active": return
+    word = (msg.text or "").strip().lower()
+    if not word or not word.isalpha() or len(word) < 2: return
+    lang = game["lang"]
+    last_word = (game["last_word"] or "").strip().lower()
+    used = _json.loads(game["used_words"] or "[]")
+    # Timeout check (30 sec)
+    last_time = _wc_timers.get(game_id, 0)
+    now = _wc_now()
+    # Starting letter check
+    req_letter = last_word[-1] if last_word else ""
+    if req_letter and not word.startswith(req_letter):
+        try: await msg.reply_text(f"❌ Word must start with '<b>{req_letter.upper()}</b>'!", parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if word in used:
+        try: await msg.reply_text(f"❌ '<b>{html.escape(word)}</b>' already used!", parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    # Valid!
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    used.append(word)
+    scores = _json.loads(game["score_json"] or "{}")
+    key = str(user.id)
+    if key not in scores:
+        scores[key] = {"name": uname, "score": 0}
+    scores[key]["score"] += 1
+    scores[key]["name"] = uname
+    round_count = int(game["round_count"]) + 1
+    with db_connect() as conn:
+        conn.execute(
+            """UPDATE wordchain_games SET last_word=?,last_user_id=?,last_user_name=?,
+               used_words=?,score_json=?,round_count=?,updated_at=? WHERE game_id=?""",
+            (word, user.id, uname, _json.dumps(used), _json.dumps(scores), round_count, now, game_id)
+        ); conn.commit()
+    _wc_timers[game_id] = now
+    lb_update_leaderboard(user.id, chat.id, uname, wordchain_words=1, coins=2)
+    game = wc_get(game_id)
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat.id, message_id=game["message_id"],
+            text=wc_render(game, f"✅ {html.escape(uname)}: '{word}'"),
+            reply_markup=wc_markup(game_id, "active"), parse_mode=ParseMode.HTML)
+    except: pass
+
+async def on_wordchain_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query; user = update.effective_user
+    if not query or not user or not query.data: return
+    try: _, game_id, action, _ = query.data.split("|", 3)
+    except: await query.answer("Invalid.", True); return
+    game = wc_get(game_id)
+    if not game: await query.answer("Game not found.", True); return
+    chat_id = int(game["chat_id"])
+    if action == "end":
+        now = _wc_now()
+        with db_connect() as conn:
+            conn.execute("UPDATE wordchain_games SET status='done',updated_at=? WHERE game_id=?", (now, game_id)); conn.commit()
+        _wc_watchers.pop(chat_id, None)
+        _wc_timers.pop(game_id, None)
+        scores = _json.loads(game["score_json"] or "{}")
+        sorted_s = sorted(scores.values(), key=lambda x: -x["score"])
+        medals  = ["🥇","🥈","🥉"]
+        sb_lines = [f"🔗 <b>Word Chain — Final Results</b>", "━━━━━━━━━━━━━━━━━━",
+                    f"Total words: <b>{game['round_count']}</b>", ""]
+        for i, v in enumerate(sorted_s[:5]):
+            m = medals[i] if i < 3 else f"{i+1}."
+            sb_lines.append(f"{m} <b>{html.escape(v['name'])}</b> — {v['score']} words")
+        await query.answer("Game ended!")
+        try: await query.edit_message_text("\n".join(sb_lines),
+                                           reply_markup=wc_markup(game_id,"done"), parse_mode=ParseMode.HTML)
+        except: pass
+        return
+    if action == "again":
+        lang = game["lang"]; now = _wc_now()
+        new_id = _wc_id()
+        starter = random.choice(_WC_COMMON_BN if lang == "bn" else _WC_COMMON_EN)
+        with db_connect() as conn:
+            conn.execute(
+                """INSERT INTO wordchain_games (game_id,chat_id,message_id,lang,last_word,
+                   last_user_id,last_user_name,used_words,score_json,status,round_count,created_at,updated_at)
+                   VALUES (?,?,?,?,?,?,?,?,?,'active',0,?,?)""",
+                (new_id, chat_id, game["message_id"], lang, starter, 0, BOT_NAME,
+                 _json.dumps([starter]), "{}", now, now)
+            ); conn.commit()
+        _wc_watchers[chat_id] = new_id
+        _wc_timers[new_id] = now
+        new_game = wc_get(new_id)
+        await query.answer("New game!")
+        try: await query.edit_message_text(
+            wc_render(new_game, f"New game! I start with: '{starter}'"),
+            reply_markup=wc_markup(new_id,"active"), parse_mode=ParseMode.HTML)
+        except: pass
+
 # ─── post_init & build_app ────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
     commands=[
-        BotCommand("start","Show bot info"),BotCommand("ping","Bot alive check"),BotCommand("support","Support group"),BotCommand("myid","Show your user id"),BotCommand("aistatus","Check Groq AI status"),BotCommand("analytics","Show group analytics"),BotCommand("setvoice","Set Bengali female voice"),BotCommand("welcomestyle","Set welcome banner theme"),BotCommand("setfooter","Set welcome footer text"),BotCommand("lang","Change group language"),BotCommand("groupcount","Owner: count groups"),BotCommand("activegroups","Owner: recent active groups"),BotCommand("failedgroups","Owner: recent failed groups"),BotCommand("lastaierrors","Owner: recent AI errors"),BotCommand("hourlyclean","Auto-delete hourly messages"),BotCommand("setcountdown","Set special event countdown"),BotCommand("countdown","Show current countdown card"),BotCommand("clearcountdown","Clear group countdown"),BotCommand("setexamday","Set exam day reminder"),BotCommand("examday","Show exam day reminder"),BotCommand("clearexamday","Clear exam day reminder"),BotCommand("voice","Toggle welcome voice"),BotCommand("deleteservice","Toggle service delete"),BotCommand("hourly","Toggle hourly texts"),BotCommand("setwelcome","Custom welcome text"),BotCommand("resetwelcome","Reset custom welcome"),BotCommand("status","Show group status"),BotCommand("testwelcome","Send test welcome"),BotCommand("broadcast","Owner: broadcast text or replied media"),BotCommand("xo","X-O game: /xo or /xo bot"),BotCommand("rps","Rock Paper Scissors: /rps or /rps bot"),BotCommand("luckybox","Lucky Box with coins system"),
+        BotCommand("start","Show bot info"),
+        BotCommand("ping","Bot alive check"),
+        BotCommand("support","Support group"),
+        BotCommand("myid","Show your user id"),
+        BotCommand("aistatus","Check Groq AI status"),
+        BotCommand("analytics","Show group analytics"),
+        BotCommand("status","Show group status"),
+        BotCommand("lang","Change language: /lang bn or /lang en"),
+        BotCommand("voice","Toggle welcome voice: /voice on/off"),
+        BotCommand("hourly","Toggle hourly texts: /hourly on/off/now"),
+        BotCommand("deleteservice","Toggle service msg delete"),
+        BotCommand("setwelcome","Custom welcome text"),
+        BotCommand("resetwelcome","Reset custom welcome"),
+        BotCommand("welcomestyle","Set welcome banner theme"),
+        BotCommand("setfooter","Set welcome footer text"),
+        BotCommand("setvoice","Set Bengali voice: bd or in"),
+        BotCommand("hourlyclean","Auto-delete hourly messages"),
+        BotCommand("setcountdown","Set event countdown"),
+        BotCommand("countdown","Show countdown card"),
+        BotCommand("clearcountdown","Clear group countdown"),
+        BotCommand("setexamday","Set exam day reminder"),
+        BotCommand("examday","Show exam day reminder"),
+        BotCommand("clearexamday","Clear exam day reminder"),
+        BotCommand("groupcount","Owner: count groups"),
+        BotCommand("activegroups","Owner: recent active groups"),
+        BotCommand("failedgroups","Owner: recent failed groups"),
+        BotCommand("lastaierrors","Owner: recent AI errors"),
+        BotCommand("broadcast","Owner: broadcast text or media"),
+        BotCommand("leaderboard","Game leaderboard"),
+        BotCommand("quiz","Start a quiz game"),
+        BotCommand("guess","Number guessing game 1-100"),
+        BotCommand("tod","Truth or Dare"),
+        BotCommand("wordchain","Word chain game"),
+        BotCommand("xo","X-O game: /xo or /xo bot"),
+        BotCommand("rps","Rock Paper Scissors: /rps or /rps bot"),
+        BotCommand("luckybox","Lucky Box with coins system"),
+        BotCommand("testwelcome","Send test welcome"),
     ]
-    for scope in [BotCommandScopeDefault(),BotCommandScopeAllPrivateChats(),BotCommandScopeAllGroupChats(),BotCommandScopeAllChatAdministrators()]:
+    for scope in [BotCommandScopeDefault(),BotCommandScopeAllPrivateChats(),
+                  BotCommandScopeAllGroupChats(),BotCommandScopeAllChatAdministrators()]:
         try: await application.bot.set_my_commands(commands,scope=scope)
         except: logger.exception("Failed to set bot commands for scope: %s",scope)
     logger.info("Bot command menus synced")
 
 def build_app():
     application=ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
+    # Core commands
     application.add_handler(CommandHandler("start",on_start))
     application.add_handler(CommandHandler("support",on_support))
     application.add_handler(CommandHandler("ping",on_ping))
@@ -3426,21 +4332,40 @@ def build_app():
     application.add_handler(CommandHandler("status",on_status))
     application.add_handler(CommandHandler("testwelcome",on_testwelcome))
     application.add_handler(CommandHandler("broadcast",on_broadcast))
+    # Game commands
+    application.add_handler(CommandHandler("leaderboard",on_leaderboard))
+    application.add_handler(CommandHandler("quiz",on_quiz))
+    application.add_handler(CommandHandler("guess",on_guess))
+    application.add_handler(CommandHandler("tod",on_tod))
+    application.add_handler(CommandHandler("wordchain",on_wordchain))
     application.add_handler(CommandHandler("xo",on_xo))
     application.add_handler(CommandHandler("rps",on_rps))
     application.add_handler(CommandHandler("luckybox",on_luckybox))
-    application.add_handler(CallbackQueryHandler(on_xo_callback,pattern=r"^xo\|"))
-    application.add_handler(CallbackQueryHandler(on_rps_callback,pattern=r"^rps\|"))
-    application.add_handler(CallbackQueryHandler(on_luckybox_callback,pattern=r"^lb\|"))
+    # Callback handlers
+    application.add_handler(CallbackQueryHandler(on_quiz_callback,     pattern=r"^quiz\|"))
+    application.add_handler(CallbackQueryHandler(on_guess_callback,    pattern=r"^guess\|"))
+    application.add_handler(CallbackQueryHandler(on_tod_callback,      pattern=r"^tod\|"))
+    application.add_handler(CallbackQueryHandler(on_wordchain_callback,pattern=r"^wc\|"))
+    application.add_handler(CallbackQueryHandler(on_xo_callback,       pattern=r"^xo\|"))
+    application.add_handler(CallbackQueryHandler(on_rps_callback,      pattern=r"^rps\|"))
+    application.add_handler(CallbackQueryHandler(on_luckybox_callback, pattern=r"^lb\|"))
+    # Message handlers (order matters)
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS,on_new_chat_members))
     application.add_handler(ChatMemberHandler(on_chat_member,ChatMemberHandler.CHAT_MEMBER))
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS&filters.TEXT&~filters.COMMAND,on_keyword_message))
-    application.add_handler(MessageHandler(filters.ChatType.GROUPS&~filters.COMMAND,track_group))
+    application.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND & filters.Regex(r"^\d+$"),
+        on_guess_message))
+    application.add_handler(MessageHandler(
+        filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND & filters.Regex(r"^[a-zA-Z\u0980-\u09ff]+$"),
+        on_wordchain_message))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND, on_keyword_message))
+    application.add_handler(MessageHandler(filters.ChatType.GROUPS & ~filters.COMMAND, track_group))
     return application
 
 def main():
     init_db()
     init_games_db()
+    init_extra_games_db()
     threading.Thread(target=run_flask,daemon=True).start()
     threading.Thread(target=hourly_loop,daemon=True).start()
     threading.Thread(target=cleanup_loop,daemon=True).start()
