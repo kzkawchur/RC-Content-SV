@@ -1152,67 +1152,612 @@ async def maybe_send_milestone(context,chat_id,title,lang):
         asyncio.create_task(schedule_delete(context.bot,chat_id,msg.message_id,WELCOME_DELETE_AFTER+30))
     except: logger.exception("Milestone send failed in chat %s",chat_id)
 
-async def maybe_welcome(context,chat_id,title,user):
-    ensure_group(chat_id,title or "")
-    group=get_group(chat_id)
-    if not group or int(group["enabled"])!=1 or user.is_bot: return
-    if is_recent_duplicate(chat_id,user.id): return
-    if time.time()-get_last_join_time(chat_id,user.id)<REJOIN_IGNORE_SECONDS: return
-    lang=get_group_lang(chat_id)
-    first_name=clean_name(user.first_name)
-    mention_name=user.mention_html(first_name)
-    save_join_time(chat_id,user.id)
+# ═══════════════════════════════════════════════════════════════════════════════
+# SMART ENGINE v3 — AI Welcome · Anti-Raid · Extended Keywords · Groq v2
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Anti-Raid System ─────────────────────────────────────────────────────────
+raid_join_window: dict[int, deque] = defaultdict(lambda: deque(maxlen=30))
+raid_alert_sent:  dict[int, float] = {}
+RAID_THRESHOLD = 7
+RAID_WINDOW    = 20
+RAID_COOLDOWN  = 120
+
+def is_raid_detected(chat_id: int) -> bool:
+    now = time.time()
+    w = raid_join_window[chat_id]
+    w.append(now)
+    while w and now - w[0] > RAID_WINDOW:
+        w.popleft()
+    return len(w) >= RAID_THRESHOLD
+
+def raid_cooldown_active(chat_id: int) -> bool:
+    return (time.time() - raid_alert_sent.get(chat_id, 0)) < RAID_COOLDOWN
+
+def mark_raid_alerted(chat_id: int):
+    raid_alert_sent[chat_id] = time.time()
+
+RAID_WARN_BN = [
+    "⚠️ অনেক নতুন সদস্য একসাথে যোগ দিচ্ছে। Admin-রা সতর্ক থাকুন।",
+    "🚨 অস্বাভাবিক join activity ধরা পড়েছে। Admin-রা চেক করুন।",
+    "🛡️ দ্রুত join হচ্ছে — group admin-রা একটু নজর রাখুন।",
+]
+RAID_WARN_EN = [
+    "⚠️ Unusual join activity detected. Admins, please stay alert.",
+    "🚨 Multiple rapid joins spotted. Group admins — heads up!",
+    "🛡️ Fast joins detected — admins, please check the group.",
+]
+
+async def handle_raid_check(bot, chat_id: int, lang: str):
+    if is_raid_detected(chat_id) and not raid_cooldown_active(chat_id):
+        mark_raid_alerted(chat_id)
+        warn = random.choice(RAID_WARN_EN if lang == "en" else RAID_WARN_BN)
+        try:
+            await bot.send_message(chat_id=chat_id, text=warn)
+        except Exception:
+            pass
+        logger.warning("Raid detected in chat %s", chat_id)
+
+# ─── Extended Smart Keyword System ────────────────────────────────────────────
+BIRTHDAY_PATTERNS  = [r"\bbirthday\b",r"\bhbd\b",r"\bhappy bday\b",r"জন্মদিন",r"শুভ জন্মদিন",r"জন্মদিনের শুভেচ্ছা"]
+CONGRATS_PATTERNS  = [r"\bcongrats?\b",r"\bwell done\b",r"\bbravo\b",r"অভিনন্দন",r"শুভকামনা",r"মাশাআল্লাহ",r"\bwon\b",r"\bpassed\b",r"পাস করেছ"]
+SAD_PATTERNS       = [r"\bsad\b",r"\bcrying\b",r"\bcry\b",r"\bdepressed\b",r"মন খারাপ",r"কষ্ট লাগছে",r"কাঁদছি",r"দুঃখ"]
+STRESS_PATTERNS    = [r"\bstressed?\b",r"\btired\b",r"\bexhausted\b",r"\bworried\b",r"\bexam\b",r"ক্লান্ত",r"টেনশন",r"পরীক্ষা",r"চিন্তা করছি"]
+FOOD_PATTERNS      = [r"\bfood\b",r"\blunch\b",r"\bdinner\b",r"\bbreakfast\b",r"\bkhabar\b",r"খাবার",r"ভাত খাব",r"বিরিয়ানি",r"ইফতার",r"রান্না"]
+LOVE_PATTERNS      = [r"\blove\b",r"\blovely\b",r"\bbeautiful\b",r"সুন্দর",r"ভালো লাগছে",r"\bawesome\b",r"\bamazing\b"]
+MORNING_GREET      = [r"^শুভ সকাল$",r"^good morning$",r"^gm$",r"^subah$"]
+NIGHT_GREET        = [r"^শুভ রাত্রি$",r"^good night$",r"^gn$",r"^রাত্রি$"]
+
+BIRTHDAY_R_BN = ["🎂 জন্মদিনের উষ্ণ শুভেচ্ছা! ✨ আজকের দিনটা হোক অসাধারণ।","🎉 শুভ জন্মদিন! 🌟 এই বিশেষ দিনে অনেক ভালো থাকুন।","🎈 জন্মদিনে অনেক দোয়া ও শুভেচ্ছা রইল।💫 সুন্দর একটা বছর কাটুক।","💝 আজকের এই বিশেষ দিনে group-এর পক্ষ থেকে জন্মদিনের শুভেচ্ছা! 🌸"]
+BIRTHDAY_R_EN = ["🎂 Happy Birthday! ✨ Wishing you an incredible day!","🎉 Many happy returns! 🌟 Hope today feels truly special.","🎈 Warmest birthday wishes! 💫 May this year be your best yet.","💝 The whole group celebrates with you today! Happy Birthday! 🌸"]
+
+CONGRATS_R_BN = ["🎊 অভিনন্দন! তোমার সাফল্যে আমরাও আনন্দিত। ✨","🏆 অসাধারণ খবর! group-এর পক্ষ থেকে শুভকামনা ও অভিনন্দন।","💫 বাহ! অনেক অনেক অভিনন্দন। ভালো থাকো।","🌟 তোমার এই সাফল্য আমাদেরও গর্বিত করে। অভিনন্দন!"]
+CONGRATS_R_EN = ["🎊 Congratulations! We're all so proud of you! ✨","🏆 Amazing news! The whole group celebrates your success.","💫 Well deserved! Warm congratulations from everyone here.","🌟 Your achievement makes us all proud. Congrats!"]
+
+SAD_R_BN = ["🌷 মন খারাপ থাকলে বলো। এই group সবসময় তোমার পাশে।","💙 কষ্টের সময়টা কেটে যাবে। শান্ত থাকো, ভালো হবে ইনশাআল্লাহ।","🕊️ একটু খারাপ লাগলেও ঠিক হয়ে যাবে। আমরা আছি।","🌸 ভেঙে পড়ো না। এই কঠিন সময়টাও কেটে যাবে।"]
+SAD_R_EN = ["🌷 Hey, it's okay. This group is here with you always. 💙","🕊️ Tough times pass. Hang in there — better days are coming.","💫 You're not alone here. Take it easy and breathe.","🌸 It's okay not to be okay sometimes. We're with you."]
+
+STRESS_R_BN = ["📚 একটু বিশ্রাম নাও। তুমি পারবে, শান্ত থাকো।","💪 একটু কঠিন লাগলেও হাল ছেড়ো না। এগিয়ে যাও।","🍵 থামো, শ্বাস নাও। এক ধাপ এক ধাপ করে এগোলেই হবে।","🌿 চাপ নেওয়াটা স্বাভাবিক। কিন্তু মনে রেখো, তুমি যথেষ্ট সক্ষম।"]
+STRESS_R_EN = ["📚 Take a short break — you've absolutely got this! 💪","🍵 Breathe. One step at a time. You'll get through it.","🌷 It's okay to feel overwhelmed. Rest and reset — you can do it.","🌿 The pressure is real, but so is your strength. Keep going."]
+
+FOOD_R_BN = ["🍽️ খাবারের কথায় মেজাজ ভালো হয়ে যায়! 😄 মজা করে খাও।","🥘 বিরিয়ানি হলে আরও ভালো হতো! 😋 যা-ই হোক, ভালো খাও।","🍜 খেয়ে নাও, বাকি কাজ পরে হবে। 😄","🌶️ খাওয়ার আলোচনায় group জমে ওঠে! ভালো খাও সবাই।"]
+FOOD_R_EN = ["🍽️ Food talk = instant mood boost! 😄 Enjoy your meal!","🥘 Now I'm hungry too! 😋 Eat well, eat happy!","🍜 Good food, good mood. Savor every bite! 😄","🌶️ Nothing unites a group like food talk! Enjoy! 🍽️"]
+
+LOVE_R_BN = ["🌸 সুন্দর অনুভূতি ভাগ করে নেওয়াটা দারুণ। group-কে সুন্দর রাখো।","✨ এই ইতিবাচক energy group-এ ছড়িয়ে পড়ুক।","💫 ভালো লাগার মুহূর্তগুলো মূল্যবান। ধরে রাখো।"]
+LOVE_R_EN = ["🌸 Sharing good vibes makes the group beautiful. Keep it up!","✨ That positive energy is contagious — love it!","💫 Good moments like these are worth savoring."]
+
+MORNING_R_BN = ["🌅 শুভ সকাল! দিনটা সুন্দর হোক সবার।","☀️ সকালের নরম আলোয় সবাইকে শুভেচ্ছা!","🌤️ নতুন দিনের শুভ সূচনা হোক সবার।"]
+MORNING_R_EN = ["🌅 Good morning! Wishing everyone a beautiful day.","☀️ Morning greetings to this wonderful group!","🌤️ A fresh start to a great day — good morning!"]
+
+NIGHT_R_BN = ["🌙 শুভ রাত্রি! আরামদায়ক ঘুম হোক।","⭐ রাতের শান্তিতে সবাই ভালো থাকুন।","💤 আজকের দিনটা সুন্দর ছিল। রাতটাও হোক তেমন।"]
+NIGHT_R_EN = ["🌙 Good night! Rest well, everyone.","⭐ Peaceful night to this lovely group.","💤 Sweet dreams! See everyone tomorrow."]
+
+SMART_KW_CHECKS = [
+    ("birthday",  BIRTHDAY_PATTERNS),
+    ("congrats",  CONGRATS_PATTERNS),
+    ("sad",       SAD_PATTERNS),
+    ("stress",    STRESS_PATTERNS),
+    ("food",      FOOD_PATTERNS),
+    ("love",      LOVE_PATTERNS),
+    ("morning",   MORNING_GREET),
+    ("night",     NIGHT_GREET),
+]
+SMART_KW_REPLIES: dict[str, tuple] = {
+    "birthday": (BIRTHDAY_R_BN, BIRTHDAY_R_EN),
+    "congrats":  (CONGRATS_R_BN, CONGRATS_R_EN),
+    "sad":       (SAD_R_BN, SAD_R_EN),
+    "stress":    (STRESS_R_BN, STRESS_R_EN),
+    "food":      (FOOD_R_BN, FOOD_R_EN),
+    "love":      (LOVE_R_BN, LOVE_R_EN),
+    "morning":   (MORNING_R_BN, MORNING_R_EN),
+    "night":     (NIGHT_R_BN, NIGHT_R_EN),
+}
+SMART_KW_COOLDOWNS = {
+    "birthday": 86400,  "congrats": 3600, "sad": 1800,
+    "stress": 1800, "food": 900, "love": 1200,
+    "morning": 3600, "night": 3600,
+}
+SMART_KW_CHANCES = {
+    "birthday": 0.95, "congrats": 0.90, "sad": 0.85,
+    "stress": 0.75, "food": 0.55, "love": 0.45,
+    "morning": 0.70, "night": 0.70,
+}
+smart_kw_chat_at: dict[int, dict[str, float]] = defaultdict(dict)
+
+def smart_keyword_match(text: str) -> str | None:
+    lowered = re.sub(r"\s+", " ", (text or "").lower().strip())
+    if not lowered or URLISH_RE.search(lowered) or len(lowered) > 120:
+        return None
+    for key, patterns in SMART_KW_CHECKS:
+        for p in patterns:
+            if re.search(p, lowered, re.I):
+                return key
+    return None
+
+def smart_kw_allowed(chat_id: int, key: str) -> bool:
+    now = time.time()
+    cooldown = SMART_KW_COOLDOWNS.get(key, 1800)
+    last = smart_kw_chat_at[chat_id].get(key, 0)
+    if now - last >= cooldown:
+        smart_kw_chat_at[chat_id][key] = now
+        return True
+    return False
+
+def smart_kw_reply(lang: str, key: str) -> str | None:
+    if key not in SMART_KW_REPLIES:
+        return None
+    pool_bn, pool_en = SMART_KW_REPLIES[key]
+    return random.choice(pool_en if lang == "en" else pool_bn)
+
+# ─── AI Welcome (Groq-powered, cached, graceful fallback) ────────────────────
+_AI_WELCOME_CACHE: dict[tuple, str] = {}
+_AI_WELCOME_TS:    dict[tuple, float] = {}
+_AI_WELCOME_TTL = 1800  # 30 min cache
+
+def groq_generate_welcome(lang: str, first_name: str, group_title: str, phase: str) -> str | None:
+    if not GROQ_API_KEYS:
+        return None
+    key = (lang, first_name[:10], (group_title or "")[:20], phase)
+    now = time.time()
+    if key in _AI_WELCOME_CACHE and now - _AI_WELCOME_TS.get(key, 0) < _AI_WELCOME_TTL:
+        return _AI_WELCOME_CACHE[key]
+
+    safe_name  = first_name[:20].strip()
+    safe_group = (group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ"))[:30].strip()
+    ph_en = {"morning":"morning","day":"afternoon","evening":"evening","night":"night"}.get(phase,"day")
+    ph_bn = {"morning":"সকাল","day":"দিন","evening":"সন্ধ্যা","night":"রাত"}.get(phase,"দিন")
+
+    if lang == "en":
+        prompt = (
+            f"Write ONE short, warm, premium welcome message in English for a Telegram group.\n"
+            f"New member: {safe_name} | Group: {safe_group} | Time: {ph_en}\n"
+            f"Rules: 1-2 sentences, under 130 chars, warm & elegant, mention the member's name "
+            f"naturally, match time-of-day ({ph_en}), max 2 emojis, no hashtags, no AI/bot mentions, "
+            f"sound like a genuine human host, avoid clichés like 'have a great day'.\n"
+            f"Return ONLY the welcome message, nothing else."
+        )
+    else:
+        prompt = (
+            f"একটি Telegram group-এর জন্য একটি উষ্ণ, মার্জিত বাংলা স্বাগত বার্তা লেখো।\n"
+            f"নতুন সদস্য: {safe_name} | Group: {safe_group} | সময়: {ph_bn}\n"
+            f"নিয়ম: ১-২ বাক্য, ১৩০ অক্ষরের মধ্যে, উষ্ণ ও মার্জিত, নামটি স্বাভাবিকভাবে উল্লেখ করো, "
+            f"সময়ের ({ph_bn}) সাথে মিলিয়ে লেখো, সর্বোচ্চ ২টা emoji, hashtag নয়, "
+            f"AI/bot উল্লেখ নয়, মানবিক host-এর মতো লেখো, cliché পরিহার করো।\n"
+            f"শুধু স্বাগত বার্তাটি দাও।"
+        )
+    try:
+        data = _groq_chat_request({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content":
+                 "You write premium, tasteful, emotionally intelligent Telegram group welcome messages. "
+                 "Every message feels genuinely human, fresh, and perfectly timed. Never sound robotic."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.93,
+            "max_tokens": 90,
+        })
+        raw = (data["choices"][0]["message"]["content"] or "").strip()
+        raw = re.sub(r'^["\']|["\']$', "", raw).strip()
+        if len(raw) < 10 or len(raw) > 220:
+            return None
+        _AI_WELCOME_CACHE[key] = raw
+        _AI_WELCOME_TS[key] = now
+        logger.info("AI welcome OK | lang=%s name=%s", lang, safe_name)
+        return raw
+    except Exception as e:
+        logger.warning("AI welcome failed: %s", e)
+        return None
+
+def smart_welcome_text(lang: str, mention_name: str, first_name: str,
+                       group_title: str, custom_text: str | None, chat_id: int = 0) -> tuple[str, str]:
+    phase = phase_now()
+    safe_group = group_title or ("our group" if lang == "en" else "আমাদের গ্রুপ")
+    if custom_text:
+        text = custom_text.replace("{name}", mention_name).replace("{group}", safe_group).replace("{phase}", phase)
+        voice = (f"Hello {first_name}, welcome to {safe_group}." if lang == "en"
+                 else f"{first_name}, তোমাকে {safe_group} এ স্বাগতম।")
+        return text, voice
+
+    # Try Groq AI welcome
+    ai_raw = None
+    try:
+        ai_raw = groq_generate_welcome(lang, first_name, group_title or "", phase)
+    except Exception:
+        pass
+
+    if ai_raw and len(ai_raw) > 10:
+        if first_name in ai_raw:
+            ai_text = ai_raw.replace(first_name, mention_name, 1)
+        else:
+            ai_text = f"{mention_name} — {ai_raw}"
+        voice = personalize_voice_text(
+            f"Hello {first_name}, welcome to {safe_group}." if lang == "en"
+            else f"হ্যালো {first_name}, {safe_group} এ তোমাকে স্বাগতম।",
+            first_name, lang, chat_id
+        )
+        return ai_text, voice
+
+    # Template fallback
+    return welcome_texts(lang, mention_name, first_name, group_title, None, chat_id)
+
+# ─── Groq Hourly v2 (Advanced, context-aware prompts) ────────────────────────
+_GROQ_SYSTEM_V2 = (
+    "You are an expert Telegram community manager writing premium, human-feeling group messages. "
+    "Your messages are warm, emotionally intelligent, culturally sensitive, and never repetitive. "
+    "You write as if you genuinely care about the group members. "
+    "You avoid clichés, never over-use emojis, and make every single message feel fresh and authentic. "
+    "You match the tone precisely to the time of day and mood requested."
+)
+
+def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_key: str = "") -> list[str]:
+    if not AI_HOURLY_ENABLED or not GROQ_API_KEYS:
+        _update_groq_status(False, "Groq disabled or API key missing")
+        return []
+
+    ph_map = {
+        "bn": {"morning":"সকাল","day":"দিন বা দুপুর","evening":"সন্ধ্যা","night":"রাত"},
+        "en": {"morning":"morning","day":"daytime or afternoon","evening":"evening","night":"night"},
+    }
+    mood_desc_en = {
+        "peaceful":   "calm, serene, mindful — like a quiet Sunday morning",
+        "motivating": "uplifting, forward-looking, quietly encouraging",
+        "classy":     "elegant, refined, sophisticated — like a luxury brand",
+        "cozy":       "warm, intimate, comforting — like a cup of tea",
+        "soft":       "gentle, tender, delicate — like a warm whisper",
+        "energetic":  "lively, vibrant, enthusiastic — like a morning run",
+    }
+    mood_desc_bn = {
+        "peaceful":   "শান্ত, প্রশান্তিময় — যেন একটি শান্ত রবিবারের সকাল",
+        "motivating": "অনুপ্রেরণামূলক, উৎসাহজনক — সামনে এগিয়ে যাওয়ার আহ্বান",
+        "classy":     "মার্জিত, পরিশীলিত — যেন একটি luxury brand-এর ভাষা",
+        "cozy":       "আরামদায়ক, উষ্ণ — যেন এক কাপ গরম চা",
+        "soft":       "কোমল, মৃদু — যেন একটি উষ্ণ ফিসফিসানি",
+        "energetic":  "প্রাণবন্ত, উদ্যমী — যেন ভোরের হাঁটা",
+    }
+    festival_note = (f"- Subtly reflect a festive mood for {festival_hourly_prefix(lang)}, "
+                     f"but keep it tasteful and inclusive\n") if festival_key else ""
+
+    if lang == "en":
+        ph = ph_map["en"][phase]
+        md = mood_desc_en.get(mood, "warm and elegant")
+        prompt = (
+            f"Write {AI_BATCH_SIZE} unique, premium Telegram group hourly messages in English.\n"
+            f"Time of day: {ph}  |  Emotional tone: {md}\n\n"
+            f"Non-negotiable rules:\n"
+            f"- Each message: 22–{AI_MAX_TEXT_LEN} characters, one complete and meaningful thought\n"
+            f"- Must authentically match {ph} — never use wrong-time greetings\n"
+            f"- Warm, human, and elegant — never robotic, never generic\n"
+            f"- Max 2 emojis per message — use them purposefully, not decoratively\n"
+            f"- No hashtags, no romantic content, no politics, no religion\n"
+            f"- Never use: 'have a great day', 'stay blessed', 'good vibes only', or similar clichés\n"
+            f"- Each of the {AI_BATCH_SIZE} messages must have a DIFFERENT opening word and sentence structure\n"
+            f"- Write as a thoughtful human host who genuinely cares, not as a bot\n"
+            f"- Messages should feel like they come from wisdom, not from a template\n"
+            f"{festival_note}"
+            f"\nReturn ONLY the {AI_BATCH_SIZE} messages, one per line, no numbers or bullets."
+        )
+    else:
+        ph = ph_map["bn"][phase]
+        md = mood_desc_bn.get(mood, "উষ্ণ ও মার্জিত")
+        prompt = (
+            f"বাংলায় {AI_BATCH_SIZE}টি অনন্য, প্রিমিয়াম Telegram group hourly বার্তা লেখো।\n"
+            f"সময়: {ph}  |  মনোভাব: {md}\n\n"
+            f"অলঙ্ঘনীয় নিয়ম:\n"
+            f"- প্রতিটি বার্তা: ২২–{AI_MAX_TEXT_LEN} অক্ষর, একটি সম্পূর্ণ ও অর্থবহ ভাব\n"
+            f"- অবশ্যই {ph}-এর সাথে মানানসই হবে — ভুল সময়ের শুভেচ্ছা নয়\n"
+            f"- উষ্ণ, মানবিক, মার্জিত — robotic বা generic নয়\n"
+            f"- প্রতিটি বার্তায় সর্বোচ্চ ২টা emoji — উদ্দেশ্যমূলকভাবে ব্যবহার করো\n"
+            f"- hashtag নয়, romantic নয়, রাজনৈতিক নয়, ধর্মীয় নয়\n"
+            f"- 'ভালো থাকুন', 'সুখী থাকুন', 'আল্লাহ ভালো রাখুন' — এই ধরনের cliché পরিহার\n"
+            f"- প্রতিটি বার্তার প্রথম শব্দ ও বাক্যের গঠন আলাদা হতে হবে\n"
+            f"- একজন চিন্তাশীল, যত্নশীল মানুষের মতো লেখো — bot-এর মতো নয়\n"
+            f"- বার্তাগুলো যেন জ্ঞান ও অনুভূতি থেকে আসে, template থেকে নয়\n"
+            f"{festival_note}"
+            f"\nশুধু {AI_BATCH_SIZE}টি বার্তা দাও, একটি করে লাইনে, কোনো নম্বর বা bullet নয়।"
+        )
+    try:
+        data = _groq_chat_request({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": _GROQ_SYSTEM_V2},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.88,
+            "max_tokens": 520,
+        })
+        content = data["choices"][0]["message"]["content"]
+        lines = sanitize_ai_lines(content, lang, phase)
+        if lines:
+            _update_groq_status(True, f"v2 OK | {len(lines)} lines | {mood}")
+            logger.info("Groq v2 | lang=%s phase=%s mood=%s count=%s", lang, phase, mood, len(lines))
+            return lines
+        _update_groq_status(False, "Groq v2 empty/filtered")
+        return []
+    except Exception as e:
+        _update_groq_status(False, f"v2 fail: {e}")
+        record_failure("ai", None, "", str(e))
+        logger.exception("Groq v2 fail | lang=%s phase=%s", lang, phase)
+        return []
+
+def get_batch_pool_v2(lang: str, phase: str, mood: str = "soft", festival_key: str = ""):
+    key = (lang, phase, mood, festival_key, "v2")
+    cached = AI_BATCH_CACHE.get(key)
+    now_ts = time.time()
+    if cached and now_ts - cached["created_at"] < 900 and cached.get("texts"):
+        return cached["texts"], cached["source"]
+    # v2 first → v1 fallback → static fallback
+    ai_lines = groq_generate_batch_v2(lang, phase, mood=mood, festival_key=festival_key)
+    if not ai_lines:
+        ai_lines = groq_generate_batch(lang, phase, mood=mood, festival_key=festival_key)
+    if ai_lines:
+        source, texts = "ai", ai_lines
+    else:
+        source, texts = "fallback", build_fallback_messages(lang, phase, mood=mood, festival_key=festival_key)
+    AI_BATCH_CACHE[key] = {"texts": texts, "source": source, "created_at": now_ts}
+    for line in texts[:12]:
+        try: save_generated_text(lang, phase, source, line)
+        except: pass
+    return texts, source
+
+# ─── Improved Hourly Loop (equal for all groups, no skip) ────────────────────
+def hourly_loop():
+    logger.info("Hourly Loop started")
+    while True:
+        try:
+            due_rows = get_enabled_groups_for_hourly()
+            if due_rows:
+                phase = phase_now()
+                prepared = {}
+                for row in due_rows:
+                    chat_id = int(row["chat_id"])
+                    lang = get_group_lang(chat_id)
+                    mood = next_hourly_mood(chat_id)
+                    festival_key = (current_festival() or {}).get("key", "") if current_festival_mode(chat_id) else ""
+                    prepared[chat_id] = (lang, mood, festival_key)
+
+                pools = {}
+                pool_source = {}
+                for lang, mood, fk in {(l, m, f) for l, m, f in prepared.values()}:
+                    texts, source = get_batch_pool_v2(lang, phase, mood, fk)
+                    pools[(lang, mood, fk)] = texts
+                    pool_source[(lang, mood, fk)] = source
+
+                for row in due_rows:
+                    chat_id = int(row["chat_id"])
+                    if chat_id not in prepared:
+                        continue
+                    lang, mood, fk = prepared[chat_id]
+                    msg = pick_hourly_message(chat_id, lang, phase, pools[(lang, mood, fk)])
+                    ok, mid = send_message_http_full(chat_id, msg)
+                    if ok:
+                        set_group_value(chat_id, "last_hourly_at", int(time.time()))
+                        increment_group_counter(chat_id, "total_hourly_sent")
+                        if pool_source.get((lang, mood, fk)) == "ai":
+                            set_group_value(chat_id, "last_ai_success_at", int(time.time()))
+                        else:
+                            set_group_value(chat_id, "last_fallback_used_at", int(time.time()))
+                        ca = current_hourly_delete_after(chat_id)
+                        if ca > 0 and mid:
+                            schedule_http_delete(chat_id, mid, ca)
+                        try: maybe_send_countdown_reminder(chat_id, row["title"] or "")
+                        except: pass
+                        logger.info("Hourly sent to %s | mood=%s", chat_id, mood)
+                    else:
+                        logger.warning("Hourly failed to %s", chat_id)
+
+            for row in get_all_enabled_group_rows():
+                try: maybe_send_scheduled_specials(row)
+                except: logger.exception("Special scheduler failed in %s", row["chat_id"])
+
+            cleanup_daily_marks()
+        except Exception:
+            logger.exception("hourly_loop failed")
+        time.sleep(60)
+
+# ─── Smart track_group ────────────────────────────────────────────────────────
+async def track_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat and chat.type in {"group", "supergroup"}:
+        ensure_group(chat.id, chat.title or "")
+        msg = update.effective_message
+        if msg and not (msg.from_user and msg.from_user.is_bot):
+            body = (msg.text or msg.caption or "")[:300]
+            group_taste_memory[chat.id].append(detect_text_taste(body, chat.title or ""))
+
+# ─── Smart on_status ──────────────────────────────────────────────────────────
+async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    group = get_group(chat.id)
+    lang = get_group_lang(chat.id)
+    mood = peek_hourly_mood(chat.id)
+    aura = current_effective_aura(chat.id, phase_now())
+    await update.effective_message.reply_text(
+        t(lang, "status",
+          lang_name="Bangla" if lang == "bn" else "English",
+          voice="ON" if int(group["voice_enabled"]) == 1 else "OFF",
+          delete_service="ON" if int(group["delete_service"]) == 1 else "OFF",
+          hourly="ON" if int(group["hourly_enabled"]) == 1 else "OFF",
+          tz=TIMEZONE_NAME,
+          phase=phase_now()) +
+        f"\nMood wheel: {mood}\nAura theme: {aura}"
+    )
+
+# ─── Improved on_keyword_message (base + smart extended) ─────────────────────
+async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg = update.effective_message
+    user = update.effective_user
+    if not chat or chat.type not in {"group","supergroup"} or not msg or not user or user.is_bot:
+        return
+    ensure_group(chat.id, chat.title or "")
+
+    text = msg.text or ""
+
+    if not current_keyword_mode(chat.id) or is_linkish_message(msg):
+        return
+
+    # 1. Base keywords (salam / hello / night)
+    matched = keyword_reply_match(text)
+    if matched:
+        now_ts = time.time()
+        cd_ok  = now_ts - keyword_last_chat_at.get(chat.id, 0) >= KEYWORD_COOLDOWN_SECONDS
+        ucd_ok = now_ts - keyword_last_user_at.get((chat.id, user.id), 0) >= KEYWORD_USER_COOLDOWN_SECONDS
+        if cd_ok and ucd_ok and random.random() <= KEYWORD_REPLY_CHANCE:
+            lang = get_group_lang(chat.id)
+            options = [x for x in keyword_reply_variants(lang, matched, chat.id)
+                       if not was_recent_duplicate_text(chat.id, "keyword", x, 2)]
+            if not options:
+                options = keyword_reply_variants(lang, matched, chat.id)
+            reply_text = random.choice(options)
+            keyword_last_chat_at[chat.id] = now_ts
+            keyword_last_user_at[(chat.id, user.id)] = now_ts
+            try:
+                await bot_humanize(context.bot, chat.id, ChatAction.TYPING, "reply")
+                await msg.reply_text(reply_text)
+                mark_presence(chat.id)
+                record_sent_history(chat.id, "keyword", reply_text)
+            except Exception:
+                logger.exception("Base keyword reply failed in %s", chat.id)
+        return
+
+    # 2. Smart extended keywords (birthday, congrats, sad, stress, food, love, morning, night)
+    smart_key = smart_keyword_match(text)
+    if smart_key:
+        chance = SMART_KW_CHANCES.get(smart_key, 0.55)
+        if smart_kw_allowed(chat.id, smart_key) and random.random() < chance:
+            lang = get_group_lang(chat.id)
+            reply = smart_kw_reply(lang, smart_key)
+            if reply:
+                try:
+                    await asyncio.sleep(random.uniform(1.5, 3.5))
+                    await msg.reply_text(reply)
+                    mark_presence(chat.id)
+                    record_sent_history(chat.id, "smart_kw", reply)
+                except Exception:
+                    logger.exception("Smart keyword reply failed in %s", chat.id)
+
+# ─── Improved on_new_chat_members (with raid check) ──────────────────────────
+async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in {"group","supergroup"} or not update.effective_message:
+        return
+    ensure_group(chat.id, chat.title or "")
+    group = get_group(chat.id)
+    if int(group["delete_service"]) == 1:
+        try: await update.effective_message.delete()
+        except: pass
+    members = [m for m in (update.effective_message.new_chat_members or []) if not m.is_bot]
+    if not members:
+        return
+    lang = get_group_lang(chat.id)
+    asyncio.create_task(handle_raid_check(context.bot, chat.id, lang))
+    for member in members:
+        raid_join_window[chat.id].append(time.time())
+        chat_join_history[chat.id].append(time.time())
+        await queue_join_welcome(context.application, chat.id, chat.title or "", member)
+
+# ─── Improved maybe_welcome (AI-powered, smart, equal for all groups) ─────────
+async def maybe_welcome(context: ContextTypes.DEFAULT_TYPE, chat_id: int, title: str, user):
+    ensure_group(chat_id, title or "")
+    group = get_group(chat_id)
+    if not group or int(group["enabled"]) != 1 or user.is_bot:
+        return
+    if is_recent_duplicate(chat_id, user.id):
+        return
+    if time.time() - get_last_join_time(chat_id, user.id) < REJOIN_IGNORE_SECONDS:
+        return
+
+    lang = get_group_lang(chat_id)
+    first_name = clean_name(user.first_name)
+    mention_name = user.mention_html(first_name)
+    save_join_time(chat_id, user.id)
+
+    # Burst mode
     if is_join_burst(chat_id):
         try:
-            compact=t(lang,"burst_compact",name=mention_name,group=(title or ("our group" if lang=="en" else "আমাদের গ্রুপ")))
-            variants=variantize_message_text(chat_id,lang,compact,kind="welcome")
-            compact=next((v for v in variants if not was_recent_duplicate_text(chat_id,"welcome",v,2)),variants[0])
-            msg=await send_text_with_retry(context.bot,chat_id=chat_id,text=compact,parse_mode=ParseMode.HTML)
-            record_sent_history(chat_id,"welcome",compact)
-            set_group_value(chat_id,"last_primary_msg_id",msg.message_id)
-            increment_group_counter(chat_id,"total_welcome_sent")
-            set_group_value(chat_id,"last_welcome_at",int(time.time()))
-            asyncio.create_task(schedule_delete(context.bot,chat_id,msg.message_id,WELCOME_DELETE_AFTER))
-            await maybe_send_milestone(context,chat_id,title or "",lang)
-        except: logger.exception("Burst welcome failed in %s",chat_id)
+            compact = t(lang, "burst_compact",
+                        name=mention_name,
+                        group=(title or ("our group" if lang == "en" else "আমাদের গ্রুপ")))
+            variants = variantize_message_text(chat_id, lang, compact, kind="welcome")
+            compact = next((v for v in variants
+                            if not was_recent_duplicate_text(chat_id, "welcome", v, 2)), variants[0])
+            msg = await send_text_with_retry(context.bot, chat_id=chat_id,
+                                             text=compact, parse_mode=ParseMode.HTML)
+            record_sent_history(chat_id, "welcome", compact)
+            set_group_value(chat_id, "last_primary_msg_id", msg.message_id)
+            increment_group_counter(chat_id, "total_welcome_sent")
+            set_group_value(chat_id, "last_welcome_at", int(time.time()))
+            asyncio.create_task(schedule_delete(context.bot, chat_id, msg.message_id, WELCOME_DELETE_AFTER))
+            await maybe_send_milestone(context, chat_id, title or "", lang)
+        except Exception:
+            logger.exception("Burst welcome failed in %s", chat_id)
         return
-    text_welcome,voice_text=welcome_texts(lang,mention_name,first_name,title or "",group["custom_welcome"],chat_id=chat_id)
-    variants=variantize_message_text(chat_id,lang,text_welcome,kind="welcome")
-    text_welcome=next((v for v in variants if not was_recent_duplicate_text(chat_id,"welcome",v,2)),variants[0])
-    voice_text=personalize_voice_text(voice_text,first_name,lang,chat_id=chat_id)
-    await delete_previous_welcome(context,chat_id)
-    primary=None; voice_msg=None
-    voice_path=TMP_DIR/f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
+
+    # Smart welcome (AI-powered with graceful fallback)
+    text_welcome, voice_text = smart_welcome_text(
+        lang, mention_name, first_name, title or "", group["custom_welcome"], chat_id=chat_id
+    )
+    variants = variantize_message_text(chat_id, lang, text_welcome, kind="welcome")
+    text_welcome = next(
+        (v for v in variants if not was_recent_duplicate_text(chat_id, "welcome", v, 2)),
+        variants[0]
+    )
+    voice_text = personalize_voice_text(voice_text, first_name, lang, chat_id=chat_id)
+    await delete_previous_welcome(context, chat_id)
+
+    primary = None
+    voice_msg = None
+    voice_path = TMP_DIR / f"welcome_{chat_id}_{user.id}_{int(time.time())}.mp3"
     try:
-        style=current_welcome_style(chat_id); footer=current_footer_text(chat_id)
-        style,footer,festival=effective_style_footer(chat_id,style,footer)
-        if festival and len(text_welcome)<900:
-            fest_name=festival["name_bn"] if lang=="bn" else festival["name_en"]
-            text_welcome=f"{text_welcome}\n\n✨ {fest_name}"
-        member_count=None
-        try: member_count=await context.bot.get_chat_member_count(chat_id)
+        style = current_welcome_style(chat_id)
+        footer = current_footer_text(chat_id)
+        style, footer, festival = effective_style_footer(chat_id, style, footer)
+        if festival and len(text_welcome) < 900:
+            fest_name = festival["name_bn"] if lang == "bn" else festival["name_en"]
+            text_welcome = f"{text_welcome}\n\n✨ {fest_name}"
+        member_count = None
+        try: member_count = await context.bot.get_chat_member_count(chat_id)
         except: pass
-        profile_bytes=await fetch_profile_photo_bytes(context.bot,user.id)
-        cover=build_cover_bytes(first_name,title or "GROUP",lang,style=style,footer=footer,profile_bytes=profile_bytes,member_count=member_count)
-        try: primary=await send_photo_with_retry(context.bot,chat_id=chat_id,photo=cover,caption=text_welcome,parse_mode=ParseMode.HTML)
-        except:
-            logger.exception("Photo welcome failed in chat %s, switching to text-only",chat_id)
-            primary=await send_text_with_retry(context.bot,chat_id=chat_id,text=re.sub(r"<[^>]+>","",text_welcome))
-        if int(group["voice_enabled"])==1 and primary:
+        profile_bytes = await fetch_profile_photo_bytes(context.bot, user.id)
+        cover = build_cover_bytes(first_name, title or "GROUP", lang,
+                                  style=style, footer=footer,
+                                  profile_bytes=profile_bytes, member_count=member_count)
+        try:
+            primary = await send_photo_with_retry(context.bot, chat_id=chat_id,
+                                                  photo=cover, caption=text_welcome,
+                                                  parse_mode=ParseMode.HTML)
+        except Exception:
+            logger.exception("Photo welcome failed in %s, falling back to text", chat_id)
+            primary = await send_text_with_retry(context.bot, chat_id=chat_id,
+                                                 text=re.sub(r"<[^>]+>","", text_welcome))
+
+        if int(group["voice_enabled"]) == 1 and primary:
             try:
-                await make_voice_file(voice_text,selected_voice_name(lang,chat_id),voice_path)
-                voice_msg=await send_voice_with_retry(context.bot,chat_id=chat_id,voice=voice_path.read_bytes(),caption=t(lang,"welcome_voice_caption"))
-            except: logger.exception("Voice welcome failed in chat %s",chat_id)
-        set_group_value(chat_id,"last_primary_msg_id",primary.message_id if primary else None)
-        set_group_value(chat_id,"last_voice_msg_id",voice_msg.message_id if voice_msg else None)
-        set_group_value(chat_id,"updated_at",int(time.time()))
-        set_group_value(chat_id,"last_welcome_at",int(time.time()))
-        increment_group_counter(chat_id,"total_welcome_sent")
-        record_sent_history(chat_id,"welcome",re.sub(r"<[^>]+>","",text_welcome))
-        if primary: asyncio.create_task(schedule_delete(context.bot,chat_id,primary.message_id,WELCOME_DELETE_AFTER))
-        if voice_msg: asyncio.create_task(schedule_delete(context.bot,chat_id,voice_msg.message_id,WELCOME_DELETE_AFTER))
-        await maybe_send_milestone(context,chat_id,title or "",lang)
-    except: logger.exception("Welcome failed in chat %s for user %s",chat_id,user.id)
+                await make_voice_file(voice_text, selected_voice_name(lang, chat_id), voice_path)
+                voice_msg = await send_voice_with_retry(
+                    context.bot, chat_id=chat_id,
+                    voice=voice_path.read_bytes(),
+                    caption=t(lang, "welcome_voice_caption")
+                )
+            except Exception:
+                logger.exception("Voice welcome failed in %s", chat_id)
+
+        set_group_value(chat_id, "last_primary_msg_id", primary.message_id if primary else None)
+        set_group_value(chat_id, "last_voice_msg_id", voice_msg.message_id if voice_msg else None)
+        set_group_value(chat_id, "updated_at", int(time.time()))
+        set_group_value(chat_id, "last_welcome_at", int(time.time()))
+        increment_group_counter(chat_id, "total_welcome_sent")
+        record_sent_history(chat_id, "welcome", re.sub(r"<[^>]+>","",text_welcome))
+        if primary:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, primary.message_id, WELCOME_DELETE_AFTER))
+        if voice_msg:
+            asyncio.create_task(schedule_delete(context.bot, chat_id, voice_msg.message_id, WELCOME_DELETE_AFTER))
+        await maybe_send_milestone(context, chat_id, title or "", lang)
+    except Exception:
+        logger.exception("Welcome failed in chat %s for user %s", chat_id, user.id)
     finally:
         if voice_path.exists():
             try: voice_path.unlink()
@@ -1303,43 +1848,6 @@ def maybe_send_scheduled_specials(chat_row):
                 conn.execute("UPDATE scheduled_events SET last_sent_day=? WHERE chat_id=? AND event_kind='exam'",(today_key,chat_id))
                 conn.commit()
 
-def hourly_loop():
-    logger.info("Hourly loop started")
-    while True:
-        try:
-            due_rows=get_enabled_groups_for_hourly()
-            if due_rows:
-                phase=phase_now(); prepared={}
-                for row in due_rows:
-                    chat_id=int(row["chat_id"]); lang=get_group_lang(chat_id); mood=next_hourly_mood(chat_id)
-                    festival_key=(current_festival() or {}).get("key","") if current_festival_mode(chat_id) else ""
-                    prepared[chat_id]=(lang,mood,festival_key)
-                pools={}; pool_source={}
-                for lang,mood,fk in {(l,m,f) for l,m,f in prepared.values()}:
-                    texts,source=get_batch_pool(lang,phase,mood,fk)
-                    pools[(lang,mood,fk)]=texts; pool_source[(lang,mood,fk)]=source
-                for row in due_rows:
-                    chat_id=int(row["chat_id"]); lang,mood,fk=prepared[chat_id]
-                    msg=pick_hourly_message(chat_id,lang,phase,pools[(lang,mood,fk)])
-                    ok,mid=send_message_http_full(chat_id,msg)
-                    if ok:
-                        set_group_value(chat_id,"last_hourly_at",int(time.time()))
-                        increment_group_counter(chat_id,"total_hourly_sent")
-                        if pool_source.get((lang,mood,fk))=="ai": set_group_value(chat_id,"last_ai_success_at",int(time.time()))
-                        else: set_group_value(chat_id,"last_fallback_used_at",int(time.time()))
-                        ca=current_hourly_delete_after(chat_id)
-                        if ca>0 and mid: schedule_http_delete(chat_id,mid,ca)
-                        try: maybe_send_countdown_reminder(chat_id,row["title"] or "")
-                        except: pass
-                        logger.info("Hourly sent to %s | mood=%s",chat_id,mood)
-                    else: logger.warning("Hourly failed to %s",chat_id)
-            for row in get_all_enabled_group_rows():
-                try: maybe_send_scheduled_specials(row)
-                except: logger.exception("Special scheduler failed in %s",row["chat_id"])
-            cleanup_daily_marks()
-        except: logger.exception("hourly_loop failed")
-        time.sleep(60)
-
 def keyword_reply_match(text):
     lowered=re.sub(r"\s+"," ",(text or "").strip().lower())
     if not lowered or URLISH_RE.search(lowered): return None
@@ -1359,15 +1867,6 @@ def keyword_reply_variants(lang,matched,chat_id):
     for x in out:
         if x not in used: seen.append(x); used.add(x)
     return seen or base
-
-async def track_group(update,context):
-    chat=update.effective_chat
-    if chat and chat.type in {"group","supergroup"}:
-        ensure_group(chat.id,chat.title or "")
-        msg=update.effective_message
-        if msg and not (msg.from_user and msg.from_user.is_bot):
-            body=(msg.text or msg.caption or "")[:300]
-            group_taste_memory[chat.id].append(detect_text_taste(body,chat.title or ""))
 
 async def on_start(update,context):
     await track_group(update,context); await human_delay_and_action(context,update)
@@ -1515,11 +2014,6 @@ async def on_resetwelcome(update,context):
     chat=update.effective_chat; set_group_value(chat.id,"custom_welcome",None)
     await update.effective_message.reply_text(t(get_group_lang(chat.id),"welcome_reset"))
 
-async def on_status(update,context):
-    if not await require_group_admin(update,context): return
-    chat=update.effective_chat; group=get_group(chat.id); lang=get_group_lang(chat.id)
-    await update.effective_message.reply_text(t(lang,"status",lang_name="Bangla" if lang=="bn" else "English",voice="ON" if int(group["voice_enabled"])==1 else "OFF",delete_service="ON" if int(group["delete_service"])==1 else "OFF",hourly="ON" if int(group["hourly_enabled"])==1 else "OFF",tz=TIMEZONE_NAME,phase=phase_now()))
-
 async def on_testwelcome(update,context):
     await track_group(update,context)
     chat=update.effective_chat; user=update.effective_user
@@ -1645,20 +2139,6 @@ async def on_broadcast(update,context):
         except Exception as e: record_failure("broadcast",gid,"",f"broadcast_text: {e}"); fail_count+=1
     await status.edit_text(t("en","broadcast_done",ok=ok_count,fail=fail_count))
 
-async def on_new_chat_members(update,context):
-    chat=update.effective_chat
-    if not chat or chat.type not in {"group","supergroup"} or not update.effective_message: return
-    ensure_group(chat.id,chat.title or "")
-    group=get_group(chat.id)
-    if int(group["delete_service"])==1:
-        try: await update.effective_message.delete()
-        except: pass
-    members=[m for m in (update.effective_message.new_chat_members or []) if not m.is_bot]
-    if not members: return
-    for member in members:
-        chat_join_history[chat.id].append(time.time())
-        await queue_join_welcome(context.application,chat.id,chat.title or "",member)
-
 async def on_chat_member(update,context):
     cmu=update.chat_member
     if not cmu: return
@@ -1671,29 +2151,7 @@ async def on_chat_member(update,context):
         chat_join_history[chat.id].append(time.time())
         await queue_join_welcome(context.application,chat.id,chat.title or "",cmu.new_chat_member.user)
 
-async def on_keyword_message(update,context):
-    chat=update.effective_chat; msg=update.effective_message; user=update.effective_user
-    if not chat or chat.type not in {"group","supergroup"} or not msg or not user or user.is_bot: return
-    ensure_group(chat.id,chat.title or "")
-    if not current_keyword_mode(chat.id): return
-    if is_linkish_message(msg): return
-    matched=keyword_reply_match(msg.text or "")
-    if not matched: return
-    now_ts=time.time()
-    if now_ts-keyword_last_chat_at.get(chat.id,0)<KEYWORD_COOLDOWN_SECONDS: return
-    if now_ts-keyword_last_user_at.get((chat.id,user.id),0)<KEYWORD_USER_COOLDOWN_SECONDS: return
-    if random.random()>KEYWORD_REPLY_CHANCE: return
-    lang=get_group_lang(chat.id)
-    options=[x for x in keyword_reply_variants(lang,matched,chat.id) if not was_recent_duplicate_text(chat.id,"keyword",x,2)]
-    if not options: options=keyword_reply_variants(lang,matched,chat.id)
-    reply_text=random.choice(options)
-    keyword_last_chat_at[chat.id]=now_ts; keyword_last_user_at[(chat.id,user.id)]=now_ts
-    try:
-        await bot_humanize(context.bot,chat.id,ChatAction.TYPING,"reply")
-        sent=await msg.reply_text(reply_text)
-        mark_presence(chat.id); record_sent_history(chat.id,"keyword",reply_text)
-    except: logger.exception("Keyword reply failed in %s",chat.id)
-
+# ─── Smart Message Handler (replaces on_keyword_message) ─────────────────────
 # ─── ENHANCED GAME SYSTEM ─────────────────────────────────────────────────────
 
 import asyncio, html, random, time, sqlite3
