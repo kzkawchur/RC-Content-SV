@@ -4158,72 +4158,1033 @@ async def on_tod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=replay_markup, parse_mode=ParseMode.HTML)
     except: pass
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAYA ULTRA ENGINE — Smart Moderation · Economy · Daily Digest ·
+# Group Health · Premium Cards · Smart Context · Member Profiles
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import json as _json
+import re as _re_ultra
+from datetime import timedelta
+
+# ─── Ultra DB Tables ──────────────────────────────────────────────────────────
+def init_ultra_db():
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS member_profiles (
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            user_name TEXT NOT NULL DEFAULT '',
+            first_seen INTEGER NOT NULL,
+            last_seen INTEGER NOT NULL,
+            msg_count INTEGER NOT NULL DEFAULT 0,
+            warn_count INTEGER NOT NULL DEFAULT 0,
+            is_vip INTEGER NOT NULL DEFAULT 0,
+            coins INTEGER NOT NULL DEFAULT 0,
+            daily_claimed INTEGER NOT NULL DEFAULT 0,
+            streak_days INTEGER NOT NULL DEFAULT 0,
+            custom_title TEXT DEFAULT NULL,
+            PRIMARY KEY (user_id, chat_id)
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS warn_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            admin_id INTEGER NOT NULL,
+            reason TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS autoreply_rules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER NOT NULL,
+            trigger_text TEXT NOT NULL,
+            reply_text TEXT NOT NULL,
+            match_type TEXT NOT NULL DEFAULT 'contains',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS group_health (
+            chat_id INTEGER PRIMARY KEY,
+            total_messages INTEGER NOT NULL DEFAULT 0,
+            total_members_welcomed INTEGER NOT NULL DEFAULT 0,
+            active_members_7d INTEGER NOT NULL DEFAULT 0,
+            last_digest_sent INTEGER NOT NULL DEFAULT 0,
+            health_score INTEGER NOT NULL DEFAULT 50,
+            updated_at INTEGER NOT NULL
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS gift_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_user_id INTEGER NOT NULL,
+            to_user_id INTEGER NOT NULL,
+            chat_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            created_at INTEGER NOT NULL
+        )""")
+        conn.commit()
+
+# ─── Member Profile System ─────────────────────────────────────────────────────
+def _now_ts(): return int(time.time())
+
+def ensure_profile(user_id: int, chat_id: int, user_name: str):
+    now = _now_ts()
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO member_profiles
+               (user_id,chat_id,user_name,first_seen,last_seen,msg_count,coins,daily_claimed)
+               VALUES (?,?,?,?,?,0,100,0)""",
+            (user_id, chat_id, user_name[:40], now, now)
+        )
+        conn.execute(
+            "UPDATE member_profiles SET user_name=?,last_seen=?,msg_count=msg_count+1 WHERE user_id=? AND chat_id=?",
+            (user_name[:40], now, user_id, chat_id)
+        )
+        conn.commit()
+
+def get_profile(user_id: int, chat_id: int):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM member_profiles WHERE user_id=? AND chat_id=?",
+            (user_id, chat_id)
+        ).fetchone()
+
+def add_profile_coins(user_id: int, chat_id: int, amount: int):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE member_profiles SET coins=MAX(0,coins+?),updated_at=? WHERE user_id=? AND chat_id=?",
+            (amount, _now_ts(), user_id, chat_id)
+        ) if False else None
+        conn.execute(
+            "UPDATE member_profiles SET coins=MAX(0,coins+?) WHERE user_id=? AND chat_id=?",
+            (amount, user_id, chat_id)
+        )
+        conn.commit()
+
+def get_profile_coins(user_id: int, chat_id: int) -> int:
+    row = get_profile(user_id, chat_id)
+    return int(row["coins"]) if row else 0
+
+def get_warn_count(user_id: int, chat_id: int) -> int:
+    row = get_profile(user_id, chat_id)
+    return int(row["warn_count"]) if row else 0
+
+def add_warn(user_id: int, chat_id: int, admin_id: int, reason: str) -> int:
+    now = _now_ts()
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO warn_log (user_id,chat_id,admin_id,reason,created_at) VALUES (?,?,?,?,?)",
+            (user_id, chat_id, admin_id, reason[:200], now)
+        )
+        conn.execute(
+            "UPDATE member_profiles SET warn_count=warn_count+1 WHERE user_id=? AND chat_id=?",
+            (user_id, chat_id)
+        )
+        conn.commit()
+    return get_warn_count(user_id, chat_id)
+
+def clear_warns(user_id: int, chat_id: int):
+    with db_connect() as conn:
+        conn.execute("DELETE FROM warn_log WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+        conn.execute("UPDATE member_profiles SET warn_count=0 WHERE user_id=? AND chat_id=?", (user_id, chat_id))
+        conn.commit()
+
+# ─── Daily Reward System ───────────────────────────────────────────────────────
+DAILY_REWARDS    = [50, 60, 75, 90, 110, 130, 200]  # streak day 1-7+
+DAILY_STREAK_CAP = 7
+
+def claim_daily(user_id: int, chat_id: int, user_name: str) -> dict:
+    now = _now_ts()
+    today = datetime.fromtimestamp(now, ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d")
+    ensure_profile(user_id, chat_id, user_name)
+    row = get_profile(user_id, chat_id)
+    last_claimed_ts = int(row["daily_claimed"] or 0)
+    last_claimed_day = (datetime.fromtimestamp(last_claimed_ts, ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d")
+                        if last_claimed_ts else "")
+    if last_claimed_day == today:
+        # Already claimed today
+        next_reset = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=ZoneInfo(TIMEZONE_NAME)) + timedelta(days=1)
+        secs_left = int(next_reset.timestamp()) - now
+        hrs = secs_left // 3600
+        mins = (secs_left % 3600) // 60
+        return {"claimed": False, "wait_h": hrs, "wait_m": mins}
+    # Check streak
+    yesterday = (datetime.fromtimestamp(now, ZoneInfo(TIMEZONE_NAME)) - timedelta(days=1)).strftime("%Y-%m-%d")
+    old_streak = int(row["streak_days"] or 0)
+    new_streak = (old_streak + 1) if last_claimed_day == yesterday else 1
+    new_streak = min(new_streak, DAILY_STREAK_CAP)
+    reward = DAILY_REWARDS[new_streak - 1]
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE member_profiles SET coins=coins+?,daily_claimed=?,streak_days=? WHERE user_id=? AND chat_id=?",
+            (reward, now, new_streak, user_id, chat_id)
+        )
+        conn.commit()
+    lb_update_leaderboard(user_id, chat_id, user_name, coins=reward)
+    return {"claimed": True, "reward": reward, "streak": new_streak, "coins": get_profile_coins(user_id, chat_id)}
+
+async def on_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("💰 Use /daily inside a group!")
+        return
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    result = claim_daily(user.id, chat.id, uname)
+    await human_delay_and_action(context, update)
+    if not result["claimed"]:
+        h, m = result["wait_h"], result["wait_m"]
+        await msg.reply_text(
+            f"⏰ <b>Already claimed today!</b>\n\n"
+            f"Next reward in <b>{h}h {m}m</b>\n"
+            f"<i>Come back tomorrow to keep your streak! 🔥</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    streak = result["streak"]
+    reward = result["reward"]
+    coins  = result["coins"]
+    streak_txt = {1:"🌱 Day 1", 2:"🌿 Day 2", 3:"⭐ Day 3 Streak!", 4:"🔥 4-Day Streak!",
+                  5:"💥 5-Day Streak!", 6:"⚡ 6-Day Streak!", 7:"🏆 PERFECT WEEK! 7-Day Streak!"}
+    bar = "🟨" * streak + "⬜" * (DAILY_STREAK_CAP - streak)
+    bonus_note = " ⚡ Streak bonus!" if streak > 1 else ""
+    await msg.reply_text(
+        f"🎁 <b>Daily Reward!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{streak_txt.get(streak, f'🔥 {streak}-Day Streak!')}{bonus_note}\n"
+        f"{bar}\n\n"
+        f"💰 +<b>{reward}</b> coins{' (streak bonus!)' if streak >= 3 else ''}\n"
+        f"🪙 Balance: <b>{coins}</b> coins\n\n"
+        f"<i>Come back tomorrow! Streak = more coins 🚀</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Gift System ───────────────────────────────────────────────────────────────
+async def on_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("🎁 Use /gift inside a group!")
+        return
+    # Must reply to someone or use /gift @user amount
+    target = None
+    amount = 0
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target = msg.reply_to_message.from_user
+        try: amount = int(context.args[0]) if context.args else 0
+        except: amount = 0
+    elif context.args and len(context.args) >= 1:
+        try: amount = int(context.args[0])
+        except: pass
+    if not target:
+        await msg.reply_text(
+            "🎁 <b>Gift Coins</b>\n\nReply to someone's message and use:\n"
+            "<code>/gift 50</code>\n\nGift them coins from your balance!",
+            parse_mode=ParseMode.HTML)
+        return
+    if target.id == user.id:
+        await msg.reply_text("😅 You can't gift yourself!")
+        return
+    if target.is_bot:
+        await msg.reply_text("🤖 Can't gift a bot!")
+        return
+    if amount < 1:
+        await msg.reply_text("Gift at least 1 coin. Usage: reply + /gift 50")
+        return
+    if amount > 1000:
+        await msg.reply_text("Max gift is 1000 coins at once.")
+        return
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    tname = clean_name(target.full_name or target.first_name or "Friend")
+    ensure_profile(user.id, chat.id, uname)
+    ensure_profile(target.id, chat.id, tname)
+    my_coins = get_profile_coins(user.id, chat.id)
+    if my_coins < amount:
+        await msg.reply_text(
+            f"❌ Not enough coins! You have <b>{my_coins}</b> 🪙",
+            parse_mode=ParseMode.HTML)
+        return
+    add_profile_coins(user.id, chat.id, -amount)
+    add_profile_coins(target.id, chat.id, amount)
+    lb_update_leaderboard(target.id, chat.id, tname, coins=amount)
+    now = _now_ts()
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO gift_log (from_user_id,to_user_id,chat_id,amount,created_at) VALUES (?,?,?,?,?)",
+            (user.id, target.id, chat.id, amount, now)
+        )
+        conn.commit()
+    my_new = get_profile_coins(user.id, chat.id)
+    their_new = get_profile_coins(target.id, chat.id)
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"🎁 <b>Gift Sent!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"From: <b>{html.escape(uname)}</b>\n"
+        f"To:   <b>{html.escape(tname)}</b>\n"
+        f"💰 Amount: <b>{amount}</b> coins\n\n"
+        f"<b>{html.escape(uname)}</b> 🪙 {my_new}  •  <b>{html.escape(tname)}</b> 🪙 {their_new}",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Profile & Balance ─────────────────────────────────────────────────────────
+async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    # Check if replying to someone
+    target = user
+    if msg.reply_to_message and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+        target = msg.reply_to_message.from_user
+    tname = clean_name(target.full_name or target.first_name or "Member")
+    is_group = chat.type in {"group","supergroup"}
+    if not is_group:
+        await msg.reply_text("📋 Use /profile inside a group!")
+        return
+    ensure_profile(target.id, chat.id, tname)
+    row = get_profile(target.id, chat.id)
+    lb_row = None
+    with db_connect() as conn:
+        lb_row = conn.execute(
+            "SELECT * FROM game_leaderboard WHERE user_id=? AND chat_id=?",
+            (target.id, chat.id)
+        ).fetchone()
+    coins    = int(row["coins"] or 0)
+    msgs     = int(row["msg_count"] or 0)
+    warns    = int(row["warn_count"] or 0)
+    streak   = int(row["streak_days"] or 0)
+    is_vip   = int(row["is_vip"] or 0)
+    title    = row["custom_title"] or ("⭐ VIP Member" if is_vip else "")
+    first_s  = format_ts(int(row["first_seen"] or 0))
+    last_s   = format_ts(int(row["last_seen"] or 0))
+    # Rank calculation
+    rps_w  = (lb_row["rps_wins"] if lb_row else 0) or 0
+    xo_w   = (lb_row["xo_wins"] if lb_row else 0) or 0
+    total_score = rps_w*2 + xo_w*2 + coins//10
+    rank_label = ("🏅 Bronze" if total_score < 50 else
+                  "🥈 Silver" if total_score < 150 else
+                  "🥇 Gold"   if total_score < 400 else
+                  "💎 Diamond" if total_score < 1000 else "👑 Legend")
+    warn_bar = ("⚠️"*warns + "⬜"*(3-min(warns,3))) if warns <= 3 else "🚨🚨🚨"
+    lines = [
+        f"👤 <b>{html.escape(tname)}</b>  {'⭐ VIP' if is_vip else ''}",
+        f"<i>{html.escape(title)}</i>" if title else "",
+        "━━━━━━━━━━━━━━━━━━",
+        f"🏆 Rank:    <b>{rank_label}</b>",
+        f"🪙 Coins:   <b>{coins}</b>",
+        f"💬 Messages: {_fmt_num(msgs)}",
+        f"🔥 Streak:  {streak} day(s)",
+        f"⚠️ Warns:   {warn_bar} ({warns}/3)",
+        f"🎮 RPS wins: {rps_w}  •  ⭕ XO wins: {xo_w}",
+        "",
+        f"📅 First seen: {first_s}",
+        f"🕐 Last seen:  {last_s}",
+    ]
+    await human_delay_and_action(context, update)
+    await msg.reply_text("\n".join(l for l in lines if l), parse_mode=ParseMode.HTML)
+
+async def on_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    uname = clean_name(user.full_name or user.first_name or "Player")
+    if chat.type in {"group","supergroup"}:
+        ensure_profile(user.id, chat.id, uname)
+        coins = get_profile_coins(user.id, chat.id)
+        lb_coins = lb_get_coins(user.id)
+    else:
+        coins = lb_get_coins(user.id)
+        lb_coins = coins
+    streak = 0
+    if chat.type in {"group","supergroup"}:
+        row = get_profile(user.id, chat.id)
+        if row: streak = int(row["streak_days"] or 0)
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"💰 <b>{html.escape(uname)}'s Balance</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🪙 Coins: <b>{coins}</b>\n"
+        f"🔥 Daily streak: <b>{streak}</b> day(s)\n\n"
+        f"<i>Earn more with /daily, games, and being active!</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Warn System ──────────────────────────────────────────────────────────────
+MAX_WARNS = 3
+
+async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    admin = update.effective_user
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("⚠️ Reply to a user's message to warn them.\nUsage: reply + /warn [reason]")
+        return
+    target = msg.reply_to_message.from_user
+    if target.is_bot:
+        await msg.reply_text("Can't warn a bot.")
+        return
+    if is_super_admin(target.id):
+        await msg.reply_text("Can't warn the bot owner.")
+        return
+    reason = " ".join(context.args) if context.args else "No reason provided"
+    tname = clean_name(target.full_name or target.first_name or "Member")
+    ensure_profile(target.id, chat.id, tname)
+    warn_count = add_warn(target.id, chat.id, admin.id, reason)
+    await human_delay_and_action(context, update)
+    if warn_count >= MAX_WARNS:
+        # Auto-ban/kick
+        try:
+            await context.bot.ban_chat_member(chat.id, target.id)
+            await context.bot.unban_chat_member(chat.id, target.id)  # Kick (not permanent ban)
+            await msg.reply_text(
+                f"🚨 <b>{html.escape(tname)}</b> has been kicked!\n"
+                f"Reason: {warn_count} warnings reached.\n"
+                f"Last: {html.escape(reason)}",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception as e:
+            await msg.reply_text(
+                f"⚠️ <b>Warn {warn_count}/{MAX_WARNS}</b> — Could not kick automatically.\n"
+                f"Please kick manually.\n<i>{e}</i>",
+                parse_mode=ParseMode.HTML
+            )
+    else:
+        warn_bar = "🟥"*warn_count + "⬜"*(MAX_WARNS-warn_count)
+        await msg.reply_text(
+            f"⚠️ <b>Warning Issued</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"User: <b>{html.escape(tname)}</b>\n"
+            f"Warns: {warn_bar} <b>{warn_count}/{MAX_WARNS}</b>\n"
+            f"Reason: {html.escape(reason)}\n\n"
+            f"<i>{'One more warn = kick! ⚡' if warn_count == MAX_WARNS-1 else 'Be careful!'}</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+async def on_unwarn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    msg = update.effective_message
+    if not msg.reply_to_message or not msg.reply_to_message.from_user:
+        await msg.reply_text("Reply to a user's message to clear their warns.")
+        return
+    target = msg.reply_to_message.from_user
+    tname  = clean_name(target.full_name or target.first_name or "Member")
+    clear_warns(target.id, update.effective_chat.id)
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"✅ All warnings cleared for <b>{html.escape(tname)}</b>.",
+        parse_mode=ParseMode.HTML
+    )
+
+async def on_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg  = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat: return
+    target = update.effective_user
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target = msg.reply_to_message.from_user
+    tname  = clean_name(target.full_name or target.first_name or "Member")
+    ensure_profile(target.id, chat.id, tname)
+    warns  = get_warn_count(target.id, chat.id)
+    bar    = "🟥"*warns + "⬜"*(MAX_WARNS-min(warns,MAX_WARNS))
+    with db_connect() as conn:
+        logs = conn.execute(
+            "SELECT reason,created_at FROM warn_log WHERE user_id=? AND chat_id=? ORDER BY created_at DESC LIMIT 5",
+            (target.id, chat.id)
+        ).fetchall()
+    lines = [
+        f"⚠️ <b>Warn History: {html.escape(tname)}</b>",
+        f"{bar} <b>{warns}/{MAX_WARNS}</b>",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    if logs:
+        for log in logs:
+            lines.append(f"• {html.escape(log['reason'][:60])} — {format_ts(int(log['created_at']))}")
+    else:
+        lines.append("<i>No warnings.</i>")
+    await human_delay_and_action(context, update)
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+# ─── AutoReply System ─────────────────────────────────────────────────────────
+_autoreply_cache: dict[int, list] = {}
+
+def get_autoreply_rules(chat_id: int) -> list:
+    if chat_id in _autoreply_cache:
+        return _autoreply_cache[chat_id]
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM autoreply_rules WHERE chat_id=? AND enabled=1",
+            (chat_id,)
+        ).fetchall()
+    _autoreply_cache[chat_id] = rows
+    return rows
+
+def invalidate_autoreply_cache(chat_id: int):
+    _autoreply_cache.pop(chat_id, None)
+
+def check_autoreply(chat_id: int, text: str) -> str | None:
+    rules = get_autoreply_rules(chat_id)
+    text_lower = text.lower().strip()
+    for rule in rules:
+        trigger = rule["trigger_text"].lower()
+        match_type = rule["match_type"]
+        if match_type == "exact" and text_lower == trigger:
+            return rule["reply_text"]
+        elif match_type == "startswith" and text_lower.startswith(trigger):
+            return rule["reply_text"]
+        elif match_type == "contains" and trigger in text_lower:
+            return rule["reply_text"]
+    return None
+
+async def on_setreply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    msg  = update.effective_message
+    chat = update.effective_chat
+    raw  = (msg.text or "").split(" ", 1)
+    if len(raw) < 2 or "|" not in raw[1]:
+        await msg.reply_text(
+            "🤖 <b>Set AutoReply</b>\n\nUsage:\n"
+            "<code>/setreply trigger | reply text</code>\n\n"
+            "Examples:\n"
+            "<code>/setreply hello | Hi there! 👋</code>\n"
+            "<code>/setreply link? | Check pinned message!</code>\n\n"
+            "Match types: contains (default), exact, startswith\n"
+            "<code>/setreply [exact] yes | Noted!</code>",
+            parse_mode=ParseMode.HTML)
+        return
+    content = raw[1].strip()
+    match_type = "contains"
+    if content.startswith("[exact]"):
+        match_type = "exact"
+        content = content[7:].strip()
+    elif content.startswith("[startswith]"):
+        match_type = "startswith"
+        content = content[12:].strip()
+    parts = content.split("|", 1)
+    trigger = parts[0].strip()[:80]
+    reply   = parts[1].strip()[:500] if len(parts) > 1 else ""
+    if not trigger or not reply:
+        await msg.reply_text("Both trigger and reply text are required.")
+        return
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO autoreply_rules (chat_id,trigger_text,reply_text,match_type,enabled,created_at) VALUES (?,?,?,?,1,?)",
+            (chat.id, trigger, reply, match_type, _now_ts())
+        )
+        conn.commit()
+    invalidate_autoreply_cache(chat.id)
+    await msg.reply_text(
+        f"✅ <b>AutoReply saved!</b>\n"
+        f"Trigger: <code>{html.escape(trigger)}</code>\n"
+        f"Match: {match_type}\n"
+        f"Reply: {html.escape(reply[:60])}{'...' if len(reply)>60 else ''}",
+        parse_mode=ParseMode.HTML
+    )
+
+async def on_listreplies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT id,trigger_text,match_type,enabled FROM autoreply_rules WHERE chat_id=? ORDER BY id",
+            (chat.id,)
+        ).fetchall()
+    if not rows:
+        await update.effective_message.reply_text("No autoreply rules set. Use /setreply to add one.")
+        return
+    lines = ["🤖 <b>AutoReply Rules</b>", "━━━━━━━━━━━━━━━━━━"]
+    for r in rows[:20]:
+        st = "✅" if r["enabled"] else "❌"
+        lines.append(f"{st} <b>#{r['id']}</b> [{r['match_type']}] <code>{html.escape(r['trigger_text'])}</code>")
+    lines.append("\nUse /delreply <id> to remove a rule.")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def on_delreply(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("Usage: /delreply <id>  (get ID from /listreplies)")
+        return
+    rule_id = int(context.args[0])
+    with db_connect() as conn:
+        conn.execute("DELETE FROM autoreply_rules WHERE id=? AND chat_id=?", (rule_id, chat.id))
+        conn.commit()
+    invalidate_autoreply_cache(chat.id)
+    await update.effective_message.reply_text(f"✅ AutoReply rule #{rule_id} removed.")
+
+# ─── Smart Link Guard ─────────────────────────────────────────────────────────
+_link_guard_enabled: dict[int, bool] = {}
+
+def is_link_guard_on(chat_id: int) -> bool:
+    if chat_id in _link_guard_enabled:
+        return _link_guard_enabled[chat_id]
+    row = get_group(chat_id)
+    # Use a spare field; default off
+    val = False
+    _link_guard_enabled[chat_id] = val
+    return val
+
+async def on_linkguard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    if not context.args:
+        status = "ON" if is_link_guard_on(chat.id) else "OFF"
+        await update.effective_message.reply_text(
+            f"🛡️ Link Guard: <b>{status}</b>\n\nUsage: /linkguard on  or  /linkguard off\n\n"
+            f"<i>When ON, links from non-admins are automatically deleted with a warning.</i>",
+            parse_mode=ParseMode.HTML)
+        return
+    val = context.args[0].strip().lower()
+    if val not in {"on","off"}:
+        await update.effective_message.reply_text("Usage: /linkguard on or /linkguard off")
+        return
+    _link_guard_enabled[chat.id] = (val == "on")
+    await update.effective_message.reply_text(
+        f"🛡️ Link Guard: <b>{val.upper()}</b>\n"
+        f"<i>{'Links from non-admins will be deleted.' if val=='on' else 'Link protection disabled.'}</i>",
+        parse_mode=ParseMode.HTML)
+
+# ─── Group Health & Stats ──────────────────────────────────────────────────────
+def update_group_health(chat_id: int, delta_msgs: int = 0):
+    now = _now_ts()
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT OR IGNORE INTO group_health (chat_id,total_messages,total_members_welcomed,
+               active_members_7d,last_digest_sent,health_score,updated_at) VALUES (?,0,0,0,0,50,?)""",
+            (chat_id, now)
+        )
+        conn.execute(
+            "UPDATE group_health SET total_messages=total_messages+?,updated_at=? WHERE chat_id=?",
+            (delta_msgs, now, chat_id)
+        )
+        conn.commit()
+
+def get_group_health_row(chat_id: int):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM group_health WHERE chat_id=?", (chat_id,)).fetchone()
+
+async def on_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    group_row = get_group(chat.id)
+    health_row = get_group_health_row(chat.id)
+    lang = get_group_lang(chat.id)
+    total_msgs   = int(health_row["total_messages"] if health_row else 0)
+    welcomes     = int(group_row["total_welcome_sent"] or 0)
+    hourly_sent  = int(group_row["total_hourly_sent"] or 0)
+    health_score = int(health_row["health_score"] if health_row else 50)
+    # Health bar
+    h_bar = _bar(health_score, 100, 10)
+    # Top members
+    with db_connect() as conn:
+        top = conn.execute(
+            "SELECT user_name, msg_count FROM member_profiles WHERE chat_id=? ORDER BY msg_count DESC LIMIT 5",
+            (chat.id,)
+        ).fetchall()
+        total_members = conn.execute(
+            "SELECT COUNT(*) c FROM member_profiles WHERE chat_id=?", (chat.id,)
+        ).fetchone()["c"]
+    lines = [
+        f"📊 <b>Group Stats</b>",
+        f"<i>{html.escape(chat.title or '')}</i>",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+        f"💬 Messages tracked: <b>{_fmt_num(total_msgs)}</b>",
+        f"👥 Known members:    <b>{_fmt_num(total_members)}</b>",
+        f"👋 Welcomes sent:    <b>{_fmt_num(welcomes)}</b>",
+        f"📨 Hourly msgs:      <b>{_fmt_num(hourly_sent)}</b>",
+        "",
+        f"── Top Active Members ─",
+    ]
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
+    for i, row in enumerate(top):
+        lines.append(f"{medals[i]} <b>{html.escape(row['user_name'])}</b> — {_fmt_num(int(row['msg_count']))} msgs")
+    if not top:
+        lines.append("<i>No message data yet.</i>")
+    await human_delay_and_action(context, update)
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+# ─── /ask — AI Q&A powered by Groq ───────────────────────────────────────────
+_ask_cooldowns: dict[int, float] = {}  # chat_id -> last ask time
+ASK_COOLDOWN_SECONDS = 45
+
+async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    if not GROQ_API_KEYS:
+        await msg.reply_text("🤖 AI Q&A is not configured. No Groq API key found.")
+        return
+    question = " ".join(context.args).strip() if context.args else ""
+    if not question and msg.reply_to_message:
+        question = msg.reply_to_message.text or ""
+    if not question:
+        await msg.reply_text(
+            "🧠 <b>Ask Maya AI</b>\n\nUsage: <code>/ask your question</code>\n\n"
+            "Or reply to any message and use /ask",
+            parse_mode=ParseMode.HTML)
+        return
+    if len(question) > 500:
+        await msg.reply_text("Question too long. Max 500 characters.")
+        return
+    # Per-chat cooldown
+    now = time.time()
+    last = _ask_cooldowns.get(chat.id, 0)
+    if now - last < ASK_COOLDOWN_SECONDS:
+        wait = int(ASK_COOLDOWN_SECONDS - (now - last))
+        await msg.reply_text(f"⏳ AI cooldown: {wait}s remaining.")
+        return
+    _ask_cooldowns[chat.id] = now
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    await human_delay_and_action(context, update)
+    thinking = await msg.reply_text("🧠 <i>Thinking...</i>", parse_mode=ParseMode.HTML)
+    try:
+        sys_prompt = (
+            "You are Maya, a helpful and warm Telegram group assistant. "
+            "You give short, accurate, friendly answers. "
+            "Max 150 words. No markdown, use plain text. "
+            f"Reply in {'Bengali (Bangla)' if lang=='bn' else 'English'}."
+        )
+        data = _groq_chat_request({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": question},
+            ],
+            "temperature": 0.7,
+            "max_tokens": 200,
+        })
+        answer = (data["choices"][0]["message"]["content"] or "").strip()
+        if not answer:
+            answer = "I couldn't generate an answer. Please try again."
+    except Exception as e:
+        logger.warning("on_ask Groq failed: %s", e)
+        answer = ("দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না। পরে চেষ্টা করো।"
+                  if lang=="bn" else "Sorry, I couldn't answer right now. Please try again.")
+    uname = html.escape(clean_name(user.full_name or user.first_name or ""))
+    try:
+        await thinking.edit_text(
+            f"🧠 <b>Maya AI</b>\n"
+            f"<i>Q: {html.escape(question[:80])}{'...' if len(question)>80 else ''}</i>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{html.escape(answer)}",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        await msg.reply_text(html.escape(answer))
+
+# ─── /translate — Instant Bangla ↔ English ────────────────────────────────────
+_translate_cooldowns: dict[int, float] = {}
+
+async def on_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    if not GROQ_API_KEYS:
+        await msg.reply_text("Translation requires Groq API key.")
+        return
+    text = " ".join(context.args).strip() if context.args else ""
+    if not text and msg.reply_to_message:
+        text = (msg.reply_to_message.text or "").strip()
+    if not text:
+        await msg.reply_text(
+            "🌐 <b>Translate</b>\n\nUsage: <code>/tr your text here</code>\n"
+            "Or reply to any message with /tr",
+            parse_mode=ParseMode.HTML)
+        return
+    if len(text) > 400:
+        await msg.reply_text("Text too long. Max 400 characters.")
+        return
+    now = time.time()
+    if now - _translate_cooldowns.get(chat.id, 0) < 20:
+        await msg.reply_text("⏳ Translate cooldown: 20s")
+        return
+    _translate_cooldowns[chat.id] = now
+    # Detect language and translate to the other
+    has_bangla = bool(_re_ultra.search(r"[\u0980-\u09FF]", text))
+    if has_bangla:
+        target_lang, direction = "English", "বাংলা → English"
+    else:
+        target_lang, direction = "Bangla (Bengali)", "English → বাংলা"
+    thinking = await msg.reply_text("🌐 <i>Translating...</i>", parse_mode=ParseMode.HTML)
+    try:
+        data = _groq_chat_request({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": f"Translate the following text to {target_lang}. Return ONLY the translation, nothing else."},
+                {"role": "user", "content": text},
+            ],
+            "temperature": 0.3,
+            "max_tokens": 200,
+        })
+        result = (data["choices"][0]["message"]["content"] or "").strip()
+    except Exception as e:
+        logger.warning("translate failed: %s", e)
+        result = "Translation failed. Please try again."
+    try:
+        await thinking.edit_text(
+            f"🌐 <b>Translation</b>  <i>{direction}</i>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<b>Original:</b> {html.escape(text[:100])}{'...' if len(text)>100 else ''}\n\n"
+            f"<b>Translated:</b> {html.escape(result)}",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception:
+        await msg.reply_text(html.escape(result))
+
+# ─── /top — Top members in group ──────────────────────────────────────────────
+async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not chat or not msg: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("Use /top inside a group!")
+        return
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT user_name,msg_count,coins,streak_days FROM member_profiles WHERE chat_id=? ORDER BY msg_count DESC LIMIT 10",
+            (chat.id,)
+        ).fetchall()
+    if not rows:
+        await msg.reply_text("No activity tracked yet. Start chatting! 💬")
+        return
+    max_msgs = max(int(r["msg_count"]) for r in rows) or 1
+    medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    lines = [
+        f"💬 <b>Most Active Members</b>",
+        f"<i>{html.escape(chat.title or '')}</i>",
+        "━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+    for i, r in enumerate(rows):
+        bar  = _bar(int(r["msg_count"]), max_msgs, 6)
+        name = html.escape(r["user_name"] or "Unknown")
+        lines.append(
+            f"{medals[i]} <b>{name}</b>\n"
+            f"   {bar} {_fmt_num(int(r['msg_count']))} msgs  🪙{r['coins']}"
+        )
+        if i < len(rows)-1: lines.append("")
+    await human_delay_and_action(context, update)
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+# ─── /rules — Group rules ──────────────────────────────────────────────────────
+_rules_cache: dict[int, str] = {}
+
+async def on_setrules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    raw  = (update.effective_message.text or "").split(" ", 1)
+    if len(raw) < 2 or not raw[1].strip():
+        await update.effective_message.reply_text(
+            "Usage: /setrules Your rules here\n\nUse \\n for new lines.")
+        return
+    rules_text = raw[1].strip().replace("\\n", "\n")[:1000]
+    set_group_value(chat.id, "custom_welcome", None)  # Don't touch welcome
+    # Store in DB using footer_text-adjacent approach: use a separate key
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO autoreply_rules (chat_id,trigger_text,reply_text,match_type,enabled,created_at) VALUES (?,?,?,?,1,?)",
+            (chat.id, "__RULES__", rules_text, "exact", _now_ts())
+        )
+        conn.commit()
+    _rules_cache[chat.id] = rules_text
+    invalidate_autoreply_cache(chat.id)
+    await update.effective_message.reply_text("✅ Group rules saved! Members can view with /rules")
+
+async def on_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not chat or not msg: return
+    rules_text = _rules_cache.get(chat.id)
+    if not rules_text:
+        with db_connect() as conn:
+            row = conn.execute(
+                "SELECT reply_text FROM autoreply_rules WHERE chat_id=? AND trigger_text='__RULES__'",
+                (chat.id,)
+            ).fetchone()
+        if row:
+            rules_text = row["reply_text"]
+            _rules_cache[chat.id] = rules_text
+    if not rules_text:
+        await msg.reply_text("📋 No rules set yet. Admins can use /setrules to set them.")
+        return
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"📋 <b>Group Rules</b>\n"
+        f"<i>{html.escape(chat.title or '')}</i>\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"{html.escape(rules_text)}",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Smart Message Handler Integration ────────────────────────────────────────
+async def handle_ultra_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Called from on_keyword_message to handle ultra features."""
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user or user.is_bot: return
+
+    text = msg.text or ""
+
+    # Track message in profile
+    uname = clean_name(user.full_name or user.first_name or "Member")
+    try:
+        ensure_profile(user.id, chat.id, uname)
+        update_group_health(chat.id, delta_msgs=1)
+    except Exception:
+        pass
+
+    # Link guard check
+    if is_link_guard_on(chat.id) and URLISH_RE.search(text):
+        try:
+            member = await context.bot.get_chat_member(chat.id, user.id)
+            if member.status not in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+                await msg.delete()
+                warn_count = add_warn(user.id, chat.id, 0, "Posted a link")
+                lang = get_group_lang(chat.id)
+                w_msg = (
+                    f"🛡️ {user.mention_html(uname)}, links are not allowed here! ⚠️ ({warn_count}/{MAX_WARNS} warns)"
+                )
+                sent = await context.bot.send_message(chat.id, w_msg, parse_mode=ParseMode.HTML)
+                asyncio.create_task(schedule_delete(context.bot, chat.id, sent.message_id, 15))
+                return
+        except Exception:
+            pass
+
+    # AutoReply check
+    if text and not text.startswith("/"):
+        reply_text = check_autoreply(chat.id, text)
+        if reply_text:
+            now = time.time()
+            # Simple per-trigger cooldown (5 min)
+            ck = f"ar_{chat.id}"
+            if now - _ask_cooldowns.get(ck, 0) > 300:
+                _ask_cooldowns[ck] = now
+                try:
+                    await asyncio.sleep(random.uniform(1.0, 2.5))
+                    await msg.reply_text(reply_text)
+                except Exception:
+                    pass
+
 # ─── post_init & build_app ────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
     commands = [
-        BotCommand("start",        "Bot info & commands"),
-        BotCommand("ping",         "Check bot status"),
-        BotCommand("myid",         "Your user ID"),
-        BotCommand("support",      "Support group"),
-        BotCommand("status",       "Group settings overview"),
-        BotCommand("analytics",    "Group statistics"),
-        BotCommand("aistatus",     "AI engine status"),
-        BotCommand("lang",         "Language: /lang bn or /lang en"),
-        BotCommand("voice",        "Welcome voice: /voice on/off"),
-        BotCommand("hourly",       "Hourly msgs: /hourly on/off/now"),
-        BotCommand("deleteservice","Delete service msgs: on/off"),
-        BotCommand("setwelcome",   "Custom welcome text"),
-        BotCommand("resetwelcome", "Reset welcome to default"),
-        BotCommand("welcomestyle", "Welcome banner theme"),
-        BotCommand("setfooter",    "Welcome footer text"),
-        BotCommand("setvoice",     "Bengali voice: bd or in"),
-        BotCommand("festivalmode", "Festival mode: on/off"),
-        BotCommand("keywordmode",  "Keyword replies: on/off"),
-        BotCommand("hourlyclean",  "Auto-delete hourly: off/30m/1h"),
-        BotCommand("setcountdown", "Set event countdown"),
-        BotCommand("countdown",    "Show countdown card"),
-        BotCommand("clearcountdown","Clear countdown"),
-        BotCommand("setexamday",   "Set exam day reminder"),
-        BotCommand("examday",      "Show exam reminder"),
-        BotCommand("clearexamday", "Clear exam reminder"),
+        # Info
+        BotCommand("start",        "✨ Bot info & commands"),
+        BotCommand("ping",         "🏓 Check bot status"),
+        BotCommand("myid",         "🪪 Your Telegram ID"),
+        BotCommand("support",      "💬 Support group"),
+        # Profile & Economy
+        BotCommand("profile",      "👤 Your group profile"),
+        BotCommand("balance",      "💰 Your coin balance"),
+        BotCommand("daily",        "🎁 Daily coin reward"),
+        BotCommand("gift",         "🎀 Gift coins: reply + /gift 50"),
+        BotCommand("top",          "🏅 Most active members"),
         BotCommand("leaderboard",  "🏆 Game leaderboard"),
+        # Group Info
+        BotCommand("rules",        "📋 View group rules"),
+        BotCommand("status",       "⚙️ Bot settings overview"),
+        BotCommand("analytics",    "📊 Group statistics"),
+        BotCommand("groupstats",   "📈 Group activity stats"),
+        # AI Tools
+        BotCommand("ask",          "🧠 Ask Maya AI anything"),
+        BotCommand("tr",           "🌐 Translate Bangla ↔ English"),
+        # Admin
+        BotCommand("setrules",     "📋 Set group rules"),
+        BotCommand("warn",         "⚠️ Warn a member (reply)"),
+        BotCommand("unwarn",       "✅ Clear member warns (reply)"),
+        BotCommand("warns",        "⚠️ Check member warns"),
+        BotCommand("setreply",     "🤖 Add auto-reply rule"),
+        BotCommand("listreplies",  "📄 List auto-reply rules"),
+        BotCommand("delreply",     "🗑 Delete auto-reply rule"),
+        BotCommand("linkguard",    "🛡️ Link protection: on/off"),
+        BotCommand("lang",         "🌐 Language: /lang bn or /lang en"),
+        BotCommand("voice",        "🎙 Welcome voice: on/off"),
+        BotCommand("hourly",       "📨 Hourly messages: on/off/now"),
+        BotCommand("deleteservice","🗑 Delete service msgs: on/off"),
+        BotCommand("setwelcome",   "✏️ Custom welcome text"),
+        BotCommand("resetwelcome", "↩️ Reset welcome to default"),
+        BotCommand("welcomestyle", "🎨 Welcome banner theme"),
+        BotCommand("setfooter",    "📝 Welcome footer text"),
+        BotCommand("setvoice",     "🎙 Bengali voice: bd or in"),
+        BotCommand("festivalmode", "🎉 Festival mode: on/off"),
+        BotCommand("keywordmode",  "💬 Keyword replies: on/off"),
+        BotCommand("hourlyclean",  "⏰ Auto-delete hourly msgs"),
+        BotCommand("setcountdown", "⏳ Set event countdown"),
+        BotCommand("countdown",    "📅 Show countdown card"),
+        BotCommand("clearcountdown","❌ Clear countdown"),
+        BotCommand("setexamday",   "📘 Set exam day reminder"),
+        BotCommand("aistatus",     "🤖 AI engine status"),
+        BotCommand("testwelcome",  "🧪 Test welcome message"),
+        # Owner
+        BotCommand("groupbrowser", "🗂 Browse all groups"),
+        BotCommand("broadcastone", "📢 Message one group"),
+        BotCommand("groupcount",   "🔢 Count groups"),
+        BotCommand("activegroups", "📋 Recent active groups"),
+        BotCommand("broadcast",    "📣 Broadcast to all groups"),
+        # Games
         BotCommand("rps",          "🎮 Rock Paper Scissors"),
         BotCommand("xo",           "⭕ X-O / Tic-Tac-Toe"),
         BotCommand("luckybox",     "🎁 Lucky Box game"),
         BotCommand("tod",          "🎭 Truth or Dare"),
-        BotCommand("testwelcome",  "Test welcome message"),
-        BotCommand("groupcount",   "Owner: group count"),
-        BotCommand("groupbrowser", "Owner: browse all groups"),
-        BotCommand("broadcastone", "Owner: message one group"),
-        BotCommand("activegroups", "Owner: active groups"),
-        BotCommand("failedgroups", "Owner: failed groups"),
-        BotCommand("lastaierrors", "Owner: recent AI errors"),
-        BotCommand("broadcast",    "Owner: broadcast to all"),
     ]
     for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(),
                   BotCommandScopeAllGroupChats(), BotCommandScopeAllChatAdministrators()]:
         try:
             await application.bot.set_my_commands(commands, scope=scope)
         except Exception:
-            logger.exception("Failed to set bot commands for scope: %s", scope)
-    logger.info("Bot command menus synced")
+            logger.exception("Failed to set commands for scope: %s", scope)
+    logger.info("✅ Maya Ultra — all commands synced")
 
 def build_app():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
-    # Core info commands
+
+    # ── Info commands ───────────────────────────────────────────────────────────
     application.add_handler(CommandHandler("start",         on_start))
     application.add_handler(CommandHandler("support",       on_support))
     application.add_handler(CommandHandler("ping",          on_ping))
     application.add_handler(CommandHandler("myid",          on_myid))
     application.add_handler(CommandHandler("aistatus",      on_ai_status))
-    application.add_handler(CommandHandler("analytics",     on_analytics))
+
+    # ── Profile & Economy ───────────────────────────────────────────────────────
+    application.add_handler(CommandHandler("profile",       on_profile))
+    application.add_handler(CommandHandler("balance",       on_balance))
+    application.add_handler(CommandHandler("daily",         on_daily))
+    application.add_handler(CommandHandler("gift",          on_gift))
+    application.add_handler(CommandHandler("top",           on_top))
+    application.add_handler(CommandHandler("leaderboard",   on_leaderboard))
+
+    # ── Group info ──────────────────────────────────────────────────────────────
+    application.add_handler(CommandHandler("rules",         on_rules))
     application.add_handler(CommandHandler("status",        on_status))
-    application.add_handler(CommandHandler("testwelcome",   on_testwelcome))
-    # Group admin commands
+    application.add_handler(CommandHandler("analytics",     on_analytics))
+    application.add_handler(CommandHandler("groupstats",    on_groupstats))
+
+    # ── AI Tools ────────────────────────────────────────────────────────────────
+    application.add_handler(CommandHandler("ask",           on_ask))
+    application.add_handler(CommandHandler("tr",            on_translate))
+    application.add_handler(CommandHandler("translate",     on_translate))
+
+    # ── Moderation ──────────────────────────────────────────────────────────────
+    application.add_handler(CommandHandler("warn",          on_warn))
+    application.add_handler(CommandHandler("unwarn",        on_unwarn))
+    application.add_handler(CommandHandler("warns",         on_warns))
+    application.add_handler(CommandHandler("setrules",      on_setrules))
+    application.add_handler(CommandHandler("setreply",      on_setreply))
+    application.add_handler(CommandHandler("listreplies",   on_listreplies))
+    application.add_handler(CommandHandler("delreply",      on_delreply))
+    application.add_handler(CommandHandler("linkguard",     on_linkguard))
+
+    # ── Group admin settings ────────────────────────────────────────────────────
     application.add_handler(CommandHandler("setvoice",      on_setvoice))
-    application.add_handler(CommandHandler("festivalmode",  on_festivalmode))
-    application.add_handler(CommandHandler("keywordmode",   on_keywordmode))
     application.add_handler(CommandHandler("welcomestyle",  on_welcomestyle))
     application.add_handler(CommandHandler("setfooter",     on_setfooter))
     application.add_handler(CommandHandler("lang",          on_lang))
@@ -4239,7 +5200,11 @@ def build_app():
     application.add_handler(CommandHandler("setexamday",    on_setexamday))
     application.add_handler(CommandHandler("examday",       on_examday))
     application.add_handler(CommandHandler("clearexamday",  on_clearexamday))
-    # Owner commands
+    application.add_handler(CommandHandler("festivalmode",  on_festivalmode))
+    application.add_handler(CommandHandler("keywordmode",   on_keywordmode))
+    application.add_handler(CommandHandler("testwelcome",   on_testwelcome))
+
+    # ── Owner commands ──────────────────────────────────────────────────────────
     application.add_handler(CommandHandler("groupcount",    on_groupcount))
     application.add_handler(CommandHandler("activegroups",  on_activegroups))
     application.add_handler(CommandHandler("failedgroups",  on_failedgroups))
@@ -4249,38 +5214,50 @@ def build_app():
     application.add_handler(CommandHandler("broadcast",     on_broadcast))
     application.add_handler(CommandHandler("groupbrowser",  on_groupbrowser))
     application.add_handler(CommandHandler("broadcastone",  on_broadcastone))
-    # Game commands
-    application.add_handler(CommandHandler("leaderboard",   on_leaderboard))
+
+    # ── Games ───────────────────────────────────────────────────────────────────
     application.add_handler(CommandHandler("rps",           on_rps))
     application.add_handler(CommandHandler("xo",            on_xo))
     application.add_handler(CommandHandler("luckybox",      on_luckybox))
     application.add_handler(CommandHandler("tod",           on_tod))
-    # Callback handlers
+
+    # ── Callbacks ───────────────────────────────────────────────────────────────
     application.add_handler(CallbackQueryHandler(on_groupbrowser_callback, pattern=r"^gb\|"))
     application.add_handler(CallbackQueryHandler(on_xo_callback,           pattern=r"^xo\|"))
     application.add_handler(CallbackQueryHandler(on_rps_callback,          pattern=r"^rps\|"))
     application.add_handler(CallbackQueryHandler(on_luckybox_callback,     pattern=r"^lb\|"))
     application.add_handler(CallbackQueryHandler(on_tod_callback,          pattern=r"^tod\|"))
-    # Message handlers
-    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
-    application.add_handler(ChatMemberHandler(on_chat_member, ChatMemberHandler.CHAT_MEMBER))
+
+    # ── Message handlers (ORDER MATTERS) ────────────────────────────────────────
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.NEW_CHAT_MEMBERS,
+        on_new_chat_members))
+    application.add_handler(ChatMemberHandler(
+        on_chat_member,
+        ChatMemberHandler.CHAT_MEMBER))
+    # Ultra message handler (link guard, autoreply, profile tracking)
     application.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
-        on_keyword_message))
+        _ultra_message_then_keyword))
     application.add_handler(MessageHandler(
         filters.ChatType.GROUPS & ~filters.COMMAND,
         track_group))
     return application
 
+async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Combined handler: ultra features first, then keyword replies."""
+    await handle_ultra_message(update, context)
+    await on_keyword_message(update, context)
+
 def main():
     init_db()
     init_games_db()
     init_extra_games_db()
-    threading.Thread(target=run_flask,   daemon=True).start()
-    threading.Thread(target=hourly_loop, daemon=True).start()
-    threading.Thread(target=cleanup_loop,daemon=True).start()
-    logger.info("Flask started on port %s", PORT)
-    logger.info("Starting %s", BOT_NAME)
+    init_ultra_db()
+    threading.Thread(target=run_flask,    daemon=True).start()
+    threading.Thread(target=hourly_loop,  daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
+    logger.info("🌸 Maya Ultra — starting on port %s", PORT)
     build_app().run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
