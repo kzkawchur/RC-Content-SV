@@ -309,9 +309,16 @@ def was_daily_event_sent(chat_id,event_key,day_key):
         return bool(conn.execute("SELECT 1 FROM daily_event_marks WHERE chat_id=? AND event_key=? AND day_key=?",(chat_id,event_key,day_key)).fetchone())
 
 def cleanup_daily_marks():
-    cutoff=int(time.time())-86400*60
+    now_ts = int(time.time())
     with db_connect() as conn:
-        conn.execute("DELETE FROM daily_event_marks WHERE created_at<?",(cutoff,))
+        # Daily event marks older than 60 days
+        conn.execute("DELETE FROM daily_event_marks WHERE created_at<?", (now_ts - 86400*60,))
+        # Sent text history older than 7 days (prevent unbounded growth)
+        conn.execute("DELETE FROM sent_text_history WHERE created_at<?", (now_ts - 86400*7,))
+        # Failure logs older than 30 days
+        conn.execute("DELETE FROM failure_logs WHERE created_at<?", (now_ts - 86400*30,))
+        # AI generated older than 14 days
+        conn.execute("DELETE FROM ai_generated WHERE created_at<?", (now_ts - 86400*14,))
         conn.commit()
 
 def normalize_history_text(text):
@@ -406,13 +413,15 @@ def is_linkish_message(msg):
         except: continue
     return bool(getattr(msg,"forward_origin",None) or getattr(msg,"forward_date",None))
 
-def parse_duration_to_seconds(value):
-    v=value.strip().lower()
-    if v in {"off","0","0m","0h"}: return 0
-    if v.endswith("m") and v[:-1].isdigit(): return int(v[:-1])*60
-    if v.endswith("h") and v[:-1].isdigit(): return int(v[:-1])*3600
+def parse_duration_to_seconds(value: str) -> int:
+    v = value.strip().lower()
+    if v in {"off", "0", "0m", "0h", "0d", "none"}: return 0
+    if v.endswith("s") and v[:-1].isdigit(): return int(v[:-1])
+    if v.endswith("m") and v[:-1].isdigit(): return int(v[:-1]) * 60
+    if v.endswith("h") and v[:-1].isdigit(): return int(v[:-1]) * 3600
+    if v.endswith("d") and v[:-1].isdigit(): return int(v[:-1]) * 86400
     if v.isdigit(): return int(v)
-    raise ValueError("Invalid duration")
+    raise ValueError(f"Invalid duration '{value}'. Use: 30s, 5m, 1h, 1d, or off")
 
 def parse_countdown_input(raw):
     text=raw.strip()
@@ -627,11 +636,16 @@ def normalize_hourly_text(text):
         text+="।" if re.search(r"[ঀ-৾]",text) else "."
     return text
 
-def is_valid_hourly_text(line,lang,phase):
-    raw=line.strip()
+def is_valid_hourly_text(line, lang, phase):
+    raw = line.strip()
     if not raw: return False
-    ll=raw.lower()
-    if len(raw)<18 or len(raw)>AI_MAX_TEXT_LEN: return False
+    ll = raw.lower()
+    if len(raw) < 18 or len(raw) > AI_MAX_TEXT_LEN: return False
+    # Reject lines that are just emoji
+    if re.fullmatch(r"[𐀀-􏿿\s☀-➿]+", raw): return False
+    # Reject lines with excessive repetition
+    words = ll.split()
+    if len(words) > 3 and len(set(words)) < len(words) * 0.4: return False
     if raw in WEAK_GENERIC_PHRASES.get(lang,set()): return False
     if any(b in ll for b in ["18+","sex","sexy","dating","kiss","adult","nude","xxx","porn"]): return False
     if any(t.lower() in ll for t in PHASE_BLOCKLIST.get(lang,{}).get(phase,())): return False
@@ -673,7 +687,12 @@ def build_fallback_messages(lang,phase,mood="soft",festival_key=""):
     for x in result:
         if x not in seen: seen.add(x); uniq.append(x)
     random.shuffle(uniq)
-    FALLBACK_CACHE[key]=uniq
+    FALLBACK_CACHE[key] = uniq
+    # Cap cache size to prevent unbounded memory growth
+    if len(FALLBACK_CACHE) > 2000:
+        oldest = list(FALLBACK_CACHE.keys())[:500]
+        for k in oldest:
+            FALLBACK_CACHE.pop(k, None)
     return uniq
 
 def groq_candidate_keys():
@@ -684,18 +703,56 @@ def groq_candidate_keys():
     GROQ_KEY_POINTER=(GROQ_KEY_POINTER+1)%max(1,len(GROQ_API_KEYS))
     return ordered
 
+# Keys that are rate-limited: key -> reset_timestamp
+_GROQ_RATE_LIMITED: dict[str, float] = {}
+
+def _groq_is_rate_limited(key: str) -> bool:
+    reset_ts = _GROQ_RATE_LIMITED.get(key, 0)
+    if reset_ts and time.time() < reset_ts:
+        return True
+    _GROQ_RATE_LIMITED.pop(key, None)
+    return False
+
+def _groq_mark_rate_limited(key: str, error_msg: str):
+    """Parse wait time from Groq rate limit error and mark key as limited."""
+    wait = 1200  # default 20 min
+    m = re.search(r"try again in (\d+)m(\d+)", str(error_msg))
+    if m:
+        wait = int(m.group(1)) * 60 + int(m.group(2)) + 30
+    else:
+        m2 = re.search(r"try again in (\d+)s", str(error_msg))
+        if m2:
+            wait = int(m2.group(1)) + 10
+    _GROQ_RATE_LIMITED[key] = time.time() + wait
+    logger.warning("Groq key rate-limited, cooling for %ds: %s...", wait, key[:12])
+
 def _groq_chat_request(payload):
-    last_error=None
-    for idx,key in enumerate(groq_candidate_keys(),start=1):
+    last_error = None
+    candidates = groq_candidate_keys()
+    for idx, key in enumerate(candidates, start=1):
+        if _groq_is_rate_limited(key):
+            last_error = f"key {idx} rate-limited"
+            continue
         try:
-            resp=requests.post("https://api.groq.com/openai/v1/chat/completions",headers={"Authorization":f"Bearer {key}","Content-Type":"application/json"},json=payload,timeout=GROQ_TIMEOUT_SECONDS)
-            data=resp.json()
-            if isinstance(data,dict) and data.get("choices"):
-                LAST_GROQ_STATUS["last_key_index"]=idx
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=GROQ_TIMEOUT_SECONDS,
+            )
+            data = resp.json()
+            if isinstance(data, dict) and data.get("choices"):
+                LAST_GROQ_STATUS["last_key_index"] = idx
                 return data
-            last_error=data
-        except Exception as e: last_error=e; continue
-    raise RuntimeError(str(last_error)[:500] if last_error is not None else "No Groq key succeeded")
+            # Check for rate limit in error response
+            err_msg = str(data.get("error", {}).get("message", ""))
+            if "rate_limit" in err_msg or "Rate limit" in err_msg:
+                _groq_mark_rate_limited(key, err_msg)
+            last_error = data
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(str(last_error)[:500] if last_error is not None else "No Groq key available")
 
 def _update_groq_status(ok,message):
     LAST_GROQ_STATUS.update({"configured":bool(GROQ_API_KEYS),"last_ok":ok,"last_error":message,"last_checked_at":local_now().strftime("%Y-%m-%d %I:%M:%S %p")})
@@ -719,7 +776,7 @@ def groq_generate_batch(lang,phase,mood="soft",festival_key=""):
     fn=f"- lightly reflect a festive mood for {festival_hourly_prefix(lang)}\n" if festival_key else ""
     prompt=(f"Write {AI_BATCH_SIZE} short premium Telegram group hourly messages in {'Bengali' if lang=='bn' else 'English'}.\nCurrent time phase: {pl['bn' if lang=='bn' else 'en'][phase]}.\nCurrent mood: {mood}.\nRules:\n- warm, elegant, premium, tasteful, group-safe\n- non-sexual, non-romantic, non-political, non-religious\n- no flirting, no hashtags\n- each line complete and natural\n- do NOT mention the wrong time phase\n{fn}- keep each between 18 and {AI_MAX_TEXT_LEN} characters\n- each line different, avoid robotic phrases\nReturn only the messages, one per line.")
     try:
-        data=_groq_chat_request({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":420})
+        data=_groq_chat_request({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":280})
         content=data["choices"][0]["message"]["content"]
         lines=sanitize_ai_lines(content,lang,phase)
         if lines:
@@ -1011,7 +1068,7 @@ async def send_photo_with_retry(bot,**kwargs):
         except Exception as e:
             last_error=e
             if attempt==0: await asyncio.sleep(1)
-    record_failure("send_photo",kwargs.get("chat_id"),"",str(last_error))
+    record_failure("send_photo", kwargs.get("chat_id"), "", str(last_error)[:300])
     raise last_error
 
 async def send_voice_with_retry(bot,**kwargs):
@@ -1028,23 +1085,37 @@ async def send_voice_with_retry(bot,**kwargs):
     record_failure("send_voice",kwargs.get("chat_id"),"",str(last_error))
     raise last_error
 
-async def send_text_with_retry(bot,**kwargs):
-    last_error=None; chat_id=kwargs.get("chat_id")
-    for attempt in range(2):
+async def send_text_with_retry(bot, **kwargs):
+    last_error = None
+    chat_id = kwargs.get("chat_id")
+    for attempt in range(3):
         try:
-            if chat_id: await bot_humanize(bot,chat_id,ChatAction.TYPING,"reply")
-            kw=dict(kwargs)
-            if attempt>0: kw.pop("parse_mode",None); kw.pop("disable_web_page_preview",None)
-            result=await bot.send_message(**kw)
+            if chat_id and attempt == 0:
+                await bot_humanize(bot, chat_id, ChatAction.TYPING, "reply")
+            kw = dict(kwargs)
+            if attempt > 0:
+                kw.pop("parse_mode", None)
+                kw.pop("disable_web_page_preview", None)
+            result = await bot.send_message(**kw)
             if chat_id:
                 mark_presence(chat_id)
-                txt=kw.get("text") or ""
-                if txt: record_sent_history(chat_id,"text",re.sub(r"<[^>]+>","",txt))
+                txt = kw.get("text") or ""
+                if txt:
+                    record_sent_history(chat_id, "text", re.sub(r"<[^>]+>", "", txt))
             return result
         except Exception as e:
-            last_error=e
-            if attempt==0: await asyncio.sleep(1)
-    record_failure("send_message",kwargs.get("chat_id"),"",str(last_error))
+            last_error = e
+            err_str = str(e).lower()
+            # Flood wait: respect Telegram's backoff
+            if "flood" in err_str or "retry" in err_str:
+                import re as _re
+                m = _re.search(r"retry.{0,10}(\d+)", err_str)
+                wait = int(m.group(1)) if m else 30
+                logger.warning("Flood wait %ds on send_text to %s", wait, chat_id)
+                await asyncio.sleep(min(wait, 60))
+            elif attempt < 2:
+                await asyncio.sleep(1.5 * (attempt + 1))
+    record_failure("send_message", kwargs.get("chat_id"), "", str(last_error)[:300])
     raise last_error
 
 async def copy_message_with_retry(bot,**kwargs):
@@ -1101,17 +1172,37 @@ async def fetch_profile_photo_bytes(bot,user_id):
     except: return None
 
 def cleanup_old_temp_files(max_age_seconds=1800):
-    now_ts=time.time()
-    for p in TMP_DIR.iterdir():
-        try:
-            if p.is_file() and now_ts-p.stat().st_mtime>max_age_seconds: p.unlink(missing_ok=True)
-        except: pass
+    now_ts = time.time()
+    cleaned = 0
+    try:
+        for p in TMP_DIR.iterdir():
+            try:
+                if p.is_file() and now_ts - p.stat().st_mtime > max_age_seconds:
+                    p.unlink(missing_ok=True)
+                    cleaned += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    if cleaned:
+        logger.info("Cleaned %d temp files", cleaned)
 
 def cleanup_loop():
     logger.info("Cleanup loop started")
+    _cycle = 0
     while True:
-        try: cleanup_old_temp_files()
-        except: logger.exception("cleanup_loop failed")
+        try:
+            cleanup_old_temp_files()
+            _cycle += 1
+            # Every 6 cycles (1 hour) also clean DB tables
+            if _cycle % 6 == 0:
+                try:
+                    cleanup_daily_marks()
+                    logger.info("DB cleanup done")
+                except Exception:
+                    logger.exception("DB cleanup failed")
+        except Exception:
+            logger.exception("cleanup_loop failed")
         time.sleep(600)
 
 async def require_group_admin(update,context):
@@ -1295,6 +1386,8 @@ _AI_WELCOME_TS:    dict[tuple, float] = {}
 _AI_WELCOME_TTL = 1800  # 30 min cache
 
 def groq_generate_welcome(lang: str, first_name: str, group_title: str, phase: str) -> str | None:
+    # Disabled: saves Groq tokens; template system handles welcome
+    return None
     if not GROQ_API_KEYS:
         return None
     key = (lang, first_name[:10], (group_title or "")[:20], phase)
@@ -1464,7 +1557,7 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
                 {"role": "user", "content": prompt},
             ],
             "temperature": 0.88,
-            "max_tokens": 520,
+            "max_tokens": 300,
         })
         content = data["choices"][0]["message"]["content"]
         lines = sanitize_ai_lines(content, lang, phase)
@@ -1482,8 +1575,12 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
 
 def get_batch_pool_v2(lang: str, phase: str, mood: str = "soft", festival_key: str = ""):
     key = (lang, phase, mood, festival_key, "v2")
-    cached = AI_BATCH_CACHE.get(key)
     now_ts = time.time()
+    # Purge stale cache entries (older than 2 hours)
+    stale = [k for k, v in AI_BATCH_CACHE.items() if now_ts - v.get("created_at", 0) > 7200]
+    for sk in stale:
+        AI_BATCH_CACHE.pop(sk, None)
+    cached = AI_BATCH_CACHE.get(key)
     if cached and now_ts - cached["created_at"] < 900 and cached.get("texts"):
         return cached["texts"], cached["source"]
     # v2 first → v1 fallback → static fallback
@@ -2333,6 +2430,45 @@ async def on_setvoice(update,context):
     set_group_value(chat.id,"voice_choice",value)
     await update.effective_message.reply_text(t(lang,"setvoice_set",value="Bangladesh female" if value=="bd" else "India Bengali female"))
 
+async def on_festivalmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    lang = get_group_lang(chat.id)
+    if not context.args:
+        current = "ON" if current_festival_mode(chat.id) else "OFF"
+        await update.effective_message.reply_text(
+            f"🎉 Festival Mode: <b>{current}</b>\n\nUsage:\n/festivalmode on\n/festivalmode off\n\n"
+            f"<i>When ON, special themes and messages are sent on Eid, Boishakh, Independence Day, Victory Day etc.</i>",
+            parse_mode=ParseMode.HTML)
+        return
+    val = context.args[0].strip().lower()
+    if val not in {"on","off"}:
+        await update.effective_message.reply_text("Usage: /festivalmode on or /festivalmode off")
+        return
+    set_group_value(chat.id, "festival_mode", 1 if val == "on" else 0)
+    icon = "🎉" if val == "on" else "⏸"
+    await update.effective_message.reply_text(
+        f"{icon} Festival Mode set to <b>{val.upper()}</b>.", parse_mode=ParseMode.HTML)
+
+async def on_keywordmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context): return
+    chat = update.effective_chat
+    if not context.args:
+        current = "ON" if current_keyword_mode(chat.id) else "OFF"
+        await update.effective_message.reply_text(
+            f"💬 Keyword Replies: <b>{current}</b>\n\nUsage:\n/keywordmode on\n/keywordmode off\n\n"
+            f"<i>Controls auto-replies to salam, birthday, good morning etc.</i>",
+            parse_mode=ParseMode.HTML)
+        return
+    val = context.args[0].strip().lower()
+    if val not in {"on","off"}:
+        await update.effective_message.reply_text("Usage: /keywordmode on or /keywordmode off")
+        return
+    set_group_value(chat.id, "keyword_replies_enabled", 1 if val == "on" else 0)
+    icon = "💬" if val == "on" else "🔇"
+    await update.effective_message.reply_text(
+        f"{icon} Keyword Replies set to <b>{val.upper()}</b>.", parse_mode=ParseMode.HTML)
+
 async def on_welcomestyle(update,context):
     if not await require_group_admin(update,context): return
     chat=update.effective_chat
@@ -2395,7 +2531,7 @@ async def on_hourly(update,context):
     if value=="now":
         phase=phase_now(); mood=next_hourly_mood(chat.id)
         festival_key=(current_festival() or {}).get("key","")
-        pool,source=await asyncio.to_thread(get_batch_pool,lang,phase,mood,festival_key)
+        pool,source=await asyncio.to_thread(get_batch_pool_v2,lang,phase,mood,festival_key)
         msg=pick_hourly_message(chat.id,lang,phase,pool)
         await human_delay_and_action(context,update)
         sent=await send_text_with_retry(context.bot,chat_id=chat.id,text=msg)
@@ -2548,22 +2684,30 @@ async def on_broadcast(update,context):
     status=await msg.reply_text(t("en","broadcast_start",count=len(groups)))
     for gid in groups:
         try:
-            await bot_humanize(context.bot,gid,ChatAction.TYPING,"reply")
-            await send_text_with_retry(context.bot,chat_id=gid,text=arg_text); ok_count+=1
-        except Exception as e: record_failure("broadcast",gid,"",f"broadcast_text: {e}"); fail_count+=1
+            await send_text_with_retry(context.bot, chat_id=gid, text=arg_text)
+            ok_count += 1
+            await asyncio.sleep(0.05)  # gentle rate limiting between sends
+        except Exception as e:
+            record_failure("broadcast", gid, "", f"broadcast_text: {e}")
+            fail_count += 1
     await status.edit_text(t("en","broadcast_done",ok=ok_count,fail=fail_count))
 
-async def on_chat_member(update,context):
-    cmu=update.chat_member
+async def on_chat_member(update, context):
+    cmu = update.chat_member
     if not cmu: return
-    chat=cmu.chat
-    if chat.type not in {"group","supergroup"}: return
-    ensure_group(chat.id,chat.title or "")
+    chat = cmu.chat
+    if chat.type not in {"group", "supergroup"}: return
+    ensure_group(chat.id, chat.title or "")
     if cmu.new_chat_member.user.is_bot: return
-    old=cmu.old_chat_member.status; new=cmu.new_chat_member.status
-    if old in {ChatMemberStatus.LEFT,ChatMemberStatus.BANNED} and new in {ChatMemberStatus.MEMBER,ChatMemberStatus.ADMINISTRATOR,ChatMemberStatus.OWNER}:
+    old_s = cmu.old_chat_member.status
+    new_s = cmu.new_chat_member.status
+    if (old_s in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED} and
+            new_s in {ChatMemberStatus.MEMBER, ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}):
+        lang = get_group_lang(chat.id)
+        asyncio.create_task(handle_raid_check(context.bot, chat.id, lang))
         chat_join_history[chat.id].append(time.time())
-        await queue_join_welcome(context.application,chat.id,chat.title or "",cmu.new_chat_member.user)
+        raid_join_window[chat.id].append(time.time())
+        await queue_join_welcome(context.application, chat.id, chat.title or "", cmu.new_chat_member.user)
 
 # ─── Smart Message Handler (replaces on_keyword_message) ─────────────────────
 # ─── ENHANCED GAME SYSTEM ─────────────────────────────────────────────────────
@@ -2938,7 +3082,8 @@ async def on_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await rps_safe_answer(query, "Only players can request a rematch.", True); return
         if game["mode"] == "pvp" and p2_id == 0:
             await rps_safe_answer(query, "No second player to rematch with.", True); return
-        rps_save_state(game_id, None, None, "choosing" if game["mode"] == "bot" else "choosing")
+        # Properly reset: clear choices, reset status
+        rps_save_state(game_id, None, None, "choosing", None)
         game = rps_get_game(game_id)
         await rps_safe_answer(query, "Rematch! Choose your move.")
         await rps_edit(query, game, "Rematch started — choose your move!", "choosing")
@@ -3175,7 +3320,11 @@ def xo_board_markup(game) -> InlineKeyboardMarkup:
             InlineKeyboardButton("🤝 Join", callback_data=f"xo|{game['game_id']}|join|0"),
             InlineKeyboardButton("✖ Cancel", callback_data=f"xo|{game['game_id']}|cancel|0"),
         ])
-    else:
+    elif status == "active":
+        rows.append([
+            InlineKeyboardButton("🗑 End Game", callback_data=f"xo|{game['game_id']}|close|0"),
+        ])
+    else:  # done or cancelled
         rows.append([
             InlineKeyboardButton("🔄 Next Round", callback_data=f"xo|{game['game_id']}|rematch|0"),
             InlineKeyboardButton("🗑 End", callback_data=f"xo|{game['game_id']}|close|0"),
@@ -3774,7 +3923,7 @@ async def on_luckybox_callback(update: Update, context: ContextTypes.DEFAULT_TYP
                     won=max(0, coins_delta),
                     lost=max(0, -coins_delta))
 
-    lb_record_play(game_id, uid, uname, idx, kind, result_line)
+    lb_record_play(game_id, uid, uname, idx, kind, result_line[:280])
 
     # Finish if jackpot
     if is_jackpot:
@@ -4029,6 +4178,8 @@ async def post_init(application):
         BotCommand("welcomestyle", "Welcome banner theme"),
         BotCommand("setfooter",    "Welcome footer text"),
         BotCommand("setvoice",     "Bengali voice: bd or in"),
+        BotCommand("festivalmode", "Festival mode: on/off"),
+        BotCommand("keywordmode",  "Keyword replies: on/off"),
         BotCommand("hourlyclean",  "Auto-delete hourly: off/30m/1h"),
         BotCommand("setcountdown", "Set event countdown"),
         BotCommand("countdown",    "Show countdown card"),
@@ -4071,6 +4222,8 @@ def build_app():
     application.add_handler(CommandHandler("testwelcome",   on_testwelcome))
     # Group admin commands
     application.add_handler(CommandHandler("setvoice",      on_setvoice))
+    application.add_handler(CommandHandler("festivalmode",  on_festivalmode))
+    application.add_handler(CommandHandler("keywordmode",   on_keywordmode))
     application.add_handler(CommandHandler("welcomestyle",  on_welcomestyle))
     application.add_handler(CommandHandler("setfooter",     on_setfooter))
     application.add_handler(CommandHandler("lang",          on_lang))
