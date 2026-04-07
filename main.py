@@ -182,7 +182,7 @@ def init_db():
         conn.execute("""CREATE TABLE IF NOT EXISTS luckybox_rounds (game_id TEXT PRIMARY KEY,chat_id INTEGER NOT NULL,message_id INTEGER,creator_id INTEGER NOT NULL,creator_name TEXT NOT NULL,status TEXT NOT NULL,winning_box INTEGER NOT NULL,winner_id INTEGER,winner_name TEXT,total_boxes INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)""")
         conn.execute("""CREATE TABLE IF NOT EXISTS luckybox_plays (id INTEGER PRIMARY KEY AUTOINCREMENT,game_id TEXT NOT NULL,user_id INTEGER NOT NULL,user_name TEXT NOT NULL,box_index INTEGER NOT NULL,result_kind TEXT NOT NULL,result_text TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(game_id,user_id),UNIQUE(game_id,box_index))""")
         existing_cols={row[1] for row in conn.execute("PRAGMA table_info(groups)").fetchall()}
-        for col,ddl in {"voice_choice":"TEXT NOT NULL DEFAULT 'bd'","total_welcome_sent":"INTEGER NOT NULL DEFAULT 0","total_hourly_sent":"INTEGER NOT NULL DEFAULT 0","last_ai_success_at":"INTEGER NOT NULL DEFAULT 0","last_fallback_used_at":"INTEGER NOT NULL DEFAULT 0","last_welcome_at":"INTEGER NOT NULL DEFAULT 0","last_milestone_sent":"INTEGER NOT NULL DEFAULT 0","welcome_style":"TEXT NOT NULL DEFAULT 'auto'","footer_text":"TEXT NOT NULL DEFAULT ''","hourly_delete_after":"INTEGER NOT NULL DEFAULT 0","festival_mode":"INTEGER NOT NULL DEFAULT 1","keyword_replies_enabled":"INTEGER NOT NULL DEFAULT 1","mood_index":"INTEGER NOT NULL DEFAULT 0","last_presence_at":"INTEGER NOT NULL DEFAULT 0","message_taste":"TEXT NOT NULL DEFAULT 'auto'","variant_cursor":"INTEGER NOT NULL DEFAULT 0"}.items():
+        for col,ddl in {"voice_choice":"TEXT NOT NULL DEFAULT 'bd'","total_welcome_sent":"INTEGER NOT NULL DEFAULT 0","total_hourly_sent":"INTEGER NOT NULL DEFAULT 0","last_ai_success_at":"INTEGER NOT NULL DEFAULT 0","last_fallback_used_at":"INTEGER NOT NULL DEFAULT 0","last_welcome_at":"INTEGER NOT NULL DEFAULT 0","last_milestone_sent":"INTEGER NOT NULL DEFAULT 0","welcome_style":"TEXT NOT NULL DEFAULT 'auto'","footer_text":"TEXT NOT NULL DEFAULT ''","hourly_delete_after":"INTEGER NOT NULL DEFAULT 0","festival_mode":"INTEGER NOT NULL DEFAULT 1","keyword_replies_enabled":"INTEGER NOT NULL DEFAULT 1","mood_index":"INTEGER NOT NULL DEFAULT 0","last_presence_at":"INTEGER NOT NULL DEFAULT 0","message_taste":"TEXT NOT NULL DEFAULT 'auto'","variant_cursor":"INTEGER NOT NULL DEFAULT 0","msg_min_len":"INTEGER NOT NULL DEFAULT 0","msg_max_len":"INTEGER NOT NULL DEFAULT 0","msg_limit_action":"TEXT NOT NULL DEFAULT 'delete'"}.items():
             if col not in existing_cols:
                 conn.execute(f"ALTER TABLE groups ADD COLUMN {col} {ddl}")
         conn.commit()
@@ -203,7 +203,7 @@ def get_group_lang(chat_id):
     return lang if lang in {"bn","en"} else "bn"
 
 def set_group_value(chat_id,field,value):
-    allowed={"title","language","custom_welcome","voice_enabled","delete_service","hourly_enabled","enabled","voice_choice","total_welcome_sent","total_hourly_sent","last_ai_success_at","last_fallback_used_at","last_welcome_at","last_milestone_sent","welcome_style","footer_text","hourly_delete_after","festival_mode","keyword_replies_enabled","mood_index","last_primary_msg_id","last_voice_msg_id","last_hourly_at","updated_at","last_presence_at","message_taste","variant_cursor"}
+    allowed={"title","language","custom_welcome","voice_enabled","delete_service","hourly_enabled","enabled","voice_choice","total_welcome_sent","total_hourly_sent","last_ai_success_at","last_fallback_used_at","last_welcome_at","last_milestone_sent","welcome_style","footer_text","hourly_delete_after","festival_mode","keyword_replies_enabled","mood_index","last_primary_msg_id","last_voice_msg_id","last_hourly_at","updated_at","last_presence_at","message_taste","variant_cursor","msg_min_len","msg_max_len","msg_limit_action"}
     if field not in allowed: raise ValueError("Invalid field")
     with db_connect() as conn:
         conn.execute(f"UPDATE groups SET {field}=? WHERE chat_id=?",(value,chat_id))
@@ -2379,6 +2379,16 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"{on if fest_on else off} Festival mode",
         f"{on if kw_on else off} Keyword replies",
         "",
+        "── Msg Limits ────────────",
+    ]
+    _mn, _mx, _ = get_msg_limits(chat.id)
+    if _mn > 0 or _mx > 0:
+        _ms = f"min={_mn}c  max={_mx}c" if _mn and _mx else (f"min={_mn}c" if _mn else f"max={_mx}c")
+        lines.append(f"📏 {_ms}")
+    else:
+        lines.append("📏 <i>Not set</i>")
+    lines += [
+        "",
         "── Stats ─────────────────",
         f"👋 Welcomes sent: <b>{welcomes}</b>",
         f"📨 Hourly sent:   <b>{hourly_cnt}</b>",
@@ -2441,15 +2451,9 @@ async def on_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_ai_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
-    allowed = False
-    if chat and chat.type in {"group","supergroup"} and user:
-        member = await context.bot.get_chat_member(chat.id, user.id)
-        allowed = member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
-    elif user:
-        allowed = is_super_admin(user.id)
-    if not allowed:
-        await human_delay_and_action(context, update)
-        await update.effective_message.reply_text("🔒 Only group admins or bot owners can use this.")
+    # Owner-only command
+    if not user or not is_super_admin(user.id):
+        await update.effective_message.reply_text("🔒 This command is restricted to the bot owner.")
         return
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text("🔍 Checking Groq AI status...")
@@ -2483,13 +2487,21 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phase = phase_now()
     phase_icons = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}
     ph = phase_icons.get(phase, "🕐")
+    uptime_hint = random.choice([
+        "All systems running smoothly.",
+        "Ready and responsive.",
+        "Fully operational.",
+        "Online and healthy.",
+    ])
     text = (
-        f"🏓 <b>Pong!</b>  {BOT_NAME} is alive\n"
+        f"🏓 <b>Pong!</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 {now.strftime('%I:%M:%S %p')}\n"
-        f"📅 {now.strftime('%d %b %Y')}\n"
-        f"{ph} Phase: {phase.capitalize()}\n"
-        f"🌍 TZ: {TIMEZONE_NAME}"
+        f"🤖 Bot:    <b>{BOT_NAME}</b>\n"
+        f"🕐 Time:   <b>{now.strftime('%I:%M:%S %p')}</b>\n"
+        f"📅 Date:   {now.strftime('%d %b %Y')}\n"
+        f"{ph} Phase:  {phase.capitalize()}\n"
+        f"🌍 TZ:     {TIMEZONE_NAME}\n\n"
+        f"<i>{uptime_hint}</i>"
     )
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -2501,15 +2513,20 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat and chat.type in {"group","supergroup"}:
         lang = get_group_lang(chat.id)
+        lang_g = get_group_lang(chat.id)
+        phase_g = phase_now()
+        greet = {"morning":"☀️ Good morning","day":"🌤️ Hello","evening":"🌆 Good evening","night":"🌙 Good night"}.get(phase_g,"✨ Hello")
         text = (
-            f"✨ <b>{BOT_NAME}</b> is ready in this group!\n"
+            f"{greet}, <b>{html.escape(chat.title or 'everyone')}!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"I handle premium welcomes, voice messages,\n"
-            f"hourly vibes, games, and smart replies.\n\n"
-            f"📋 /status — see all settings\n"
+            f"✨ <b>{BOT_NAME}</b> is active here!\n\n"
+            f"🎨 Premium welcomes · 🎙 Voice · 📨 Hourly\n"
+            f"🛡 Moderation · 🤖 AI replies · 🎮 Games\n\n"
+            f"<b>Quick commands:</b>\n"
+            f"📋 /status  📊 /analytics  👤 /profile\n"
             f"🎮 /rps · /xo · /luckybox · /tod\n"
-            f"🏆 /leaderboard\n"
-            f"👮 Admins: /lang · /voice · /hourly"
+            f"🏆 /leaderboard  👥 /top  📏 /rules\n\n"
+            f"<i>Admins: /lang · /voice · /hourly · /setmsglimit</i>"
         )
     else:
         text = (
@@ -2537,10 +2554,11 @@ async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await human_delay_and_action(context, update)
     st = support_text()
     text = (
-        f"💬 <b>Support</b>\n"
+        f"💬 <b>Support & Help</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"{html.escape(st)}\n\n"
-        f"<i>For help, questions, or feedback — reach out anytime.</i>"
+        f"📌 {html.escape(st)}\n\n"
+        f"<i>Have a question, suggestion, or issue?\n"
+        f"Reach out anytime — we're happy to help.</i>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2586,6 +2604,168 @@ async def on_festivalmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     icon = "🎉" if val == "on" else "⏸"
     await update.effective_message.reply_text(
         f"{icon} Festival Mode set to <b>{val.upper()}</b>.", parse_mode=ParseMode.HTML)
+
+
+# ─── Message Length Limit System ───────────────────────────────────────────────
+def get_msg_limits(chat_id: int) -> tuple[int, int, str]:
+    """Returns (min_len, max_len, action). 0 = disabled."""
+    row = get_group(chat_id)
+    if not row:
+        return 0, 0, "delete"
+    mn  = int(row["msg_min_len"] or 0)
+    mx  = int(row["msg_max_len"] or 0)
+    act = (row["msg_limit_action"] or "delete").strip().lower()
+    return mn, mx, act
+
+async def on_setmsglimit(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setmsglimit <min> <max>
+    /setmsglimit off
+    min=0 means no min limit, max=0 means no max limit
+    """
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    args = context.args or []
+
+    if not args:
+        mn, mx, act = get_msg_limits(chat.id)
+        min_s = f"{mn} chars" if mn > 0 else "No min"
+        max_s = f"{mx} chars" if mx > 0 else "No max"
+        await msg.reply_text(
+            f"📏 <b>Message Length Limit</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Min: <b>{min_s}</b>\n"
+            f"Max: <b>{max_s}</b>\n"
+            f"Action: <b>{act.upper()}</b>\n\n"
+            f"<b>Usage:</b>\n"
+            f"<code>/setmsglimit 10 500</code> — min 10, max 500 chars\n"
+            f"<code>/setmsglimit 0 200</code>  — max 200 only (no min)\n"
+            f"<code>/setmsglimit 5 0</code>   — min 5 only (no max)\n"
+            f"<code>/setmsglimit off</code>    — disable\n\n"
+            f"<i>Messages outside the limit are auto-deleted.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if args[0].strip().lower() in {"off", "disable", "0 0"}:
+        set_group_value(chat.id, "msg_min_len", 0)
+        set_group_value(chat.id, "msg_max_len", 0)
+        await msg.reply_text("📏 Message length limit <b>disabled</b>.", parse_mode=ParseMode.HTML)
+        return
+
+    if len(args) < 2:
+        await msg.reply_text(
+            "Usage: <code>/setmsglimit &lt;min&gt; &lt;max&gt;</code>\n"
+            "Example: <code>/setmsglimit 10 500</code>\n"
+            "Use 0 to skip that limit.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    try:
+        mn = max(0, int(args[0]))
+        mx = max(0, int(args[1]))
+    except ValueError:
+        await msg.reply_text("❌ Invalid numbers. Use: /setmsglimit 10 500")
+        return
+
+    if mn > 0 and mx > 0 and mn >= mx:
+        await msg.reply_text("❌ Min must be less than max.")
+        return
+    if mx > 4096:
+        await msg.reply_text("❌ Max cannot exceed Telegram's 4096 char limit.")
+        return
+
+    set_group_value(chat.id, "msg_min_len", mn)
+    set_group_value(chat.id, "msg_max_len", mx)
+
+    min_s = f"<b>{mn}</b> chars" if mn > 0 else "<i>no min</i>"
+    max_s = f"<b>{mx}</b> chars" if mx > 0 else "<i>no max</i>"
+    await msg.reply_text(
+        f"📏 <b>Message Length Limit Set</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Min length: {min_s}\n"
+        f"Max length: {max_s}\n\n"
+        f"<i>Messages outside this range will be auto-deleted.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+async def check_msg_length_limit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """
+    Returns True if message was deleted (caller should stop processing).
+    Checks message length against group limits and auto-deletes if violated.
+    """
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user or user.is_bot:
+        return False
+    if chat.type not in {"group", "supergroup"}:
+        return False
+
+    mn, mx, _ = get_msg_limits(chat.id)
+    if mn == 0 and mx == 0:
+        return False  # No limits set
+
+    text = msg.text or msg.caption or ""
+    if not text:
+        return False  # Don't police non-text messages
+
+    # Admins are exempt from length limits
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+            return False
+    except Exception:
+        return False
+
+    length = len(text)
+    violated = False
+    reason   = ""
+
+    if mn > 0 and length < mn:
+        violated = True
+        reason   = f"too short ({length}/{mn} chars min)"
+    elif mx > 0 and length > mx:
+        violated = True
+        reason   = f"too long ({length}/{mx} chars max)"
+
+    if not violated:
+        return False
+
+    # Delete the message
+    try:
+        await msg.delete()
+    except Exception:
+        return False  # Can't delete, skip warning too
+
+    # Send a temporary warning
+    try:
+        uname = html.escape(clean_name(user.first_name or "Member"))
+        lang  = get_group_lang(chat.id)
+        if lang == "bn":
+            if "short" in reason:
+                warn_text = f"⚠️ {user.mention_html(uname)}, তোমার message খুব ছোট! কমপক্ষে <b>{mn}</b> character লিখতে হবে।"
+            else:
+                warn_text = f"⚠️ {user.mention_html(uname)}, তোমার message খুব বড়! সর্বোচ্চ <b>{mx}</b> character লেখা যাবে।"
+        else:
+            if "short" in reason:
+                warn_text = f"⚠️ {user.mention_html(uname)}, message too short! Minimum <b>{mn}</b> characters required."
+            else:
+                warn_text = f"⚠️ {user.mention_html(uname)}, message too long! Maximum <b>{mx}</b> characters allowed."
+        notice = await context.bot.send_message(
+            chat_id=chat.id,
+            text=warn_text,
+            parse_mode=ParseMode.HTML
+        )
+        # Auto-delete the warning after 8 seconds
+        asyncio.create_task(schedule_delete(context.bot, chat.id, notice.message_id, 8))
+    except Exception:
+        pass
+
+    return True
 
 async def on_keywordmode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_group_admin(update, context): return
@@ -4499,14 +4679,17 @@ async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
     else:
-        warn_bar = "🟥"*warn_count + "⬜"*(MAX_WARNS-warn_count)
+        warn_bar  = "🟥" * warn_count + "⬜" * (MAX_WARNS - warn_count)
+        danger_txt = "🚨 One more warn = auto-kick!" if warn_count == MAX_WARNS - 1 else "⚠️ Be careful next time."
+        admin_name = html.escape(clean_name(admin.first_name or "Admin"))
         await msg.reply_text(
             f"⚠️ <b>Warning Issued</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"User: <b>{html.escape(tname)}</b>\n"
-            f"Warns: {warn_bar} <b>{warn_count}/{MAX_WARNS}</b>\n"
-            f"Reason: {html.escape(reason)}\n\n"
-            f"<i>{'One more warn = kick! ⚡' if warn_count == MAX_WARNS-1 else 'Be careful!'}</i>",
+            f"👤 User:   <b>{html.escape(tname)}</b>\n"
+            f"👮 By:     {admin_name}\n"
+            f"📋 Reason: {html.escape(reason)}\n"
+            f"⚡ Warns:  {warn_bar} <b>{warn_count}/{MAX_WARNS}</b>\n\n"
+            f"<i>{danger_txt}</i>",
             parse_mode=ParseMode.HTML
         )
 
@@ -4824,13 +5007,16 @@ async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await thinking.edit_text(
             f"🧠 <b>Maya AI</b>\n"
-            f"<i>Q: {html.escape(question[:80])}{'...' if len(question)>80 else ''}</i>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"{html.escape(answer)}",
+            f"❓ <i>{html.escape(question[:100])}{'...' if len(question)>100 else ''}</i>\n\n"
+            f"💡 {html.escape(answer)}",
             parse_mode=ParseMode.HTML
         )
     except Exception:
-        await msg.reply_text(html.escape(answer))
+        await msg.reply_text(
+            f"🧠 <b>Maya AI</b>\n━━━━━━━━━━━━━━━━━━\n{html.escape(answer)}",
+            parse_mode=ParseMode.HTML
+        )
 
 # ─── /translate — Instant Bangla ↔ English ────────────────────────────────────
 _translate_cooldowns: dict[int, float] = {}
@@ -5067,6 +5253,7 @@ async def post_init(application):
         BotCommand("setfooter",    "📝 Welcome footer text"),
         BotCommand("setvoice",     "🎙 Bengali voice: bd or in"),
         BotCommand("festivalmode", "🎉 Festival mode: on/off"),
+        BotCommand("setmsglimit",  "📏 Msg length limit: min max"),
         BotCommand("keywordmode",  "💬 Keyword replies: on/off"),
         BotCommand("hourlyclean",  "⏰ Auto-delete hourly msgs"),
         BotCommand("setcountdown", "⏳ Set event countdown"),
@@ -5149,6 +5336,7 @@ def build_app():
     application.add_handler(CommandHandler("examday",       on_examday))
     application.add_handler(CommandHandler("clearexamday",  on_clearexamday))
     application.add_handler(CommandHandler("festivalmode",  on_festivalmode))
+    application.add_handler(CommandHandler("setmsglimit",   on_setmsglimit))
     application.add_handler(CommandHandler("keywordmode",   on_keywordmode))
     application.add_handler(CommandHandler("testwelcome",   on_testwelcome))
 
@@ -5193,7 +5381,10 @@ def build_app():
     return application
 
 async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Combined handler: ultra features first, then keyword replies."""
+    """Combined handler: msg-limit → ultra features → keyword replies."""
+    # Check message length limit first (auto-deletes if violated)
+    if await check_msg_length_limit(update, context):
+        return  # Message was deleted, stop processing
     await handle_ultra_message(update, context)
     await on_keyword_message(update, context)
 
