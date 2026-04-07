@@ -858,57 +858,192 @@ def pick_font(size,bold=False):
         except: continue
     return ImageFont.load_default()
 
-def build_cover_bytes(first_name,group_title,lang,style="auto",footer="",profile_bytes=None,member_count=None):
-    width,height=1280,720
-    phase=phase_now()
-    c1,c2,glow,accent,resolved_style=theme_palette(style,phase)
-    img=Image.new("RGB",(width,height),c1)
-    draw=ImageDraw.Draw(img)
-    for y in range(height):
-        blend=y/max(1,height-1)
-        draw.line((0,y,width,y),fill=(int(c1[0]*(1-blend)+c2[0]*blend),int(c1[1]*(1-blend)+c2[1]*blend),int(c1[2]*(1-blend)+c2[2]*blend)))
-    overlay=Image.new("RGBA",(width,height),(0,0,0,0))
-    od=ImageDraw.Draw(overlay)
-    od.ellipse((40,40,300,300),fill=(255,255,255,70))
-    od.ellipse((980,70,1230,320),fill=(255,255,255,55))
-    od.ellipse((910,460,1185,735),fill=(255,255,255,45))
-    overlay=overlay.filter(ImageFilter.GaussianBlur(10))
-    img=Image.alpha_composite(img.convert("RGBA"),overlay).convert("RGB")
-    shadow=Image.new("RGBA",(width,height),(0,0,0,0))
-    sd=ImageDraw.Draw(shadow)
-    sd.rounded_rectangle((90,95,1188,628),radius=48,fill=(0,0,0,95))
-    shadow=shadow.filter(ImageFilter.GaussianBlur(18))
-    img=Image.alpha_composite(img.convert("RGBA"),shadow).convert("RGB")
-    draw=ImageDraw.Draw(img)
-    draw.rounded_rectangle((100,100,1180,620),radius=44,fill=(11,17,36))
-    draw.rounded_rectangle((130,125,158,595),radius=12,fill=accent)
-    tf=pick_font(64,True); nf=pick_font(92,True); sf=pick_font(36,False); mf=pick_font(28,True); tf2=pick_font(22,True)
-    draw.text((182,152),"WELCOME",fill=glow,font=tf)
-    draw.text((182,252),ascii_name(first_name).upper(),fill=(255,226,170),font=nf)
-    draw.text((182,392),f"TO {ascii_name(group_title or ('OUR GROUP' if lang=='en' else 'GROUP')).upper()}",fill=(222,233,255),font=sf)
-    draw.text((182,480),BOT_NAME.upper(),fill=(176,255,223),font=mf)
-    bx,by=935,140
-    for idx,label in enumerate([phase.upper(),resolved_style.upper()[:12]]):
-        x1=bx-(idx*185)
-        draw.rounded_rectangle((x1,by,x1+170,by+44),radius=20,fill=(255,255,255))
-        draw.text((x1+18,by+10),label,fill=(38,52,87),font=tf2)
+def build_cover_bytes(first_name, group_title, lang, style="auto", footer="", profile_bytes=None, member_count=None):
+    """Premium welcome card — layered glass + bokeh + portrait layout."""
+    import math as _math
+    W, H = 1280, 720
+    phase = phase_now()
+    c1, c2, glow, accent, resolved_style = theme_palette(style, phase)
+
+    # ── Base gradient ──────────────────────────────────────────────────────────
+    base = Image.new("RGB", (W, H), c1)
+    bd = ImageDraw.Draw(base)
+    for y in range(H):
+        t = y / max(1, H - 1)
+        # Smooth S-curve blend
+        t2 = t * t * (3 - 2 * t)
+        r = int(c1[0] * (1 - t2) + c2[0] * t2)
+        g = int(c1[1] * (1 - t2) + c2[1] * t2)
+        b = int(c1[2] * (1 - t2) + c2[2] * t2)
+        bd.line((0, y, W, y), fill=(r, g, b))
+
+    # ── Bokeh light circles ────────────────────────────────────────────────────
+    bokeh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    bk = ImageDraw.Draw(bokeh)
+    # Large soft glow circles
+    circles = [
+        (160, 80, 260, 35),   (1100, 50, 210, 28),
+        (980, 600, 180, 22),  (60, 580, 200, 30),
+        (600, -40, 150, 18),  (1200, 380, 140, 20),
+    ]
+    for cx, cy, r, alpha in circles:
+        for dr in range(r, 0, -4):
+            a = int(alpha * (dr / r) ** 1.5)
+            bk.ellipse((cx - dr, cy - dr, cx + dr, cy + dr), fill=(*glow[:3], a))
+    bokeh = bokeh.filter(ImageFilter.GaussianBlur(22))
+    base = Image.alpha_composite(base.convert("RGBA"), bokeh).convert("RGB")
+
+    # ── Card shadow ────────────────────────────────────────────────────────────
+    shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle((80, 80, W-80, H-80), radius=52, fill=(0, 0, 0, 110))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(24))
+    base = Image.alpha_composite(base.convert("RGBA"), shadow).convert("RGB")
+
+    # ── Main card (dark glass) ─────────────────────────────────────────────────
+    card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    cd = ImageDraw.Draw(card)
+    # Card background
+    cd.rounded_rectangle((90, 90, W-90, H-90), radius=48, fill=(8, 12, 28, 245))
+    # Subtle inner border
+    cd.rounded_rectangle((94, 94, W-94, H-94), radius=46, outline=(*accent[:3], 60), width=1)
+    # Accent side stripe (left)
+    cd.rounded_rectangle((118, 118, 146, H-118), radius=10, fill=(*accent[:3], 220))
+    # Top accent line
+    cd.rounded_rectangle((118, 118, W-118, 124), radius=3, fill=(*glow[:3], 80))
+    base = Image.alpha_composite(base.convert("RGBA"), card).convert("RGB")
+
+    draw = ImageDraw.Draw(base)
+
+    # ── Right side: avatar zone (dark panel) ───────────────────────────────────
+    avatar_panel = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    apd = ImageDraw.Draw(avatar_panel)
+    apd.rounded_rectangle((810, 100, W-100, H-100), radius=36, fill=(255, 255, 255, 8))
+    base = Image.alpha_composite(base.convert("RGBA"), avatar_panel).convert("RGB")
+    draw = ImageDraw.Draw(base)
+
+    # ── Phase + style badges (top right) ──────────────────────────────────────
+    phase_icons = {"morning": "☀", "day": "✦", "evening": "◑", "night": "★"}
+    ph_icon = phase_icons.get(phase, "✦")
+    tf_tiny = pick_font(18, True)
+    for idx, (badge_text, bx) in enumerate([(f"{ph_icon} {phase.upper()}", 870), (resolved_style.upper()[:10], 1050)]):
+        bw = 160 if idx == 0 else 130
+        bx2 = bx + bw
+        # Glass badge
+        badge_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(badge_layer).rounded_rectangle((bx, 112, bx2, 142), radius=12, fill=(*accent[:3], 50))
+        base = Image.alpha_composite(base.convert("RGBA"), badge_layer).convert("RGB")
+        draw = ImageDraw.Draw(base)
+        draw.rounded_rectangle((bx, 112, bx2, 142), radius=12, outline=(*accent[:3],), width=1)
+        draw.text((bx + 10, 120), badge_text[:14], fill=(*glow[:3],), font=tf_tiny)
+
+    # ── Welcome label ──────────────────────────────────────────────────────────
+    tf_label = pick_font(22, False)
+    tf_name  = pick_font(78, True)
+    tf_group = pick_font(32, False)
+    tf_sub   = pick_font(22, True)
+    tf_foot  = pick_font(19, False)
+
+    # "WELCOME" label with glow effect (draw twice)
+    label_y = 168
+    for offset in [(1, 1), (0, 0)]:
+        col = (*glow[:3], 80) if offset == (1, 1) else glow[:3]
+        draw.text((172 + offset[0], label_y + offset[1]), "W E L C O M E", fill=col, font=tf_label)
+
+    # Divider line
+    draw.rounded_rectangle((172, 202, 420, 205), radius=2, fill=(*accent[:3],))
+
+    # Name (large, golden)
+    name_text = ascii_name(first_name).upper()
+    name_y = 218
+    # Shadow
+    draw.text((175, name_y + 2), name_text[:14], fill=(0, 0, 0, 120), font=tf_name)
+    draw.text((173, name_y), name_text[:14], fill=(255, 230, 160), font=tf_name)
+
+    # Group name
+    group_text = ascii_name(group_title or ("GROUP")).upper()
+    draw.text((173, 320), "to", fill=(160, 180, 220), font=tf_sub)
+    draw.text((173, 348), group_text[:22], fill=(210, 225, 255), font=tf_group)
+
+    # Separator dots
+    for dx in range(0, 90, 18):
+        draw.ellipse((173 + dx, 406, 179 + dx, 412), fill=(*accent[:3], 160))
+
+    # Bot name + member count
+    draw.text((173, 422), BOT_NAME.upper(), fill=(*glow[:3],), font=tf_sub)
+
     if member_count:
-        draw.rounded_rectangle((880,545,1120,585),radius=18,fill=(255,255,255))
-        draw.text((900,554),f"MEMBERS {member_count}",fill=(37,45,78),font=tf2)
-    draw.text((182,552),(footer.strip()[:60] if footer else f"Powered by {BOT_NAME}"),fill=(214,229,255),font=tf2)
+        m_text = f"✦ {member_count:,} members"
+        draw.text((173, 452), m_text, fill=(160, 210, 180), font=tf_sub)
+
+    # Footer
+    footer_text = (footer.strip()[:55] if footer else f"Powered by {BOT_NAME}")
+    draw.text((173, H - 128), footer_text, fill=(100, 130, 180), font=tf_foot)
+
+    # Bottom accent bar
+    for i, w_seg in enumerate([220, 140, 80]):
+        seg_x = 173 + sum([220, 140, 80][:i])
+        alpha_v = 180 - i * 50
+        seg_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(seg_layer).rounded_rectangle(
+            (seg_x + i * 6, H - 106, seg_x + i * 6 + w_seg, H - 100),
+            radius=3, fill=(*accent[:3], alpha_v)
+        )
+        base = Image.alpha_composite(base.convert("RGBA"), seg_layer).convert("RGB")
+        draw = ImageDraw.Draw(base)
+
+    # ── Profile photo (right side, circular with glow ring) ───────────────────
     if profile_bytes:
         try:
-            avatar=ImageOps.fit(Image.open(BytesIO(profile_bytes)).convert("RGB"),(220,220))
-            mask=Image.new("L",(220,220),0)
-            ImageDraw.Draw(mask).ellipse((0,0,220,220),fill=255)
-            ring=Image.new("RGBA",(248,248),(0,0,0,0))
-            ImageDraw.Draw(ring).ellipse((0,0,248,248),fill=accent+(255,) if len(accent)==4 else accent)
-            ring.paste(avatar,(14,14),mask)
-            img.paste(ring.convert("RGB"),(900,265))
-        except: pass
-    draw.rounded_rectangle((182,603,430,615),radius=6,fill=(255,255,255))
-    draw.rounded_rectangle((182,630,334,642),radius=6,fill=(196,226,255))
-    bio=BytesIO(); img.save(bio,format="PNG"); bio.name="welcome.png"; bio.seek(0)
+            av_size = 240
+            av_x, av_y = 878, 210
+            avatar = ImageOps.fit(Image.open(BytesIO(profile_bytes)).convert("RGB"), (av_size, av_size))
+
+            # Outer glow ring
+            for ring_r, ring_a in [(av_size//2 + 18, 30), (av_size//2 + 10, 60), (av_size//2 + 4, 120)]:
+                ring_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                ImageDraw.Draw(ring_layer).ellipse(
+                    (av_x - ring_r + av_size//2, av_y - ring_r + av_size//2,
+                     av_x + ring_r + av_size//2, av_y + ring_r + av_size//2),
+                    fill=(*accent[:3], ring_a)
+                )
+                ring_layer = ring_layer.filter(ImageFilter.GaussianBlur(4))
+                base = Image.alpha_composite(base.convert("RGBA"), ring_layer).convert("RGB")
+                draw = ImageDraw.Draw(base)
+
+            # Accent ring border
+            ring_img = Image.new("RGBA", (av_size + 8, av_size + 8), (0, 0, 0, 0))
+            ImageDraw.Draw(ring_img).ellipse((0, 0, av_size + 7, av_size + 7), fill=(*accent[:3], 255))
+
+            # Avatar circular mask
+            mask = Image.new("L", (av_size, av_size), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, av_size, av_size), fill=255)
+            ring_img.paste(avatar, (4, 4), mask)
+            ring_mask = Image.new("L", ring_img.size, 0)
+            ImageDraw.Draw(ring_mask).ellipse((0, 0, av_size + 7, av_size + 7), fill=255)
+            base.paste(ring_img.convert("RGB"), (av_x - 4, av_y - 4), ring_mask)
+            draw = ImageDraw.Draw(base)
+        except Exception:
+            pass
+    else:
+        # No avatar: draw a placeholder monogram circle
+        mono_size = 200
+        mono_x, mono_y = 890, 230
+        mono_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        mld = ImageDraw.Draw(mono_layer)
+        mld.ellipse((mono_x, mono_y, mono_x + mono_size, mono_y + mono_size), fill=(*accent[:3], 60))
+        mld.ellipse((mono_x + 3, mono_y + 3, mono_x + mono_size - 3, mono_y + mono_size - 3),
+                    outline=(*accent[:3], 150), width=2)
+        base = Image.alpha_composite(base.convert("RGBA"), mono_layer).convert("RGB")
+        draw = ImageDraw.Draw(base)
+        mono_char = ascii_name(first_name)[:1].upper() or "W"
+        tf_mono = pick_font(90, True)
+        draw.text((mono_x + mono_size//2 - 28, mono_y + mono_size//2 - 50),
+                  mono_char, fill=(*glow[:3], 200), font=tf_mono)
+
+    bio = BytesIO()
+    base.save(bio, format="PNG", optimize=True)
+    bio.name = "welcome.png"
+    bio.seek(0)
     return bio
 
 def build_milestone_card_bytes(group_title,count):
@@ -1989,23 +2124,25 @@ async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
     ]
     for i, r in enumerate(rows):
-        score  = r["total_score"] or 0
-        coins  = r["coins"] or 0
-        bar    = _bar(score, max_score, 8)
-        medal  = _medal(i)
-        rps_w  = r["rps_wins"] or 0
-        xo_w   = r["xo_wins"] or 0
-        lb_w   = 0  # luckybox jackpots tracked via coins
+        score = r["total_score"] or 0
+        rps_w = r["rps_wins"] or 0
+        xo_w  = r["xo_wins"] or 0
+        bar   = _bar(score, max_score, 8)
+        medal = _medal(i)
+        details = []
+        if rps_w: details.append(f"🎮 RPS:{rps_w}")
+        if xo_w:  details.append(f"⭕ XO:{xo_w}")
+        detail_str = "  ".join(details) if details else "—"
         lines.append(
             f"{medal} <b>{html.escape(r['user_name'])}</b>\n"
-            f"   {bar} <b>{score}</b> pts  🪙 {coins}\n"
-            f"   🎮 RPS:{rps_w}  ⭕ XO:{xo_w}"
+            f"   {bar} <b>{score} pts</b>\n"
+            f"   {detail_str}"
         )
         if i < len(rows) - 1:
             lines.append("")
     lines += [
         "━━━━━━━━━━━━━━━━━━",
-        "<i>🎯 RPS/XO Win = 2pts  🎁 LuckyBox = 1pt</i>",
+        "<i>🎯 RPS/XO Win = 2pts</i>",
     ]
     try:
         await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
@@ -4035,8 +4172,11 @@ def lb_update_leaderboard(user_id: int, chat_id: int, user_name: str, **kwargs):
 def get_chat_leaderboard(chat_id: int, limit: int = 10):
     with db_connect() as conn:
         return conn.execute(
-            """SELECT user_name,quiz_wins,guess_wins,wordchain_words,rps_wins,xo_wins,coins,
-               (quiz_wins*3 + guess_wins*3 + wordchain_words + rps_wins*2 + xo_wins*2) as total_score
+            """SELECT user_name,
+               COALESCE(rps_wins,0) as rps_wins,
+               COALESCE(xo_wins,0) as xo_wins,
+               COALESCE(quiz_wins,0) as quiz_wins,
+               (COALESCE(rps_wins,0)*2 + COALESCE(xo_wins,0)*2 + COALESCE(quiz_wins,0)) as total_score
                FROM game_leaderboard WHERE chat_id=?
                ORDER BY total_score DESC LIMIT ?""",
             (chat_id, limit)
@@ -4179,9 +4319,6 @@ def init_ultra_db():
             msg_count INTEGER NOT NULL DEFAULT 0,
             warn_count INTEGER NOT NULL DEFAULT 0,
             is_vip INTEGER NOT NULL DEFAULT 0,
-            coins INTEGER NOT NULL DEFAULT 0,
-            daily_claimed INTEGER NOT NULL DEFAULT 0,
-            streak_days INTEGER NOT NULL DEFAULT 0,
             custom_title TEXT DEFAULT NULL,
             PRIMARY KEY (user_id, chat_id)
         )""")
@@ -4229,8 +4366,8 @@ def ensure_profile(user_id: int, chat_id: int, user_name: str):
     with db_connect() as conn:
         conn.execute(
             """INSERT OR IGNORE INTO member_profiles
-               (user_id,chat_id,user_name,first_seen,last_seen,msg_count,coins,daily_claimed)
-               VALUES (?,?,?,?,?,0,100,0)""",
+               (user_id,chat_id,user_name,first_seen,last_seen,msg_count,warn_count,is_vip)
+               VALUES (?,?,?,?,?,0,0,0)""",
             (user_id, chat_id, user_name[:40], now, now)
         )
         conn.execute(
@@ -4246,189 +4383,6 @@ def get_profile(user_id: int, chat_id: int):
             (user_id, chat_id)
         ).fetchone()
 
-def add_profile_coins(user_id: int, chat_id: int, amount: int):
-    with db_connect() as conn:
-        conn.execute(
-            "UPDATE member_profiles SET coins=MAX(0,coins+?),updated_at=? WHERE user_id=? AND chat_id=?",
-            (amount, _now_ts(), user_id, chat_id)
-        ) if False else None
-        conn.execute(
-            "UPDATE member_profiles SET coins=MAX(0,coins+?) WHERE user_id=? AND chat_id=?",
-            (amount, user_id, chat_id)
-        )
-        conn.commit()
-
-def get_profile_coins(user_id: int, chat_id: int) -> int:
-    row = get_profile(user_id, chat_id)
-    return int(row["coins"]) if row else 0
-
-def get_warn_count(user_id: int, chat_id: int) -> int:
-    row = get_profile(user_id, chat_id)
-    return int(row["warn_count"]) if row else 0
-
-def add_warn(user_id: int, chat_id: int, admin_id: int, reason: str) -> int:
-    now = _now_ts()
-    with db_connect() as conn:
-        conn.execute(
-            "INSERT INTO warn_log (user_id,chat_id,admin_id,reason,created_at) VALUES (?,?,?,?,?)",
-            (user_id, chat_id, admin_id, reason[:200], now)
-        )
-        conn.execute(
-            "UPDATE member_profiles SET warn_count=warn_count+1 WHERE user_id=? AND chat_id=?",
-            (user_id, chat_id)
-        )
-        conn.commit()
-    return get_warn_count(user_id, chat_id)
-
-def clear_warns(user_id: int, chat_id: int):
-    with db_connect() as conn:
-        conn.execute("DELETE FROM warn_log WHERE user_id=? AND chat_id=?", (user_id, chat_id))
-        conn.execute("UPDATE member_profiles SET warn_count=0 WHERE user_id=? AND chat_id=?", (user_id, chat_id))
-        conn.commit()
-
-# ─── Daily Reward System ───────────────────────────────────────────────────────
-DAILY_REWARDS    = [50, 60, 75, 90, 110, 130, 200]  # streak day 1-7+
-DAILY_STREAK_CAP = 7
-
-def claim_daily(user_id: int, chat_id: int, user_name: str) -> dict:
-    now = _now_ts()
-    today = datetime.fromtimestamp(now, ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d")
-    ensure_profile(user_id, chat_id, user_name)
-    row = get_profile(user_id, chat_id)
-    last_claimed_ts = int(row["daily_claimed"] or 0)
-    last_claimed_day = (datetime.fromtimestamp(last_claimed_ts, ZoneInfo(TIMEZONE_NAME)).strftime("%Y-%m-%d")
-                        if last_claimed_ts else "")
-    if last_claimed_day == today:
-        # Already claimed today
-        next_reset = datetime.strptime(today, "%Y-%m-%d").replace(tzinfo=ZoneInfo(TIMEZONE_NAME)) + timedelta(days=1)
-        secs_left = int(next_reset.timestamp()) - now
-        hrs = secs_left // 3600
-        mins = (secs_left % 3600) // 60
-        return {"claimed": False, "wait_h": hrs, "wait_m": mins}
-    # Check streak
-    yesterday = (datetime.fromtimestamp(now, ZoneInfo(TIMEZONE_NAME)) - timedelta(days=1)).strftime("%Y-%m-%d")
-    old_streak = int(row["streak_days"] or 0)
-    new_streak = (old_streak + 1) if last_claimed_day == yesterday else 1
-    new_streak = min(new_streak, DAILY_STREAK_CAP)
-    reward = DAILY_REWARDS[new_streak - 1]
-    with db_connect() as conn:
-        conn.execute(
-            "UPDATE member_profiles SET coins=coins+?,daily_claimed=?,streak_days=? WHERE user_id=? AND chat_id=?",
-            (reward, now, new_streak, user_id, chat_id)
-        )
-        conn.commit()
-    lb_update_leaderboard(user_id, chat_id, user_name, coins=reward)
-    return {"claimed": True, "reward": reward, "streak": new_streak, "coins": get_profile_coins(user_id, chat_id)}
-
-async def on_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    msg  = update.effective_message
-    if not chat or not user or not msg: return
-    if chat.type not in {"group","supergroup"}:
-        await msg.reply_text("💰 Use /daily inside a group!")
-        return
-    uname = clean_name(user.full_name or user.first_name or "Player")
-    result = claim_daily(user.id, chat.id, uname)
-    await human_delay_and_action(context, update)
-    if not result["claimed"]:
-        h, m = result["wait_h"], result["wait_m"]
-        await msg.reply_text(
-            f"⏰ <b>Already claimed today!</b>\n\n"
-            f"Next reward in <b>{h}h {m}m</b>\n"
-            f"<i>Come back tomorrow to keep your streak! 🔥</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-    streak = result["streak"]
-    reward = result["reward"]
-    coins  = result["coins"]
-    streak_txt = {1:"🌱 Day 1", 2:"🌿 Day 2", 3:"⭐ Day 3 Streak!", 4:"🔥 4-Day Streak!",
-                  5:"💥 5-Day Streak!", 6:"⚡ 6-Day Streak!", 7:"🏆 PERFECT WEEK! 7-Day Streak!"}
-    bar = "🟨" * streak + "⬜" * (DAILY_STREAK_CAP - streak)
-    bonus_note = " ⚡ Streak bonus!" if streak > 1 else ""
-    await msg.reply_text(
-        f"🎁 <b>Daily Reward!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"{streak_txt.get(streak, f'🔥 {streak}-Day Streak!')}{bonus_note}\n"
-        f"{bar}\n\n"
-        f"💰 +<b>{reward}</b> coins{' (streak bonus!)' if streak >= 3 else ''}\n"
-        f"🪙 Balance: <b>{coins}</b> coins\n\n"
-        f"<i>Come back tomorrow! Streak = more coins 🚀</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-# ─── Gift System ───────────────────────────────────────────────────────────────
-async def on_gift(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    msg  = update.effective_message
-    if not chat or not user or not msg: return
-    if chat.type not in {"group","supergroup"}:
-        await msg.reply_text("🎁 Use /gift inside a group!")
-        return
-    # Must reply to someone or use /gift @user amount
-    target = None
-    amount = 0
-    if msg.reply_to_message and msg.reply_to_message.from_user:
-        target = msg.reply_to_message.from_user
-        try: amount = int(context.args[0]) if context.args else 0
-        except: amount = 0
-    elif context.args and len(context.args) >= 1:
-        try: amount = int(context.args[0])
-        except: pass
-    if not target:
-        await msg.reply_text(
-            "🎁 <b>Gift Coins</b>\n\nReply to someone's message and use:\n"
-            "<code>/gift 50</code>\n\nGift them coins from your balance!",
-            parse_mode=ParseMode.HTML)
-        return
-    if target.id == user.id:
-        await msg.reply_text("😅 You can't gift yourself!")
-        return
-    if target.is_bot:
-        await msg.reply_text("🤖 Can't gift a bot!")
-        return
-    if amount < 1:
-        await msg.reply_text("Gift at least 1 coin. Usage: reply + /gift 50")
-        return
-    if amount > 1000:
-        await msg.reply_text("Max gift is 1000 coins at once.")
-        return
-    uname = clean_name(user.full_name or user.first_name or "Player")
-    tname = clean_name(target.full_name or target.first_name or "Friend")
-    ensure_profile(user.id, chat.id, uname)
-    ensure_profile(target.id, chat.id, tname)
-    my_coins = get_profile_coins(user.id, chat.id)
-    if my_coins < amount:
-        await msg.reply_text(
-            f"❌ Not enough coins! You have <b>{my_coins}</b> 🪙",
-            parse_mode=ParseMode.HTML)
-        return
-    add_profile_coins(user.id, chat.id, -amount)
-    add_profile_coins(target.id, chat.id, amount)
-    lb_update_leaderboard(target.id, chat.id, tname, coins=amount)
-    now = _now_ts()
-    with db_connect() as conn:
-        conn.execute(
-            "INSERT INTO gift_log (from_user_id,to_user_id,chat_id,amount,created_at) VALUES (?,?,?,?,?)",
-            (user.id, target.id, chat.id, amount, now)
-        )
-        conn.commit()
-    my_new = get_profile_coins(user.id, chat.id)
-    their_new = get_profile_coins(target.id, chat.id)
-    await human_delay_and_action(context, update)
-    await msg.reply_text(
-        f"🎁 <b>Gift Sent!</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"From: <b>{html.escape(uname)}</b>\n"
-        f"To:   <b>{html.escape(tname)}</b>\n"
-        f"💰 Amount: <b>{amount}</b> coins\n\n"
-        f"<b>{html.escape(uname)}</b> 🪙 {my_new}  •  <b>{html.escape(tname)}</b> 🪙 {their_new}",
-        parse_mode=ParseMode.HTML
-    )
-
-# ─── Profile & Balance ─────────────────────────────────────────────────────────
 async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -4451,32 +4405,29 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT * FROM game_leaderboard WHERE user_id=? AND chat_id=?",
             (target.id, chat.id)
         ).fetchone()
-    coins    = int(row["coins"] or 0)
     msgs     = int(row["msg_count"] or 0)
     warns    = int(row["warn_count"] or 0)
-    streak   = int(row["streak_days"] or 0)
     is_vip   = int(row["is_vip"] or 0)
     title    = row["custom_title"] or ("⭐ VIP Member" if is_vip else "")
     first_s  = format_ts(int(row["first_seen"] or 0))
     last_s   = format_ts(int(row["last_seen"] or 0))
-    # Rank calculation
     rps_w  = (lb_row["rps_wins"] if lb_row else 0) or 0
     xo_w   = (lb_row["xo_wins"] if lb_row else 0) or 0
-    total_score = rps_w*2 + xo_w*2 + coins//10
-    rank_label = ("🏅 Bronze" if total_score < 50 else
-                  "🥈 Silver" if total_score < 150 else
-                  "🥇 Gold"   if total_score < 400 else
-                  "💎 Diamond" if total_score < 1000 else "👑 Legend")
-    warn_bar = ("⚠️"*warns + "⬜"*(3-min(warns,3))) if warns <= 3 else "🚨🚨🚨"
+    total_score = rps_w*2 + xo_w*2 + msgs//20
+    rank_label = ("🏅 Bronze" if total_score < 20 else
+                  "🥈 Silver" if total_score < 60 else
+                  "🥇 Gold"   if total_score < 150 else
+                  "💎 Diamond" if total_score < 400 else "👑 Legend")
+    warn_bar = ("🟥"*warns + "⬜"*(3-min(warns,3))) if warns <= 3 else "🚨🚨🚨"
+    game_bar = _bar(total_score, max(1, total_score+20), 8)
     lines = [
         f"👤 <b>{html.escape(tname)}</b>  {'⭐ VIP' if is_vip else ''}",
         f"<i>{html.escape(title)}</i>" if title else "",
         "━━━━━━━━━━━━━━━━━━",
-        f"🏆 Rank:    <b>{rank_label}</b>",
-        f"🪙 Coins:   <b>{coins}</b>",
-        f"💬 Messages: {_fmt_num(msgs)}",
-        f"🔥 Streak:  {streak} day(s)",
-        f"⚠️ Warns:   {warn_bar} ({warns}/3)",
+        f"🏆 Rank:     <b>{rank_label}</b>",
+        f"📈 Score:    {game_bar} <b>{total_score}</b>",
+        f"💬 Messages: <b>{_fmt_num(msgs)}</b>",
+        f"⚠️ Warns:    {warn_bar} ({warns}/3)",
         f"🎮 RPS wins: {rps_w}  •  ⭕ XO wins: {xo_w}",
         "",
         f"📅 First seen: {first_s}",
@@ -4484,36 +4435,6 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     await human_delay_and_action(context, update)
     await msg.reply_text("\n".join(l for l in lines if l), parse_mode=ParseMode.HTML)
-
-async def on_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user = update.effective_user
-    msg  = update.effective_message
-    if not chat or not user or not msg: return
-    uname = clean_name(user.full_name or user.first_name or "Player")
-    if chat.type in {"group","supergroup"}:
-        ensure_profile(user.id, chat.id, uname)
-        coins = get_profile_coins(user.id, chat.id)
-        lb_coins = lb_get_coins(user.id)
-    else:
-        coins = lb_get_coins(user.id)
-        lb_coins = coins
-    streak = 0
-    if chat.type in {"group","supergroup"}:
-        row = get_profile(user.id, chat.id)
-        if row: streak = int(row["streak_days"] or 0)
-    await human_delay_and_action(context, update)
-    await msg.reply_text(
-        f"💰 <b>{html.escape(uname)}'s Balance</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 Coins: <b>{coins}</b>\n"
-        f"🔥 Daily streak: <b>{streak}</b> day(s)\n\n"
-        f"<i>Earn more with /daily, games, and being active!</i>",
-        parse_mode=ParseMode.HTML
-    )
-
-# ─── Warn System ──────────────────────────────────────────────────────────────
-MAX_WARNS = 3
 
 async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await require_group_admin(update, context): return
@@ -4536,20 +4457,45 @@ async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
     warn_count = add_warn(target.id, chat.id, admin.id, reason)
     await human_delay_and_action(context, update)
     if warn_count >= MAX_WARNS:
-        # Auto-ban/kick
+        # Auto-kick: ban then immediately unban = kick without permanent ban
+        kicked = False
+        kick_error = ""
         try:
-            await context.bot.ban_chat_member(chat.id, target.id)
-            await context.bot.unban_chat_member(chat.id, target.id)  # Kick (not permanent ban)
+            # Verify bot has kick permission
+            bot_member = await context.bot.get_chat_member(chat.id, context.bot.id)
+            if bot_member.status in {ChatMemberStatus.ADMINISTRATOR}:
+                from datetime import datetime as _dt
+                # revoke_messages=False to keep their messages
+                await context.bot.ban_chat_member(
+                    chat_id=chat.id,
+                    user_id=target.id,
+                    revoke_messages=False,
+                )
+                # Small delay then unban (makes it a kick, not permanent ban)
+                await asyncio.sleep(0.5)
+                await context.bot.unban_chat_member(
+                    chat_id=chat.id,
+                    user_id=target.id,
+                    only_if_banned=True,
+                )
+                kicked = True
+            else:
+                kick_error = "Bot needs Admin rights to kick."
+        except Exception as e:
+            kick_error = str(e)[:120]
+        if kicked:
             await msg.reply_text(
                 f"🚨 <b>{html.escape(tname)}</b> has been kicked!\n"
-                f"Reason: {warn_count} warnings reached.\n"
-                f"Last: {html.escape(reason)}",
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"Reason: 3 warnings reached\n"
+                f"Last reason: {html.escape(reason)}",
                 parse_mode=ParseMode.HTML
             )
-        except Exception as e:
+        else:
             await msg.reply_text(
-                f"⚠️ <b>Warn {warn_count}/{MAX_WARNS}</b> — Could not kick automatically.\n"
-                f"Please kick manually.\n<i>{e}</i>",
+                f"⚠️ <b>{html.escape(tname)}</b> reached {warn_count}/{MAX_WARNS} warns.\n"
+                f"Auto-kick failed: {html.escape(kick_error)}\n"
+                f"<i>Please kick manually or give me Admin rights.</i>",
                 parse_mode=ParseMode.HTML
             )
     else:
@@ -4810,7 +4756,7 @@ async def on_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── /ask — AI Q&A powered by Groq ───────────────────────────────────────────
 _ask_cooldowns: dict[int, float] = {}  # chat_id -> last ask time
-ASK_COOLDOWN_SECONDS = 45
+ASK_COOLDOWN_SECONDS = 60
 
 async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -4837,7 +4783,15 @@ async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     last = _ask_cooldowns.get(chat.id, 0)
     if now - last < ASK_COOLDOWN_SECONDS:
         wait = int(ASK_COOLDOWN_SECONDS - (now - last))
-        await msg.reply_text(f"⏳ AI cooldown: {wait}s remaining.")
+        mins = wait // 60
+        secs = wait % 60
+        time_str = f"{mins}m {secs}s" if mins else f"{secs}s"
+        await msg.reply_text(
+            f"⏳ <b>AI Cooldown</b>\n"
+            f"Wait <b>{time_str}</b> before asking again.\n"
+            f"<i>This prevents spam and saves API quota.</i>",
+            parse_mode=ParseMode.HTML
+        )
         return
     _ask_cooldowns[chat.id] = now
     lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
@@ -4948,7 +4902,7 @@ async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     with db_connect() as conn:
         rows = conn.execute(
-            "SELECT user_name,msg_count,coins,streak_days FROM member_profiles WHERE chat_id=? ORDER BY msg_count DESC LIMIT 10",
+            "SELECT user_name,msg_count FROM member_profiles WHERE chat_id=? ORDER BY msg_count DESC LIMIT 10",
             (chat.id,)
         ).fetchall()
     if not rows:
@@ -4967,7 +4921,7 @@ async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         name = html.escape(r["user_name"] or "Unknown")
         lines.append(
             f"{medals[i]} <b>{name}</b>\n"
-            f"   {bar} {_fmt_num(int(r['msg_count']))} msgs  🪙{r['coins']}"
+            f"   {bar} <b>{_fmt_num(int(r['msg_count']))}</b> messages"
         )
         if i < len(rows)-1: lines.append("")
     await human_delay_and_action(context, update)
@@ -5084,9 +5038,6 @@ async def post_init(application):
         BotCommand("support",      "💬 Support group"),
         # Profile & Economy
         BotCommand("profile",      "👤 Your group profile"),
-        BotCommand("balance",      "💰 Your coin balance"),
-        BotCommand("daily",        "🎁 Daily coin reward"),
-        BotCommand("gift",         "🎀 Gift coins: reply + /gift 50"),
         BotCommand("top",          "🏅 Most active members"),
         BotCommand("leaderboard",  "🏆 Game leaderboard"),
         # Group Info
@@ -5156,9 +5107,6 @@ def build_app():
 
     # ── Profile & Economy ───────────────────────────────────────────────────────
     application.add_handler(CommandHandler("profile",       on_profile))
-    application.add_handler(CommandHandler("balance",       on_balance))
-    application.add_handler(CommandHandler("daily",         on_daily))
-    application.add_handler(CommandHandler("gift",          on_gift))
     application.add_handler(CommandHandler("top",           on_top))
     application.add_handler(CommandHandler("leaderboard",   on_leaderboard))
 
