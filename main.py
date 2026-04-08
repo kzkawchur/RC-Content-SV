@@ -143,12 +143,55 @@ def t(lang,key,**kw):
     arr=TEXTS[lang].get(key) or TEXTS["bn"].get(key) or [key]
     return random.choice(arr).format(bot=BOT_NAME,support=support_text(),**kw)
 
-flask_app=Flask(__name__)
+flask_app = Flask(__name__)
+
 @flask_app.get("/")
-def home(): return f"{BOT_NAME} Welcome Bot is running"
+def home():
+    return f"<h2>🌸 {BOT_NAME} is running!</h2><p>Status: Online</p>", 200
+
 @flask_app.get("/health")
-def health(): return jsonify({"status":"ok","bot":BOT_NAME,"groq_configured":bool(GROQ_API_KEYS),"ai_hourly_enabled":AI_HOURLY_ENABLED})
-def run_flask(): flask_app.run(host="0.0.0.0",port=PORT,threaded=True)
+def health():
+    return jsonify({
+        "status": "ok",
+        "bot": BOT_NAME,
+        "groq_configured": bool(GROQ_API_KEYS),
+        "ai_hourly_enabled": AI_HOURLY_ENABLED,
+        "version": "v10",
+    })
+
+@flask_app.get("/ping")
+def flask_ping():
+    return "pong", 200
+
+def run_flask():
+    # Log the public URL so it appears in Render logs
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if render_url:
+        logger.info("🌐 Public URL: %s", render_url)
+        logger.info("🔗 Health URL: %s/health", render_url)
+        logger.info("📌 Use this URL in UptimeRobot to keep bot alive: %s/ping", render_url)
+    else:
+        logger.info("🌐 Flask starting on http://0.0.0.0:%s", PORT)
+        logger.info("📌 Set RENDER_EXTERNAL_URL env var for public URL logging")
+    flask_app.run(host="0.0.0.0", port=PORT, threaded=True)
+
+def self_ping_loop():
+    """Pings own /ping endpoint every 10 minutes to prevent Render spin-down."""
+    import time as _time
+    _time.sleep(60)  # Wait for Flask to start
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "").strip()
+    if not render_url:
+        logger.info("Self-ping disabled (RENDER_EXTERNAL_URL not set)")
+        return
+    ping_url = f"{render_url}/ping"
+    logger.info("🔄 Self-ping loop started → %s", ping_url)
+    while True:
+        try:
+            resp = requests.get(ping_url, timeout=10)
+            logger.info("🏓 Self-ping OK (%d)", resp.status_code)
+        except Exception as e:
+            logger.warning("🏓 Self-ping failed: %s", e)
+        _time.sleep(600)  # Every 10 minutes
 
 def tg_post(method,payload):
     try:
@@ -5859,10 +5902,17 @@ def main():
     init_extra_games_db()
     init_ultra_db()
     init_forward_db()
-    threading.Thread(target=run_flask,    daemon=True).start()
-    threading.Thread(target=hourly_loop,  daemon=True).start()
-    threading.Thread(target=cleanup_loop, daemon=True).start()
+    threading.Thread(target=run_flask,       daemon=True).start()
+    threading.Thread(target=hourly_loop,     daemon=True).start()
+    threading.Thread(target=cleanup_loop,    daemon=True).start()
+    threading.Thread(target=self_ping_loop,  daemon=True).start()
     logger.info("🌸 Maya Ultra v10 — starting on port %s", PORT)
+    # Log service info
+    svc_name = os.environ.get("RENDER_SERVICE_NAME", BOT_NAME)
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+    if render_url:
+        logger.info("🚀 Service: %s", svc_name)
+        logger.info("🌐 URL: %s", render_url)
     build_app().run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
