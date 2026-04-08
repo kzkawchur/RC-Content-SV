@@ -858,187 +858,243 @@ def pick_font(size,bold=False):
         except: continue
     return ImageFont.load_default()
 
+# ─── Ultra Premium Welcome Card v3 ───────────────────────────────────────────
 def build_cover_bytes(first_name, group_title, lang, style="auto", footer="", profile_bytes=None, member_count=None):
-    """Premium welcome card — layered glass + bokeh + portrait layout."""
+    """Ultra premium welcome card — cinematic layered design."""
     import math as _math
     W, H = 1280, 720
     phase = phase_now()
     c1, c2, glow, accent, resolved_style = theme_palette(style, phase)
 
-    # ── Base gradient ──────────────────────────────────────────────────────────
+    # ── Cinematic gradient base ────────────────────────────────────────────────
     base = Image.new("RGB", (W, H), c1)
-    bd = ImageDraw.Draw(base)
+    bd   = ImageDraw.Draw(base)
     for y in range(H):
-        t = y / max(1, H - 1)
-        # Smooth S-curve blend
-        t2 = t * t * (3 - 2 * t)
-        r = int(c1[0] * (1 - t2) + c2[0] * t2)
-        g = int(c1[1] * (1 - t2) + c2[1] * t2)
-        b = int(c1[2] * (1 - t2) + c2[2] * t2)
+        t  = y / max(1, H - 1)
+        t2 = t * t * (3 - 2 * t)  # smoothstep
+        r  = int(c1[0]*(1-t2) + c2[0]*t2)
+        g  = int(c1[1]*(1-t2) + c2[1]*t2)
+        b  = int(c1[2]*(1-t2) + c2[2]*t2)
         bd.line((0, y, W, y), fill=(r, g, b))
 
-    # ── Bokeh light circles ────────────────────────────────────────────────────
+    # ── Radial glow from top-right ────────────────────────────────────────────
+    glow_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    gld = ImageDraw.Draw(glow_layer)
+    cx, cy = W - 80, 80
+    for radius in range(500, 0, -12):
+        alpha = int(28 * (radius / 500) ** 2.2)
+        gld.ellipse((cx-radius, cy-radius, cx+radius, cy+radius),
+                    fill=(*glow[:3], alpha))
+    glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(30))
+    base = Image.alpha_composite(base.convert("RGBA"), glow_layer).convert("RGB")
+
+    # ── Bokeh particles ────────────────────────────────────────────────────────
     bokeh = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    bk = ImageDraw.Draw(bokeh)
-    # Large soft glow circles
-    circles = [
-        (160, 80, 260, 35),   (1100, 50, 210, 28),
-        (980, 600, 180, 22),  (60, 580, 200, 30),
-        (600, -40, 150, 18),  (1200, 380, 140, 20),
+    bkd   = ImageDraw.Draw(bokeh)
+    particles = [
+        (90, 90, 120, 22), (1150, 60, 90, 18), (200, 600, 110, 16),
+        (1050, 600, 130, 20), (600, 30, 80, 14), (400, 680, 95, 17),
+        (1180, 360, 75, 13), (50, 400, 85, 15),
     ]
-    for cx, cy, r, alpha in circles:
-        for dr in range(r, 0, -4):
-            a = int(alpha * (dr / r) ** 1.5)
-            bk.ellipse((cx - dr, cy - dr, cx + dr, cy + dr), fill=(*glow[:3], a))
-    bokeh = bokeh.filter(ImageFilter.GaussianBlur(22))
-    base = Image.alpha_composite(base.convert("RGBA"), bokeh).convert("RGB")
+    for px, py, pr, pa in particles:
+        for dr in range(pr, 0, -5):
+            a = int(pa * (dr/pr)**2)
+            bkd.ellipse((px-dr, py-dr, px+dr, py+dr), fill=(*accent[:3], a))
+    bokeh = bokeh.filter(ImageFilter.GaussianBlur(18))
+    base  = Image.alpha_composite(base.convert("RGBA"), bokeh).convert("RGB")
 
-    # ── Card shadow ────────────────────────────────────────────────────────────
+    # ── Deep shadow for card ───────────────────────────────────────────────────
     shadow = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle((80, 80, W-80, H-80), radius=52, fill=(0, 0, 0, 110))
-    shadow = shadow.filter(ImageFilter.GaussianBlur(24))
-    base = Image.alpha_composite(base.convert("RGBA"), shadow).convert("RGB")
+    ImageDraw.Draw(shadow).rounded_rectangle(
+        (72, 72, W-72, H-72), radius=56, fill=(0, 0, 0, 130))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(28))
+    base   = Image.alpha_composite(base.convert("RGBA"), shadow).convert("RGB")
 
-    # ── Main card (dark glass) ─────────────────────────────────────────────────
+    # ── Main card glass panel ──────────────────────────────────────────────────
     card = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    cd = ImageDraw.Draw(card)
-    # Card background
-    cd.rounded_rectangle((90, 90, W-90, H-90), radius=48, fill=(8, 12, 28, 245))
-    # Subtle inner border
-    cd.rounded_rectangle((94, 94, W-94, H-94), radius=46, outline=(*accent[:3], 60), width=1)
-    # Accent side stripe (left)
-    cd.rounded_rectangle((118, 118, 146, H-118), radius=10, fill=(*accent[:3], 220))
-    # Top accent line
-    cd.rounded_rectangle((118, 118, W-118, 124), radius=3, fill=(*glow[:3], 80))
+    cd   = ImageDraw.Draw(card)
+    # Primary dark card
+    cd.rounded_rectangle((84, 84, W-84, H-84), radius=52, fill=(6, 10, 24, 248))
+    # Subtle top-edge highlight
+    cd.rounded_rectangle((84, 84, W-84, 86+H//20), radius=52, fill=(*glow[:3], 8))
+    # Inner glow border
+    cd.rounded_rectangle((88, 88, W-88, H-88), radius=50,
+                          outline=(*accent[:3], 45), width=1)
     base = Image.alpha_composite(base.convert("RGBA"), card).convert("RGB")
-
     draw = ImageDraw.Draw(base)
 
-    # ── Right side: avatar zone (dark panel) ───────────────────────────────────
-    avatar_panel = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    apd = ImageDraw.Draw(avatar_panel)
-    apd.rounded_rectangle((810, 100, W-100, H-100), radius=36, fill=(255, 255, 255, 8))
-    base = Image.alpha_composite(base.convert("RGBA"), avatar_panel).convert("RGB")
+    # ── Left accent bar (thick gradient stripe) ───────────────────────────────
+    for i in range(8):
+        alpha = int(255 * (1 - i/8))
+        x = 104 + i
+        draw.rounded_rectangle((x, 108, x+1, H-108), radius=1,
+                                fill=(*accent[:3], alpha))
+    draw.rounded_rectangle((112, 108, 118, H-108), radius=3,
+                            fill=(*accent[:3], 255))
+
+    # ── Diagonal decorative lines (subtle) ────────────────────────────────────
+    deco = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    dd   = ImageDraw.Draw(deco)
+    for i, x_off in enumerate(range(830, 1200, 38)):
+        dd.line((x_off, 84, x_off+120, H-84), fill=(*glow[:3], 6))
+    deco = deco.filter(ImageFilter.GaussianBlur(1))
+    base = Image.alpha_composite(base.convert("RGBA"), deco).convert("RGB")
     draw = ImageDraw.Draw(base)
 
-    # ── Phase + style badges (top right) ──────────────────────────────────────
-    phase_icons = {"morning": "☀", "day": "✦", "evening": "◑", "night": "★"}
-    ph_icon = phase_icons.get(phase, "✦")
-    tf_tiny = pick_font(18, True)
-    for idx, (badge_text, bx) in enumerate([(f"{ph_icon} {phase.upper()}", 870), (resolved_style.upper()[:10], 1050)]):
-        bw = 160 if idx == 0 else 130
-        bx2 = bx + bw
-        # Glass badge
-        badge_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(badge_layer).rounded_rectangle((bx, 112, bx2, 142), radius=12, fill=(*accent[:3], 50))
-        base = Image.alpha_composite(base.convert("RGBA"), badge_layer).convert("RGB")
+    # ── Right side subtle panel ────────────────────────────────────────────────
+    rp = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(rp).rounded_rectangle(
+        (820, 90, W-90, H-90), radius=40, fill=(*glow[:3], 4))
+    base = Image.alpha_composite(base.convert("RGBA"), rp).convert("RGB")
+    draw = ImageDraw.Draw(base)
+
+    # ── Phase + theme badges ───────────────────────────────────────────────────
+    phase_icon = {"morning":"☀", "day":"✦", "evening":"◑", "night":"★"}.get(phase,"✦")
+    tf_badge = pick_font(17, True)
+    for idx, (badge_txt, bx) in enumerate([
+        (f"{phase_icon} {phase.upper()}", 852),
+        (resolved_style.upper()[:10], 1042),
+    ]):
+        bw = 176 if idx == 0 else 132
+        bl = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(bl).rounded_rectangle(
+            (bx, 106, bx+bw, 136), radius=13, fill=(*accent[:3], 35))
+        base = Image.alpha_composite(base.convert("RGBA"), bl).convert("RGB")
         draw = ImageDraw.Draw(base)
-        draw.rounded_rectangle((bx, 112, bx2, 142), radius=12, outline=(*accent[:3],), width=1)
-        draw.text((bx + 10, 120), badge_text[:14], fill=(*glow[:3],), font=tf_tiny)
+        draw.rounded_rectangle((bx, 106, bx+bw, 136), radius=13,
+                                outline=(*accent[:3], 90), width=1)
+        draw.text((bx+10, 114), badge_txt[:14], fill=(*glow[:3], 220), font=tf_badge)
 
-    # ── Welcome label ──────────────────────────────────────────────────────────
-    tf_label = pick_font(22, False)
-    tf_name  = pick_font(78, True)
-    tf_group = pick_font(32, False)
-    tf_sub   = pick_font(22, True)
-    tf_foot  = pick_font(19, False)
+    # ── Fonts ──────────────────────────────────────────────────────────────────
+    tf_sub   = pick_font(20, False)    # "WELCOME" label
+    tf_name  = pick_font(82, True)     # Member name
+    tf_group = pick_font(30, False)    # Group name
+    tf_bot   = pick_font(21, True)     # Bot name
+    tf_foot  = pick_font(18, False)    # Footer
+    tf_cnt   = pick_font(20, True)     # Member count
 
-    # "WELCOME" label with glow effect (draw twice)
-    label_y = 168
-    for offset in [(1, 1), (0, 0)]:
-        col = (*glow[:3], 80) if offset == (1, 1) else glow[:3]
-        draw.text((172 + offset[0], label_y + offset[1]), "W E L C O M E", fill=col, font=tf_label)
+    LEFT = 138
 
-    # Divider line
-    draw.rounded_rectangle((172, 202, 420, 205), radius=2, fill=(*accent[:3],))
+    # ── "WELCOME" label with letter spacing simulation ─────────────────────────
+    welcome_str = "W E L C O M E"
+    # shadow
+    draw.text((LEFT+2, 156), welcome_str, fill=(0,0,0,90), font=tf_sub)
+    draw.text((LEFT, 154), welcome_str, fill=(*glow[:3], 200), font=tf_sub)
 
-    # Name (large, golden)
-    name_text = ascii_name(first_name).upper()
-    name_y = 218
-    # Shadow
-    draw.text((175, name_y + 2), name_text[:14], fill=(0, 0, 0, 120), font=tf_name)
-    draw.text((173, name_y), name_text[:14], fill=(255, 230, 160), font=tf_name)
+    # ── Accent divider ─────────────────────────────────────────────────────────
+    for seg_x, seg_w, seg_alpha in [(LEFT, 240, 255), (LEFT+250, 80, 140), (LEFT+340, 40, 70)]:
+        draw.rounded_rectangle((seg_x, 184, seg_x+seg_w, 188),
+                                radius=2, fill=(*accent[:3], seg_alpha))
 
-    # Group name
-    group_text = ascii_name(group_title or ("GROUP")).upper()
-    draw.text((173, 320), "to", fill=(160, 180, 220), font=tf_sub)
-    draw.text((173, 348), group_text[:22], fill=(210, 225, 255), font=tf_group)
+    # ── Member name ────────────────────────────────────────────────────────────
+    name_str = ascii_name(first_name).upper()[:14]
+    # Double-draw for pseudo-glow
+    draw.text((LEFT+2, 198), name_str, fill=(0,0,0,80), font=tf_name)
+    draw.text((LEFT, 196), name_str, fill=(252, 228, 158), font=tf_name)
 
-    # Separator dots
-    for dx in range(0, 90, 18):
-        draw.ellipse((173 + dx, 406, 179 + dx, 412), fill=(*accent[:3], 160))
+    # ── "to" + group name ─────────────────────────────────────────────────────
+    group_str = ascii_name(group_title or "GROUP").upper()
+    draw.text((LEFT, 306), "to", fill=(*glow[:3], 150), font=tf_sub)
+    draw.text((LEFT, 330), group_str[:24], fill=(215, 228, 255), font=tf_group)
 
-    # Bot name + member count
-    draw.text((173, 422), BOT_NAME.upper(), fill=(*glow[:3],), font=tf_sub)
+    # ── Dot separator ─────────────────────────────────────────────────────────
+    for di in range(5):
+        dot_x = LEFT + di * 22
+        draw.ellipse((dot_x, 376, dot_x+8, 384),
+                     fill=(*accent[:3], 180-di*30))
 
+    # ── Bot name ──────────────────────────────────────────────────────────────
+    draw.text((LEFT, 396), BOT_NAME.upper(), fill=(*glow[:3], 240), font=tf_bot)
+
+    # ── Member count badge ────────────────────────────────────────────────────
     if member_count:
-        m_text = f"✦ {member_count:,} members"
-        draw.text((173, 452), m_text, fill=(160, 210, 180), font=tf_sub)
+        cnt_str = f"✦ {int(member_count):,} members"
+        cb = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        cbd = ImageDraw.Draw(cb)
+        cbd.rounded_rectangle((LEFT, 428, LEFT+240, 456),
+                               radius=12, fill=(*accent[:3], 28))
+        base = Image.alpha_composite(base.convert("RGBA"), cb).convert("RGB")
+        draw = ImageDraw.Draw(base)
+        draw.rounded_rectangle((LEFT, 428, LEFT+240, 456),
+                                radius=12, outline=(*accent[:3], 80), width=1)
+        draw.text((LEFT+12, 435), cnt_str, fill=(*glow[:3], 200), font=tf_cnt)
 
-    # Footer
-    footer_text = (footer.strip()[:55] if footer else f"Powered by {BOT_NAME}")
-    draw.text((173, H - 128), footer_text, fill=(100, 130, 180), font=tf_foot)
+    # ── Footer ────────────────────────────────────────────────────────────────
+    foot_txt = (footer.strip()[:55] if footer else f"Powered by {BOT_NAME}")
+    draw.text((LEFT, H-108), foot_txt, fill=(*glow[:3], 100), font=tf_foot)
 
-    # Bottom accent bar
-    for i, w_seg in enumerate([220, 140, 80]):
-        seg_x = 173 + sum([220, 140, 80][:i])
-        alpha_v = 180 - i * 50
-        seg_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        ImageDraw.Draw(seg_layer).rounded_rectangle(
-            (seg_x + i * 6, H - 106, seg_x + i * 6 + w_seg, H - 100),
-            radius=3, fill=(*accent[:3], alpha_v)
-        )
-        base = Image.alpha_composite(base.convert("RGBA"), seg_layer).convert("RGB")
+    # ── Bottom accent segments ─────────────────────────────────────────────────
+    for si, (sw, sa) in enumerate([(260, 200), (120, 120), (60, 60)]):
+        sx = LEFT + si * (280 if si == 0 else (si == 1 and 266 or 398))
+        sx = LEFT + [0, 266, 392][si]
+        bl2 = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ImageDraw.Draw(bl2).rounded_rectangle(
+            (sx, H-90, sx+sw, H-84), radius=3, fill=(*accent[:3], sa))
+        base = Image.alpha_composite(base.convert("RGBA"), bl2).convert("RGB")
         draw = ImageDraw.Draw(base)
 
-    # ── Profile photo (right side, circular with glow ring) ───────────────────
+    # ── Avatar (right side) ────────────────────────────────────────────────────
+    AV_SZ = 252
+    AV_X, AV_Y = 862, 198
+
     if profile_bytes:
         try:
-            av_size = 240
-            av_x, av_y = 878, 210
-            avatar = ImageOps.fit(Image.open(BytesIO(profile_bytes)).convert("RGB"), (av_size, av_size))
-
-            # Outer glow ring
-            for ring_r, ring_a in [(av_size//2 + 18, 30), (av_size//2 + 10, 60), (av_size//2 + 4, 120)]:
-                ring_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-                ImageDraw.Draw(ring_layer).ellipse(
-                    (av_x - ring_r + av_size//2, av_y - ring_r + av_size//2,
-                     av_x + ring_r + av_size//2, av_y + ring_r + av_size//2),
-                    fill=(*accent[:3], ring_a)
+            avatar = ImageOps.fit(
+                Image.open(BytesIO(profile_bytes)).convert("RGB"),
+                (AV_SZ, AV_SZ)
+            )
+            # Layered glow rings
+            for ring_r, ring_alpha, ring_blur in [
+                (AV_SZ//2+28, 18, 6),
+                (AV_SZ//2+16, 45, 3),
+                (AV_SZ//2+6,  90, 1),
+            ]:
+                rl = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+                cx_r = AV_X + AV_SZ//2
+                cy_r = AV_Y + AV_SZ//2
+                ImageDraw.Draw(rl).ellipse(
+                    (cx_r-ring_r, cy_r-ring_r, cx_r+ring_r, cy_r+ring_r),
+                    fill=(*accent[:3], ring_alpha)
                 )
-                ring_layer = ring_layer.filter(ImageFilter.GaussianBlur(4))
-                base = Image.alpha_composite(base.convert("RGBA"), ring_layer).convert("RGB")
+                rl = rl.filter(ImageFilter.GaussianBlur(ring_blur))
+                base = Image.alpha_composite(base.convert("RGBA"), rl).convert("RGB")
                 draw = ImageDraw.Draw(base)
 
-            # Accent ring border
-            ring_img = Image.new("RGBA", (av_size + 8, av_size + 8), (0, 0, 0, 0))
-            ImageDraw.Draw(ring_img).ellipse((0, 0, av_size + 7, av_size + 7), fill=(*accent[:3], 255))
+            # Circular mask + accent border
+            mask  = Image.new("L", (AV_SZ, AV_SZ), 0)
+            ImageDraw.Draw(mask).ellipse((0, 0, AV_SZ, AV_SZ), fill=255)
 
-            # Avatar circular mask
-            mask = Image.new("L", (av_size, av_size), 0)
-            ImageDraw.Draw(mask).ellipse((0, 0, av_size, av_size), fill=255)
-            ring_img.paste(avatar, (4, 4), mask)
+            ring_sz = AV_SZ + 10
+            ring_img = Image.new("RGBA", (ring_sz, ring_sz), (0, 0, 0, 0))
+            ImageDraw.Draw(ring_img).ellipse(
+                (0, 0, ring_sz-1, ring_sz-1), fill=(*accent[:3], 255))
+            ring_img.paste(avatar, (5, 5), mask)
+
             ring_mask = Image.new("L", ring_img.size, 0)
-            ImageDraw.Draw(ring_mask).ellipse((0, 0, av_size + 7, av_size + 7), fill=255)
-            base.paste(ring_img.convert("RGB"), (av_x - 4, av_y - 4), ring_mask)
+            ImageDraw.Draw(ring_mask).ellipse(
+                (0, 0, ring_sz-1, ring_sz-1), fill=255)
+            base.paste(ring_img.convert("RGB"), (AV_X-5, AV_Y-5), ring_mask)
             draw = ImageDraw.Draw(base)
         except Exception:
             pass
     else:
-        # No avatar: draw a placeholder monogram circle
-        mono_size = 200
-        mono_x, mono_y = 890, 230
-        mono_layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-        mld = ImageDraw.Draw(mono_layer)
-        mld.ellipse((mono_x, mono_y, mono_x + mono_size, mono_y + mono_size), fill=(*accent[:3], 60))
-        mld.ellipse((mono_x + 3, mono_y + 3, mono_x + mono_size - 3, mono_y + mono_size - 3),
-                    outline=(*accent[:3], 150), width=2)
-        base = Image.alpha_composite(base.convert("RGBA"), mono_layer).convert("RGB")
-        draw = ImageDraw.Draw(base)
-        mono_char = ascii_name(first_name)[:1].upper() or "W"
-        tf_mono = pick_font(90, True)
-        draw.text((mono_x + mono_size//2 - 28, mono_y + mono_size//2 - 50),
-                  mono_char, fill=(*glow[:3], 200), font=tf_mono)
+        # Elegant monogram circle
+        cx_m = AV_X + AV_SZ//2
+        cy_m = AV_Y + AV_SZ//2
+        mono_r = AV_SZ//2
+        for mr, ma in [(mono_r+20, 15), (mono_r+10, 35), (mono_r, 55)]:
+            ml = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            ImageDraw.Draw(ml).ellipse(
+                (cx_m-mr, cy_m-mr, cx_m+mr, cy_m+mr), fill=(*accent[:3], ma))
+            base = Image.alpha_composite(base.convert("RGBA"), ml).convert("RGB")
+            draw = ImageDraw.Draw(base)
+        # Border
+        draw.ellipse((cx_m-mono_r, cy_m-mono_r, cx_m+mono_r, cy_m+mono_r),
+                     outline=(*accent[:3], 180), width=2)
+        # Initial letter
+        mono_ch = ascii_name(first_name)[:1].upper() or "W"
+        tf_mono = pick_font(96, True)
+        draw.text((cx_m-32, cy_m-56), mono_ch, fill=(*glow[:3], 220), font=tf_mono)
 
     bio = BytesIO()
     base.save(bio, format="PNG", optimize=True)
@@ -5213,66 +5269,458 @@ async def handle_ultra_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception:
                     pass
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW FEATURES: Forward Button · Ban/Unban · Left Delete · Welcome v2
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Forward Button System DB ─────────────────────────────────────────────────
+_forward_tasks: dict[int, asyncio.Task] = {}   # chat_id -> running task
+_forward_msg_id: dict[int, int] = {}           # chat_id -> last fwd message_id
+
+def init_forward_db():
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS forward_settings (
+            chat_id INTEGER PRIMARY KEY,
+            group_link TEXT NOT NULL DEFAULT '',
+            group_title TEXT NOT NULL DEFAULT '',
+            fwd_text TEXT NOT NULL DEFAULT '',
+            fwd_interval INTEGER NOT NULL DEFAULT 300,
+            enabled INTEGER NOT NULL DEFAULT 0,
+            last_msg_id INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )""")
+        conn.commit()
+
+def get_forward_settings(chat_id: int):
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM forward_settings WHERE chat_id=?", (chat_id,)
+        ).fetchone()
+
+def save_forward_settings(chat_id: int, group_link: str, group_title: str,
+                           fwd_text: str, interval: int, enabled: int):
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute(
+            """INSERT INTO forward_settings
+               (chat_id,group_link,group_title,fwd_text,fwd_interval,enabled,last_msg_id,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,0,?,?)
+               ON CONFLICT(chat_id) DO UPDATE SET
+               group_link=excluded.group_link,group_title=excluded.group_title,
+               fwd_text=excluded.fwd_text,fwd_interval=excluded.fwd_interval,
+               enabled=excluded.enabled,updated_at=excluded.updated_at""",
+            (chat_id, group_link[:200], group_title[:80], fwd_text[:500],
+             interval, enabled, now, now)
+        )
+        conn.commit()
+
+def set_forward_enabled(chat_id: int, enabled: int):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE forward_settings SET enabled=?,updated_at=? WHERE chat_id=?",
+            (enabled, int(time.time()), chat_id)
+        )
+        conn.commit()
+
+def set_forward_last_msg_id(chat_id: int, msg_id: int):
+    with db_connect() as conn:
+        conn.execute(
+            "UPDATE forward_settings SET last_msg_id=?,updated_at=? WHERE chat_id=?",
+            (msg_id, int(time.time()), chat_id)
+        )
+        conn.commit()
+
+def _fwd_markup(link: str, count_str: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f"📢 Forward ({count_str})", url=link)
+    ]])
+
+async def _run_forward_loop(bot, chat_id: int):
+    """Runs in background: delete old msg, send new one, repeat every interval."""
+    logger.info("Forward loop started for chat %s", chat_id)
+    forward_count = 0
+    while True:
+        try:
+            row = get_forward_settings(chat_id)
+            if not row or not int(row["enabled"]):
+                logger.info("Forward loop stopped for chat %s (disabled)", chat_id)
+                break
+            link     = row["group_link"]
+            text     = row["fwd_text"] or "📢 Join our group!"
+            interval = max(60, int(row["fwd_interval"] or 300))
+
+            # Delete previous message
+            old_mid = int(row["last_msg_id"] or 0)
+            if old_mid:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=old_mid)
+                except Exception:
+                    pass
+
+            # Build count string (cycles 0→1→0 to show activity)
+            count_str = f"{forward_count % 2}/{(forward_count+1) % 2}"
+            forward_count += 1
+
+            # Send new forward message
+            sent = await bot.send_message(
+                chat_id=chat_id,
+                text=text,
+                reply_markup=_fwd_markup(link, count_str),
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+            )
+            set_forward_last_msg_id(chat_id, sent.message_id)
+            await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            logger.info("Forward loop cancelled for chat %s", chat_id)
+            break
+        except Exception as e:
+            logger.exception("Forward loop error in %s: %s", chat_id, e)
+            await asyncio.sleep(60)
+
+def _start_forward_task(bot, chat_id: int):
+    """Start or restart forward loop task."""
+    old = _forward_tasks.get(chat_id)
+    if old and not old.done():
+        old.cancel()
+    task = asyncio.create_task(_run_forward_loop(bot, chat_id))
+    _forward_tasks[chat_id] = task
+
+def _stop_forward_task(chat_id: int):
+    old = _forward_tasks.get(chat_id)
+    if old and not old.done():
+        old.cancel()
+    _forward_tasks.pop(chat_id, None)
+
+async def restore_forward_tasks(bot):
+    """Called on bot startup to resume all active forward loops."""
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT chat_id FROM forward_settings WHERE enabled=1"
+        ).fetchall()
+    for row in rows:
+        _start_forward_task(bot, int(row["chat_id"]))
+    if rows:
+        logger.info("Resumed %d forward loops", len(rows))
+
+# ─── /setforward command ───────────────────────────────────────────────────────
+async def on_setforward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setforward <link> [text]
+    Sets the group link and optional custom text for the Forward button system.
+    """
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    args = context.args or []
+
+    if not args:
+        row = get_forward_settings(chat.id)
+        status = "🟢 ON" if (row and int(row["enabled"])) else "🔴 OFF"
+        link   = row["group_link"] if row else "—"
+        itv    = int(row["fwd_interval"]) if row else 300
+        txt    = row["fwd_text"] if row else "—"
+        await msg.reply_text(
+            f"📢 <b>Forward Button System</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Status:   <b>{status}</b>\n"
+            f"Link:     <code>{html.escape(link)}</code>\n"
+            f"Interval: <b>{itv}s ({itv//60}m)</b>\n"
+            f"Text:     {html.escape(txt[:60])}\n\n"
+            f"<b>Commands:</b>\n"
+            f"<code>/setforward https://t.me/yourgroup</code>\n"
+            f"<code>/setforward https://t.me/yourgroup Custom text here</code>\n"
+            f"<code>/forwardon</code>  — start\n"
+            f"<code>/forwardoff</code> — stop\n"
+            f"<code>/setforwardinterval 300</code> — set interval in seconds",
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    link = args[0].strip()
+    if not (link.startswith("https://") or link.startswith("http://")):
+        await msg.reply_text(
+            "❌ Please provide a valid URL.\n"
+            "Example: <code>/setforward https://t.me/yourgroup</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    custom_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
+    fwd_text = custom_text if custom_text else (
+        f"📢 Join <b>{html.escape(chat.title or 'our group')}</b>!\n"
+        f"Click below to join and share with friends."
+    )
+
+    row = get_forward_settings(chat.id)
+    interval = int(row["fwd_interval"]) if row else 300
+    save_forward_settings(chat.id, link, chat.title or "", fwd_text, interval, 0)
+
+    await msg.reply_text(
+        f"✅ <b>Forward link saved!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 Link: <code>{html.escape(link)}</code>\n"
+        f"📝 Text: {html.escape(fwd_text[:60])}\n\n"
+        f"Use <code>/forwardon</code> to activate.",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+async def on_forwardon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    row  = get_forward_settings(chat.id)
+    if not row or not row["group_link"]:
+        await msg.reply_text(
+            "❌ No link set yet.\n"
+            "Use <code>/setforward https://t.me/yourgroup</code> first.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    set_forward_enabled(chat.id, 1)
+    _start_forward_task(context.bot, chat.id)
+    itv = int(row["fwd_interval"] or 300)
+    await msg.reply_text(
+        f"🟢 <b>Forward Button activated!</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⏰ Interval: every <b>{itv}s</b>\n"
+        f"🔗 Link: <code>{html.escape(row['group_link'])}</code>\n\n"
+        f"<i>Bot will send and rotate the forward message automatically.</i>",
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+async def on_forwardoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    set_forward_enabled(chat.id, 0)
+    _stop_forward_task(chat.id)
+    # Delete last forward message if present
+    row = get_forward_settings(chat.id)
+    if row and int(row["last_msg_id"] or 0):
+        try:
+            await context.bot.delete_message(
+                chat_id=chat.id,
+                message_id=int(row["last_msg_id"])
+            )
+        except Exception:
+            pass
+        set_forward_last_msg_id(chat.id, 0)
+    await msg.reply_text("🔴 <b>Forward Button stopped.</b>", parse_mode=ParseMode.HTML)
+
+async def on_setforwardinterval(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not context.args or not context.args[0].isdigit():
+        await msg.reply_text(
+            "Usage: <code>/setforwardinterval &lt;seconds&gt;</code>\n"
+            "Example: <code>/setforwardinterval 300</code> (5 minutes)\n"
+            "Minimum: 60 seconds.",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    secs = max(60, int(context.args[0]))
+    row = get_forward_settings(chat.id)
+    if not row:
+        await msg.reply_text("❌ Set a link first with /setforward.")
+        return
+    save_forward_settings(chat.id, row["group_link"], row["group_title"],
+                           row["fwd_text"], secs, int(row["enabled"]))
+    # Restart task with new interval
+    if int(row["enabled"]):
+        _start_forward_task(context.bot, chat.id)
+    await msg.reply_text(
+        f"⏰ Forward interval set to <b>{secs}s</b> ({secs//60}m {secs%60}s).",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── /ban and /unban ──────────────────────────────────────────────────────────
+async def on_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat  = update.effective_chat
+    msg   = update.effective_message
+    admin = update.effective_user
+
+    target = None
+    reason = ""
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target = msg.reply_to_message.from_user
+        reason = " ".join(context.args).strip() if context.args else "No reason provided"
+    elif context.args:
+        # /ban @username reason
+        mention = context.args[0]
+        reason  = " ".join(context.args[1:]).strip() or "No reason provided"
+        # Try to find user by username from member list (best effort)
+        await msg.reply_text(
+            "⚠️ Please <b>reply</b> to the user's message to ban them.\n"
+            "<code>Reply to message → /ban [reason]</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    else:
+        await msg.reply_text(
+            "⚠️ <b>Ban Usage</b>\n\n"
+            "Reply to a user's message and use:\n"
+            "<code>/ban</code> — ban with no reason\n"
+            "<code>/ban spam</code> — ban with reason",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not target:
+        await msg.reply_text("❌ Could not find the target user.")
+        return
+    if target.is_bot:
+        await msg.reply_text("❌ Cannot ban a bot.")
+        return
+    if is_super_admin(target.id):
+        await msg.reply_text("❌ Cannot ban the bot owner.")
+        return
+
+    tname = html.escape(clean_name(target.full_name or target.first_name or "Member"))
+    aname = html.escape(clean_name(admin.full_name or admin.first_name or "Admin"))
+
+    try:
+        # Check bot permission
+        bot_mem = await context.bot.get_chat_member(chat.id, context.bot.id)
+        if bot_mem.status != ChatMemberStatus.ADMINISTRATOR:
+            await msg.reply_text("❌ I need Admin rights to ban members.")
+            return
+        await context.bot.ban_chat_member(chat_id=chat.id, user_id=target.id)
+        await msg.reply_text(
+            f"🚫 <b>Banned</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👤 User:   {target.mention_html(tname)}\n"
+            f"👮 By:     {aname}\n"
+            f"📋 Reason: {html.escape(reason)}",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.reply_text(f"❌ Ban failed: {html.escape(str(e)[:100])}")
+
+async def on_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not await require_group_admin(update, context):
+        return
+    chat  = update.effective_chat
+    msg   = update.effective_message
+    admin = update.effective_user
+
+    target = None
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        target = msg.reply_to_message.from_user
+    else:
+        await msg.reply_text(
+            "⚠️ Reply to a user's message to unban them.\n"
+            "<code>Reply to message → /unban</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    tname = html.escape(clean_name(target.full_name or target.first_name or "Member"))
+    aname = html.escape(clean_name(admin.full_name or admin.first_name or "Admin"))
+    try:
+        await context.bot.unban_chat_member(
+            chat_id=chat.id, user_id=target.id, only_if_banned=True
+        )
+        await msg.reply_text(
+            f"✅ <b>Unbanned</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"👤 User: {target.mention_html(tname)}\n"
+            f"👮 By:   {aname}\n\n"
+            f"<i>They can now rejoin the group.</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        await msg.reply_text(f"❌ Unban failed: {html.escape(str(e)[:100])}")
+
+# ─── LEFT MEMBER message delete ───────────────────────────────────────────────
+async def on_left_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Delete the 'X left the chat' service message."""
+    msg  = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat:
+        return
+    if chat.type not in {"group", "supergroup"}:
+        return
+    row = get_group(chat.id)
+    if not row:
+        return
+    # Only delete if delete_service is ON
+    if int(row["delete_service"] or 1) == 1:
+        try:
+            await msg.delete()
+        except Exception:
+            pass
+
 # ─── post_init & build_app ────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
     commands = [
-        # Info
-        BotCommand("start",        "✨ Bot info & commands"),
-        BotCommand("ping",         "🏓 Check bot status"),
-        BotCommand("myid",         "🪪 Your Telegram ID"),
-        BotCommand("support",      "💬 Support group"),
-        # Profile & Economy
-        BotCommand("profile",      "👤 Your group profile"),
-        BotCommand("top",          "🏅 Most active members"),
-        BotCommand("leaderboard",  "🏆 Game leaderboard"),
-        # Group Info
-        BotCommand("rules",        "📋 View group rules"),
-        BotCommand("status",       "⚙️ Bot settings overview"),
-        BotCommand("analytics",    "📊 Group statistics"),
-        BotCommand("groupstats",   "📈 Group activity stats"),
-        # AI Tools
-        BotCommand("ask",          "🧠 Ask Maya AI anything"),
-        BotCommand("tr",           "🌐 Translate Bangla ↔ English"),
-        # Admin
-        BotCommand("setrules",     "📋 Set group rules"),
-        BotCommand("warn",         "⚠️ Warn a member (reply)"),
-        BotCommand("unwarn",       "✅ Clear member warns (reply)"),
-        BotCommand("warns",        "⚠️ Check member warns"),
-        BotCommand("setreply",     "🤖 Add auto-reply rule"),
-        BotCommand("listreplies",  "📄 List auto-reply rules"),
-        BotCommand("delreply",     "🗑 Delete auto-reply rule"),
-        BotCommand("linkguard",    "🛡️ Link protection: on/off"),
-        BotCommand("lang",         "🌐 Language: /lang bn or /lang en"),
-        BotCommand("voice",        "🎙 Welcome voice: on/off"),
-        BotCommand("hourly",       "📨 Hourly messages: on/off/now"),
-        BotCommand("deleteservice","🗑 Delete service msgs: on/off"),
-        BotCommand("setwelcome",   "✏️ Custom welcome text"),
-        BotCommand("resetwelcome", "↩️ Reset welcome to default"),
-        BotCommand("welcomestyle", "🎨 Welcome banner theme"),
-        BotCommand("setfooter",    "📝 Welcome footer text"),
-        BotCommand("setvoice",     "🎙 Bengali voice: bd or in"),
-        BotCommand("festivalmode", "🎉 Festival mode: on/off"),
-        BotCommand("setmsglimit",  "📏 Msg length limit: min max"),
-        BotCommand("keywordmode",  "💬 Keyword replies: on/off"),
-        BotCommand("hourlyclean",  "⏰ Auto-delete hourly msgs"),
-        BotCommand("setcountdown", "⏳ Set event countdown"),
-        BotCommand("countdown",    "📅 Show countdown card"),
-        BotCommand("clearcountdown","❌ Clear countdown"),
-        BotCommand("setexamday",   "📘 Set exam day reminder"),
-        BotCommand("aistatus",     "🤖 AI engine status"),
-        BotCommand("testwelcome",  "🧪 Test welcome message"),
-        # Owner
-        BotCommand("groupbrowser", "🗂 Browse all groups"),
-        BotCommand("broadcastone", "📢 Message one group"),
-        BotCommand("groupcount",   "🔢 Count groups"),
-        BotCommand("activegroups", "📋 Recent active groups"),
-        BotCommand("broadcast",    "📣 Broadcast to all groups"),
-        # Games
-        BotCommand("rps",          "🎮 Rock Paper Scissors"),
-        BotCommand("xo",           "⭕ X-O / Tic-Tac-Toe"),
-        BotCommand("luckybox",     "🎁 Lucky Box game"),
-        BotCommand("tod",          "🎭 Truth or Dare"),
+        BotCommand("start",              "✨ Bot info & commands"),
+        BotCommand("ping",               "🏓 Bot status check"),
+        BotCommand("myid",               "🪪 Your Telegram ID"),
+        BotCommand("support",            "💬 Support group"),
+        BotCommand("profile",            "👤 Your group profile"),
+        BotCommand("top",                "🏅 Most active members"),
+        BotCommand("leaderboard",        "🏆 Game leaderboard"),
+        BotCommand("rules",              "📋 View group rules"),
+        BotCommand("status",             "⚙️ Bot settings overview"),
+        BotCommand("analytics",          "📊 Group statistics"),
+        BotCommand("groupstats",         "📈 Group activity"),
+        BotCommand("ask",                "🧠 Ask Maya AI"),
+        BotCommand("tr",                 "🌐 Translate BN↔EN"),
+        BotCommand("setrules",           "📋 Set group rules"),
+        BotCommand("warn",               "⚠️ Warn a member"),
+        BotCommand("unwarn",             "✅ Clear member warns"),
+        BotCommand("warns",              "⚠️ Check warn history"),
+        BotCommand("ban",                "🚫 Ban a member"),
+        BotCommand("unban",              "✅ Unban a member"),
+        BotCommand("setreply",           "🤖 Add auto-reply rule"),
+        BotCommand("listreplies",        "📄 List auto-reply rules"),
+        BotCommand("delreply",           "🗑 Delete auto-reply rule"),
+        BotCommand("linkguard",          "🛡️ Link protection on/off"),
+        BotCommand("setforward",         "📢 Set forward button link"),
+        BotCommand("forwardon",          "▶️ Start forward button"),
+        BotCommand("forwardoff",         "⏹ Stop forward button"),
+        BotCommand("setforwardinterval", "⏰ Set forward interval"),
+        BotCommand("lang",               "🌐 Language: bn or en"),
+        BotCommand("voice",              "🎙 Welcome voice: on/off"),
+        BotCommand("hourly",             "📨 Hourly messages: on/off/now"),
+        BotCommand("deleteservice",      "🗑 Delete service msgs: on/off"),
+        BotCommand("setwelcome",         "✏️ Custom welcome text"),
+        BotCommand("resetwelcome",       "↩️ Reset welcome to default"),
+        BotCommand("welcomestyle",       "🎨 Welcome banner theme"),
+        BotCommand("setfooter",          "📝 Welcome footer text"),
+        BotCommand("setvoice",           "🎙 Bengali voice: bd or in"),
+        BotCommand("festivalmode",       "🎉 Festival mode: on/off"),
+        BotCommand("keywordmode",        "💬 Keyword replies: on/off"),
+        BotCommand("setmsglimit",        "📏 Message length limit"),
+        BotCommand("hourlyclean",        "⏰ Auto-delete hourly msgs"),
+        BotCommand("setcountdown",       "⏳ Set event countdown"),
+        BotCommand("countdown",          "📅 Show countdown card"),
+        BotCommand("clearcountdown",     "❌ Clear countdown"),
+        BotCommand("setexamday",         "📘 Set exam day reminder"),
+        BotCommand("aistatus",           "🤖 AI engine status (owner)"),
+        BotCommand("testwelcome",        "🧪 Test welcome message"),
+        BotCommand("groupbrowser",       "🗂 Browse groups (owner)"),
+        BotCommand("broadcastone",       "📢 Message one group (owner)"),
+        BotCommand("groupcount",         "🔢 Count groups (owner)"),
+        BotCommand("activegroups",       "📋 Active groups (owner)"),
+        BotCommand("broadcast",          "📣 Broadcast (owner)"),
+        BotCommand("rps",                "🎮 Rock Paper Scissors"),
+        BotCommand("xo",                 "⭕ X-O / Tic-Tac-Toe"),
+        BotCommand("luckybox",           "🎁 Lucky Box game"),
+        BotCommand("tod",                "🎭 Truth or Dare"),
     ]
     for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(),
                   BotCommandScopeAllGroupChats(), BotCommandScopeAllChatAdministrators()]:
@@ -5280,98 +5728,115 @@ async def post_init(application):
             await application.bot.set_my_commands(commands, scope=scope)
         except Exception:
             logger.exception("Failed to set commands for scope: %s", scope)
-    logger.info("✅ Maya Ultra — all commands synced")
+
+    # Restore active forward loops
+    try:
+        await restore_forward_tasks(application.bot)
+    except Exception:
+        logger.exception("Failed to restore forward tasks")
+
+    logger.info("🌸 Maya Ultra v10 — ready")
 
 def build_app():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # ── Info commands ───────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("start",         on_start))
-    application.add_handler(CommandHandler("support",       on_support))
-    application.add_handler(CommandHandler("ping",          on_ping))
-    application.add_handler(CommandHandler("myid",          on_myid))
-    application.add_handler(CommandHandler("aistatus",      on_ai_status))
+    # Info
+    application.add_handler(CommandHandler("start",              on_start))
+    application.add_handler(CommandHandler("support",            on_support))
+    application.add_handler(CommandHandler("ping",               on_ping))
+    application.add_handler(CommandHandler("myid",               on_myid))
+    application.add_handler(CommandHandler("aistatus",           on_ai_status))
 
-    # ── Profile & Economy ───────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("profile",       on_profile))
-    application.add_handler(CommandHandler("top",           on_top))
-    application.add_handler(CommandHandler("leaderboard",   on_leaderboard))
+    # Profile & stats
+    application.add_handler(CommandHandler("profile",            on_profile))
+    application.add_handler(CommandHandler("top",                on_top))
+    application.add_handler(CommandHandler("leaderboard",        on_leaderboard))
 
-    # ── Group info ──────────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("rules",         on_rules))
-    application.add_handler(CommandHandler("status",        on_status))
-    application.add_handler(CommandHandler("analytics",     on_analytics))
-    application.add_handler(CommandHandler("groupstats",    on_groupstats))
+    # Group info
+    application.add_handler(CommandHandler("rules",              on_rules))
+    application.add_handler(CommandHandler("status",             on_status))
+    application.add_handler(CommandHandler("analytics",          on_analytics))
+    application.add_handler(CommandHandler("groupstats",         on_groupstats))
 
-    # ── AI Tools ────────────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("ask",           on_ask))
-    application.add_handler(CommandHandler("tr",            on_translate))
-    application.add_handler(CommandHandler("translate",     on_translate))
+    # AI tools
+    application.add_handler(CommandHandler("ask",                on_ask))
+    application.add_handler(CommandHandler("tr",                 on_translate))
+    application.add_handler(CommandHandler("translate",          on_translate))
 
-    # ── Moderation ──────────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("warn",          on_warn))
-    application.add_handler(CommandHandler("unwarn",        on_unwarn))
-    application.add_handler(CommandHandler("warns",         on_warns))
-    application.add_handler(CommandHandler("setrules",      on_setrules))
-    application.add_handler(CommandHandler("setreply",      on_setreply))
-    application.add_handler(CommandHandler("listreplies",   on_listreplies))
-    application.add_handler(CommandHandler("delreply",      on_delreply))
-    application.add_handler(CommandHandler("linkguard",     on_linkguard))
+    # Moderation
+    application.add_handler(CommandHandler("warn",               on_warn))
+    application.add_handler(CommandHandler("unwarn",             on_unwarn))
+    application.add_handler(CommandHandler("warns",              on_warns))
+    application.add_handler(CommandHandler("ban",                on_ban))
+    application.add_handler(CommandHandler("unban",              on_unban))
+    application.add_handler(CommandHandler("setrules",           on_setrules))
+    application.add_handler(CommandHandler("setreply",           on_setreply))
+    application.add_handler(CommandHandler("listreplies",        on_listreplies))
+    application.add_handler(CommandHandler("delreply",           on_delreply))
+    application.add_handler(CommandHandler("linkguard",          on_linkguard))
 
-    # ── Group admin settings ────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("setvoice",      on_setvoice))
-    application.add_handler(CommandHandler("welcomestyle",  on_welcomestyle))
-    application.add_handler(CommandHandler("setfooter",     on_setfooter))
-    application.add_handler(CommandHandler("lang",          on_lang))
-    application.add_handler(CommandHandler("voice",         on_voice))
-    application.add_handler(CommandHandler("deleteservice", on_delete_service))
-    application.add_handler(CommandHandler("hourly",        on_hourly))
-    application.add_handler(CommandHandler("setwelcome",    on_setwelcome))
-    application.add_handler(CommandHandler("resetwelcome",  on_resetwelcome))
-    application.add_handler(CommandHandler("hourlyclean",   on_hourlyclean))
-    application.add_handler(CommandHandler("setcountdown",  on_setcountdown))
-    application.add_handler(CommandHandler("countdown",     on_showcountdown))
-    application.add_handler(CommandHandler("clearcountdown",on_clearcountdown))
-    application.add_handler(CommandHandler("setexamday",    on_setexamday))
-    application.add_handler(CommandHandler("examday",       on_examday))
-    application.add_handler(CommandHandler("clearexamday",  on_clearexamday))
-    application.add_handler(CommandHandler("festivalmode",  on_festivalmode))
-    application.add_handler(CommandHandler("setmsglimit",   on_setmsglimit))
-    application.add_handler(CommandHandler("keywordmode",   on_keywordmode))
-    application.add_handler(CommandHandler("testwelcome",   on_testwelcome))
+    # Forward button system
+    application.add_handler(CommandHandler("setforward",         on_setforward))
+    application.add_handler(CommandHandler("forwardon",          on_forwardon))
+    application.add_handler(CommandHandler("forwardoff",         on_forwardoff))
+    application.add_handler(CommandHandler("setforwardinterval", on_setforwardinterval))
 
-    # ── Owner commands ──────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("groupcount",    on_groupcount))
-    application.add_handler(CommandHandler("activegroups",  on_activegroups))
-    application.add_handler(CommandHandler("failedgroups",  on_failedgroups))
-    application.add_handler(CommandHandler("lastaierrors",  on_lastaierrors))
-    application.add_handler(CommandHandler("broadcastphoto",on_broadcast))
-    application.add_handler(CommandHandler("broadcastvoice",on_broadcast))
-    application.add_handler(CommandHandler("broadcast",     on_broadcast))
-    application.add_handler(CommandHandler("groupbrowser",  on_groupbrowser))
-    application.add_handler(CommandHandler("broadcastone",  on_broadcastone))
+    # Group admin settings
+    application.add_handler(CommandHandler("setvoice",           on_setvoice))
+    application.add_handler(CommandHandler("welcomestyle",       on_welcomestyle))
+    application.add_handler(CommandHandler("setfooter",          on_setfooter))
+    application.add_handler(CommandHandler("lang",               on_lang))
+    application.add_handler(CommandHandler("voice",              on_voice))
+    application.add_handler(CommandHandler("deleteservice",      on_delete_service))
+    application.add_handler(CommandHandler("hourly",             on_hourly))
+    application.add_handler(CommandHandler("setwelcome",         on_setwelcome))
+    application.add_handler(CommandHandler("resetwelcome",       on_resetwelcome))
+    application.add_handler(CommandHandler("hourlyclean",        on_hourlyclean))
+    application.add_handler(CommandHandler("setcountdown",       on_setcountdown))
+    application.add_handler(CommandHandler("countdown",          on_showcountdown))
+    application.add_handler(CommandHandler("clearcountdown",     on_clearcountdown))
+    application.add_handler(CommandHandler("setexamday",         on_setexamday))
+    application.add_handler(CommandHandler("examday",            on_examday))
+    application.add_handler(CommandHandler("clearexamday",       on_clearexamday))
+    application.add_handler(CommandHandler("festivalmode",       on_festivalmode))
+    application.add_handler(CommandHandler("keywordmode",        on_keywordmode))
+    application.add_handler(CommandHandler("setmsglimit",        on_setmsglimit))
+    application.add_handler(CommandHandler("testwelcome",        on_testwelcome))
 
-    # ── Games ───────────────────────────────────────────────────────────────────
-    application.add_handler(CommandHandler("rps",           on_rps))
-    application.add_handler(CommandHandler("xo",            on_xo))
-    application.add_handler(CommandHandler("luckybox",      on_luckybox))
-    application.add_handler(CommandHandler("tod",           on_tod))
+    # Owner
+    application.add_handler(CommandHandler("groupcount",         on_groupcount))
+    application.add_handler(CommandHandler("activegroups",       on_activegroups))
+    application.add_handler(CommandHandler("failedgroups",       on_failedgroups))
+    application.add_handler(CommandHandler("lastaierrors",       on_lastaierrors))
+    application.add_handler(CommandHandler("broadcastphoto",     on_broadcast))
+    application.add_handler(CommandHandler("broadcastvoice",     on_broadcast))
+    application.add_handler(CommandHandler("broadcast",          on_broadcast))
+    application.add_handler(CommandHandler("groupbrowser",       on_groupbrowser))
+    application.add_handler(CommandHandler("broadcastone",       on_broadcastone))
 
-    # ── Callbacks ───────────────────────────────────────────────────────────────
+    # Games
+    application.add_handler(CommandHandler("rps",                on_rps))
+    application.add_handler(CommandHandler("xo",                 on_xo))
+    application.add_handler(CommandHandler("luckybox",           on_luckybox))
+    application.add_handler(CommandHandler("tod",                on_tod))
+
+    # Callbacks
     application.add_handler(CallbackQueryHandler(on_groupbrowser_callback, pattern=r"^gb\|"))
     application.add_handler(CallbackQueryHandler(on_xo_callback,           pattern=r"^xo\|"))
     application.add_handler(CallbackQueryHandler(on_rps_callback,          pattern=r"^rps\|"))
     application.add_handler(CallbackQueryHandler(on_luckybox_callback,     pattern=r"^lb\|"))
     application.add_handler(CallbackQueryHandler(on_tod_callback,          pattern=r"^tod\|"))
 
-    # ── Message handlers (ORDER MATTERS) ────────────────────────────────────────
+    # Message handlers (ORDER MATTERS)
     application.add_handler(MessageHandler(
         filters.StatusUpdate.NEW_CHAT_MEMBERS,
         on_new_chat_members))
+    application.add_handler(MessageHandler(
+        filters.StatusUpdate.LEFT_CHAT_MEMBER,
+        on_left_chat_member))
     application.add_handler(ChatMemberHandler(
         on_chat_member,
         ChatMemberHandler.CHAT_MEMBER))
-    # Ultra message handler (link guard, autoreply, profile tracking)
     application.add_handler(MessageHandler(
         filters.ChatType.GROUPS & filters.TEXT & ~filters.COMMAND,
         _ultra_message_then_keyword))
@@ -5380,23 +5845,16 @@ def build_app():
         track_group))
     return application
 
-async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Combined handler: msg-limit → ultra features → keyword replies."""
-    # Check message length limit first (auto-deletes if violated)
-    if await check_msg_length_limit(update, context):
-        return  # Message was deleted, stop processing
-    await handle_ultra_message(update, context)
-    await on_keyword_message(update, context)
-
 def main():
     init_db()
     init_games_db()
     init_extra_games_db()
     init_ultra_db()
+    init_forward_db()
     threading.Thread(target=run_flask,    daemon=True).start()
     threading.Thread(target=hourly_loop,  daemon=True).start()
     threading.Thread(target=cleanup_loop, daemon=True).start()
-    logger.info("🌸 Maya Ultra — starting on port %s", PORT)
+    logger.info("🌸 Maya Ultra v10 — starting on port %s", PORT)
     build_app().run_polling(
         allowed_updates=Update.ALL_TYPES,
         drop_pending_updates=False,
