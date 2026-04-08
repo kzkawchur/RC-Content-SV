@@ -5662,6 +5662,14 @@ async def on_left_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception:
             pass
 
+async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Combined handler: msg-limit check → ultra features → keyword replies."""
+    if await check_msg_length_limit(update, context):
+        return
+    await handle_ultra_message(update, context)
+    await on_keyword_message(update, context)
+
+
 # ─── post_init & build_app ────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
