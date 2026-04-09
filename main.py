@@ -1859,7 +1859,12 @@ def hourly_loop():
                     if chat_id not in prepared:
                         continue
                     lang, mood, fk = prepared[chat_id]
-                    msg = pick_hourly_message(chat_id, lang, phase, pools[(lang, mood, fk)])
+                    raw_msg = pick_hourly_message(chat_id, lang, phase, pools[(lang, mood, fk)])
+                    # Add aura persona phrase 30% of the time
+                    if random.random() < 0.30:
+                        aura_ph = aura_hourly_phrase(chat_id, lang, phase)
+                        raw_msg = normalize_hourly_text(f"{aura_ph} {raw_msg}") if random.random() < 0.5 else normalize_hourly_text(f"{raw_msg} {aura_ph}")
+                    msg = raw_msg
                     ok, mid = send_message_http_full(chat_id, msg)
                     if ok:
                         set_group_value(chat_id, "last_hourly_at", int(time.time()))
@@ -1941,9 +1946,9 @@ async def on_keyword_message(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if smart_kw_allowed(chat.id, smart_key) and random.random() < chance:
             lang = get_group_lang(chat.id)
             reply = smart_kw_reply(lang, smart_key)
-            if reply:
+            if reply and not was_recent_duplicate_text(chat.id, "smart_kw", reply, 1):
                 try:
-                    await asyncio.sleep(random.uniform(1.5, 3.5))
+                    await asyncio.sleep(random.uniform(1.2, 2.8))
                     await msg.reply_text(reply)
                     mark_presence(chat.id)
                     record_sent_history(chat.id, "smart_kw", reply)
@@ -2216,9 +2221,10 @@ async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     max_score = max((r["total_score"] or 0) for r in rows) or 1
+    now_s = local_now().strftime("%d %b · %I:%M %p")
     lines = [
-        "🏆 <b>Game Leaderboard</b>",
-        f"<i>{html.escape(chat.title or 'This Group')}</i>",
+        f"🏆 <b>Game Leaderboard</b>",
+        f"<i>{html.escape(chat.title or 'This Group')}  ·  {now_s}</i>",
         "━━━━━━━━━━━━━━━━━━",
         "",
     ]
@@ -2472,11 +2478,8 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎭 Mood wheel:    {mood}",
         "",
         "── Features ──────────────",
-        f"{on if voice_on else off} Voice welcome",
-        f"{on if del_svc_on else off} Delete service msgs",
-        f"{on if hourly_on else off} Hourly messages",
-        f"{on if fest_on else off} Festival mode",
-        f"{on if kw_on else off} Keyword replies",
+        f"{on if voice_on else off} Voice  {on if del_svc_on else off} Del-svc  {on if hourly_on else off} Hourly",
+        f"{on if fest_on else off} Festival  {on if kw_on else off} Keywords",
         "",
         "── Msg Limits ────────────",
     ]
@@ -2525,7 +2528,7 @@ async def on_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     lines = [
         f"📊 <b>Analytics</b>",
-        f"<i>{html.escape(chat.title or '')}</i>",
+        f"<i>{html.escape(chat.title or '')}  ·  {local_now().strftime('%d %b %Y')}</i>",
         "━━━━━━━━━━━━━━━━━━",
         "",
         f"👋 Welcomes:  {w_bar} <b>{_fmt_num(welcomes)}</b>",
@@ -4543,9 +4546,12 @@ async def on_tod(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("😈 Dare",  callback_data=f"tod|{lang}|dare|{user.id}"),
     ]])
     await msg.reply_text(
-        f"🎭 <b>Truth or Dare</b>\n━━━━━━━━━━━━━━━━━━\n"
-        f"<b>{uname}</b>, choose your fate!\n\n"
-        f"😇 Truth — answer honestly\n😈 Dare — complete the challenge",
+        f"🎭 <b>Truth or Dare</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>{uname}</b> is in the hot seat!\n\n"
+        f"😇 <b>Truth</b> — be honest, no escaping\n"
+        f"😈 <b>Dare</b> — complete the challenge\n\n"
+        f"<i>Choose wisely... 👀</i>",
         reply_markup=markup, parse_mode=ParseMode.HTML)
 
 async def on_tod_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4693,18 +4699,21 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rps_w  = (lb_row["rps_wins"] if lb_row else 0) or 0
     xo_w   = (lb_row["xo_wins"] if lb_row else 0) or 0
     total_score = rps_w*2 + xo_w*2 + msgs//20
-    rank_label = ("🏅 Bronze" if total_score < 20 else
-                  "🥈 Silver" if total_score < 60 else
-                  "🥇 Gold"   if total_score < 150 else
-                  "💎 Diamond" if total_score < 400 else "👑 Legend")
+    rank_label = ("🏅 Bronze"  if total_score < 20  else
+                  "🥈 Silver"  if total_score < 60  else
+                  "🥇 Gold"    if total_score < 150 else
+                  "💎 Diamond" if total_score < 400 else
+                  "👑 Legend"  if total_score < 1000 else "🌟 Mythic")
+    # Score bar (out of next rank threshold)
+    next_thresh = next((t for t in [20,60,150,400,1000,9999] if t > total_score), 9999)
+    score_bar = _bar(total_score, next_thresh, 10)
     warn_bar = ("🟥"*warns + "⬜"*(3-min(warns,3))) if warns <= 3 else "🚨🚨🚨"
-    game_bar = _bar(total_score, max(1, total_score+20), 8)
     lines = [
         f"👤 <b>{html.escape(tname)}</b>  {'⭐ VIP' if is_vip else ''}",
         f"<i>{html.escape(title)}</i>" if title else "",
         "━━━━━━━━━━━━━━━━━━",
         f"🏆 Rank:     <b>{rank_label}</b>",
-        f"📈 Score:    {game_bar} <b>{total_score}</b>",
+        f"📈 Progress: {score_bar} <b>{total_score}</b>/{next_thresh}",
         f"💬 Messages: <b>{_fmt_num(msgs)}</b>",
         f"⚠️ Warns:    {warn_bar} ({warns}/3)",
         f"🎮 RPS wins: {rps_w}  •  ⭕ XO wins: {xo_w}",
@@ -4823,16 +4832,21 @@ async def on_warns(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "SELECT reason,created_at FROM warn_log WHERE user_id=? AND chat_id=? ORDER BY created_at DESC LIMIT 5",
             (target.id, chat.id)
         ).fetchall()
+    status_txt = "🟢 Clean" if warns == 0 else ("🟡 Warned" if warns < MAX_WARNS else "🔴 Max warns!")
     lines = [
-        f"⚠️ <b>Warn History: {html.escape(tname)}</b>",
-        f"{bar} <b>{warns}/{MAX_WARNS}</b>",
-        "━━━━━━━━━━━━━━━━━━",
+        f"⚠️ <b>Warn Record</b>",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"👤 User:   <b>{html.escape(tname)}</b>",
+        f"⚡ Status: {status_txt}",
+        f"📊 Warns:  {bar} <b>{warns}/{MAX_WARNS}</b>",
+        "",
+        "── History ────────────",
     ]
     if logs:
         for log in logs:
-            lines.append(f"• {html.escape(log['reason'][:60])} — {format_ts(int(log['created_at']))}")
+            lines.append(f"  • {html.escape(log['reason'][:55])} <i>({format_ts(int(log['created_at']))})</i>")
     else:
-        lines.append("<i>No warnings.</i>")
+        lines.append("  <i>No warnings on record.</i>")
     await human_delay_and_action(context, update)
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -5016,17 +5030,24 @@ async def on_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_members = conn.execute(
             "SELECT COUNT(*) c FROM member_profiles WHERE chat_id=?", (chat.id,)
         ).fetchone()["c"]
+    if total_msgs == 0:     activity_label = "😶 No activity yet"
+    elif total_msgs < 50:   activity_label = "🌱 Growing"
+    elif total_msgs < 500:  activity_label = "💬 Active"
+    elif total_msgs < 2000: activity_label = "🔥 Very Active"
+    else:                   activity_label = "⚡ Highly Active"
+
     lines = [
         f"📊 <b>Group Stats</b>",
-        f"<i>{html.escape(chat.title or '')}</i>",
+        f"<i>{html.escape(chat.title or '')}  ·  {local_now().strftime('%d %b %Y')}</i>",
         "━━━━━━━━━━━━━━━━━━",
         "",
-        f"💬 Messages tracked: <b>{_fmt_num(total_msgs)}</b>",
-        f"👥 Known members:    <b>{_fmt_num(total_members)}</b>",
-        f"👋 Welcomes sent:    <b>{_fmt_num(welcomes)}</b>",
-        f"📨 Hourly msgs:      <b>{_fmt_num(hourly_sent)}</b>",
+        f"⚡ Activity:  <b>{activity_label}</b>",
+        f"💬 Messages: <b>{_fmt_num(total_msgs)}</b>",
+        f"👥 Members:  <b>{_fmt_num(total_members)}</b>",
+        f"👋 Welcomes: <b>{_fmt_num(welcomes)}</b>",
+        f"📨 Hourly:   <b>{_fmt_num(hourly_sent)}</b>",
         "",
-        f"── Top Active Members ─",
+        f"── Top Active ─────────",
     ]
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣"]
     for i, row in enumerate(top):
@@ -5079,29 +5100,31 @@ async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
     await human_delay_and_action(context, update)
     thinking = await msg.reply_text("🧠 <i>Thinking...</i>", parse_mode=ParseMode.HTML)
-    try:
+    def _do_ask():
         sys_prompt = (
             "You are Maya, a helpful and warm Telegram group assistant. "
-            "You give short, accurate, friendly answers. "
-            "Max 150 words. No markdown, use plain text. "
+            "Give short, accurate, friendly answers. Max 120 words. Plain text only. "
             f"Reply in {'Bengali (Bangla)' if lang=='bn' else 'English'}."
         )
-        data = _groq_chat_request({
+        return _groq_chat_request({
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": sys_prompt},
                 {"role": "user", "content": question},
             ],
             "temperature": 0.7,
-            "max_tokens": 200,
+            "max_tokens": 180,
         })
+
+    try:
+        data   = await asyncio.to_thread(_do_ask)
         answer = (data["choices"][0]["message"]["content"] or "").strip()
         if not answer:
             answer = "I couldn't generate an answer. Please try again."
     except Exception as e:
         logger.warning("on_ask Groq failed: %s", e)
         answer = ("দুঃখিত, এই মুহূর্তে উত্তর দিতে পারছি না। পরে চেষ্টা করো।"
-                  if lang=="bn" else "Sorry, I couldn't answer right now. Please try again.")
+                  if lang == "bn" else "Sorry, I couldn't answer right now. Please try again.")
     uname = html.escape(clean_name(user.full_name or user.first_name or ""))
     try:
         await thinking.edit_text(
@@ -5152,16 +5175,18 @@ async def on_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         target_lang, direction = "Bangla (Bengali)", "English → বাংলা"
     thinking = await msg.reply_text("🌐 <i>Translating...</i>", parse_mode=ParseMode.HTML)
-    try:
-        data = _groq_chat_request({
+    def _do_translate():
+        return _groq_chat_request({
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content": f"Translate the following text to {target_lang}. Return ONLY the translation, nothing else."},
+                {"role": "system", "content": f"Translate to {target_lang}. Return ONLY the translation, nothing else."},
                 {"role": "user", "content": text},
             ],
             "temperature": 0.3,
             "max_tokens": 200,
         })
+    try:
+        data   = await asyncio.to_thread(_do_translate)
         result = (data["choices"][0]["message"]["content"] or "").strip()
     except Exception as e:
         logger.warning("translate failed: %s", e)
@@ -5204,9 +5229,10 @@ async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for i, r in enumerate(rows):
         bar  = _bar(int(r["msg_count"]), max_msgs, 6)
         name = html.escape(r["user_name"] or "Unknown")
+        count = int(r['msg_count'])
         lines.append(
             f"{medals[i]} <b>{name}</b>\n"
-            f"   {bar} <b>{_fmt_num(int(r['msg_count']))}</b> messages"
+            f"   {bar} <b>{_fmt_num(count)}</b> msgs"
         )
         if i < len(rows)-1: lines.append("")
     await human_delay_and_action(context, update)
@@ -5258,7 +5284,8 @@ async def on_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📋 <b>Group Rules</b>\n"
         f"<i>{html.escape(chat.title or '')}</i>\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"{html.escape(rules_text)}",
+        f"{html.escape(rules_text)}\n\n"
+        f"<i>Please follow the rules to keep this group a great place! 🌟</i>",
         parse_mode=ParseMode.HTML
     )
 
@@ -5713,6 +5740,202 @@ async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFA
     await on_keyword_message(update, context)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEATHER SYSTEM + PREMIUM UI UPGRADES
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Weather System ───────────────────────────────────────────────────────────
+_WEATHER_CACHE: dict[str, tuple] = {}   # city_lower -> (data_dict, timestamp)
+_WEATHER_TTL = 600  # 10 min cache
+
+_BD_CITIES = {
+    "dhaka": "Dhaka", "chittagong": "Chittagong", "sylhet": "Sylhet",
+    "rajshahi": "Rajshahi", "khulna": "Khulna", "barishal": "Barishal",
+    "barisal": "Barishal", "mymensingh": "Mymensingh", "comilla": "Comilla",
+    "cumilla": "Comilla", "rangpur": "Rangpur", "jessore": "Jessore",
+    "jashore": "Jessore", "narayanganj": "Narayanganj", "gazipur": "Gazipur",
+    "cox's bazar": "Cox's Bazar", "coxsbazar": "Cox's Bazar",
+    "টা": "Dhaka", "ঢাকা": "Dhaka", "চট্টগ্রাম": "Chittagong",
+    "সিলেট": "Sylhet", "রাজশাহী": "Rajshahi", "খুলনা": "Khulna",
+}
+
+_WMO_CODES = {
+    0:  ("☀️", "Clear sky"),         1:  ("🌤️", "Mainly clear"),
+    2:  ("⛅", "Partly cloudy"),      3:  ("☁️", "Overcast"),
+    45: ("🌫️", "Foggy"),             48: ("🌫️", "Icy fog"),
+    51: ("🌦️", "Light drizzle"),      53: ("🌦️", "Moderate drizzle"),
+    55: ("🌧️", "Heavy drizzle"),      61: ("🌧️", "Slight rain"),
+    63: ("🌧️", "Moderate rain"),      65: ("🌧️", "Heavy rain"),
+    71: ("🌨️", "Slight snow"),        73: ("🌨️", "Moderate snow"),
+    75: ("❄️", "Heavy snow"),         80: ("🌦️", "Rain showers"),
+    95: ("⛈️", "Thunderstorm"),       96: ("⛈️", "Thunderstorm + hail"),
+}
+
+def _geocode_city(city: str) -> tuple[float, float, str] | None:
+    """Returns (lat, lon, display_name) or None."""
+    try:
+        resp = requests.get(
+            "https://nominatim.openstreetmap.org/search",
+            params={"q": city, "format": "json", "limit": 1},
+            headers={"User-Agent": f"{BOT_NAME}WeatherBot/1.0"},
+            timeout=8,
+        )
+        data = resp.json()
+        if data:
+            return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", city)
+    except Exception:
+        pass
+    return None
+
+def _fetch_weather(lat: float, lon: float) -> dict | None:
+    """Fetch current weather from Open-Meteo (free, no key needed)."""
+    try:
+        resp = requests.get(
+            "https://api.open-meteo.com/v1/forecast",
+            params={
+                "latitude": lat, "longitude": lon,
+                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weathercode,windspeed_10m,winddirection_10m,uv_index",
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
+                "timezone": "Asia/Dhaka",
+                "forecast_days": 3,
+            },
+            timeout=8,
+        )
+        return resp.json()
+    except Exception:
+        return None
+
+def _wind_direction(deg: float) -> str:
+    dirs = ["N","NE","E","SE","S","SW","W","NW"]
+    return dirs[round(deg / 45) % 8]
+
+def _uv_label(uv: float) -> str:
+    if uv < 3:  return "Low 🟢"
+    if uv < 6:  return "Moderate 🟡"
+    if uv < 8:  return "High 🟠"
+    if uv < 11: return "Very High 🔴"
+    return "Extreme ☠️"
+
+async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg  = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+
+    args = context.args or []
+    city_raw = " ".join(args).strip()
+
+    if not city_raw:
+        await msg.reply_text(
+            "🌤️ <b>Weather</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Usage: <code>/weather Dhaka</code>\n\n"
+            "Examples:\n"
+            "<code>/weather Chittagong</code>\n"
+            "<code>/weather Sylhet</code>\n"
+            "<code>/weather Cox's Bazar</code>\n\n"
+            "<i>Powered by Open-Meteo · Free · No API key</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    city_lower = city_raw.lower().strip()
+    # Normalize Bengali/common aliases
+    city_query = _BD_CITIES.get(city_lower, city_raw)
+
+    # Check cache
+    cached = _WEATHER_CACHE.get(city_lower)
+    if cached and time.time() - cached[1] < _WEATHER_TTL:
+        weather_data, _, geo_name = cached
+    else:
+        await human_delay_and_action(context, update)
+        thinking = await msg.reply_text(
+            f"🔍 <i>Fetching weather for {html.escape(city_query)}...</i>",
+            parse_mode=ParseMode.HTML
+        )
+
+        geo = await asyncio.to_thread(_geocode_city, city_query)
+        if not geo:
+            await thinking.edit_text(
+                f"❌ <b>City not found:</b> <code>{html.escape(city_raw)}</code>\n"
+                f"Try a different spelling or a nearby major city.",
+                parse_mode=ParseMode.HTML
+            )
+            return
+
+        lat, lon, geo_name = geo
+        weather_data = await asyncio.to_thread(_fetch_weather, lat, lon)
+        if not weather_data:
+            await thinking.edit_text("❌ Weather data unavailable. Try again later.")
+            return
+
+        _WEATHER_CACHE[city_lower] = (weather_data, time.time(), geo_name)
+        try:
+            await thinking.delete()
+        except Exception:
+            pass
+
+    # Parse current weather
+    cur = weather_data.get("current", {})
+    daily = weather_data.get("daily", {})
+
+    temp     = cur.get("temperature_2m", "—")
+    feels    = cur.get("apparent_temperature", "—")
+    humidity = cur.get("relative_humidity_2m", "—")
+    precip   = cur.get("precipitation", 0)
+    wcode    = int(cur.get("weathercode", 0))
+    wind_sp  = cur.get("windspeed_10m", "—")
+    wind_dir = cur.get("winddirection_10m", 0)
+    uv       = cur.get("uv_index", 0)
+
+    w_icon, w_desc = _WMO_CODES.get(wcode, ("🌡️", "Unknown"))
+    wind_label = _wind_direction(float(wind_dir)) if wind_dir else "—"
+    uv_label   = _uv_label(float(uv)) if uv else "—"
+
+    # City display name (shortened)
+    city_disp = city_query
+    if "," in geo_name:
+        city_disp = geo_name.split(",")[0].strip()
+
+    # 3-day forecast
+    forecast_lines = []
+    days = ["Today", "Tomorrow", "Day 3"]
+    d_codes  = daily.get("weathercode", [])
+    d_maxes  = daily.get("temperature_2m_max", [])
+    d_mins   = daily.get("temperature_2m_min", [])
+    d_precip = daily.get("precipitation_sum", [])
+    for i in range(min(3, len(d_codes))):
+        fi, fd = _WMO_CODES.get(int(d_codes[i]), ("🌡️", ""))
+        f_max  = f"{d_maxes[i]:.0f}°" if i < len(d_maxes) else "—"
+        f_min  = f"{d_mins[i]:.0f}°"  if i < len(d_mins)  else "—"
+        f_rain = f"{d_precip[i]:.1f}mm" if i < len(d_precip) else ""
+        rain_str = f"  💧{f_rain}" if f_rain and float(d_precip[i]) > 0 else ""
+        forecast_lines.append(
+            f"  {fi} <b>{days[i]}:</b> {f_max} / {f_min}{rain_str}"
+        )
+
+    now_str = local_now().strftime("%I:%M %p · %d %b")
+
+    lines = [
+        f"{w_icon} <b>Weather — {html.escape(city_disp)}</b>",
+        f"<i>{now_str}</i>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"",
+        f"🌡️ Temp:       <b>{temp}°C</b>  (feels {feels}°C)",
+        f"☁️ Condition:  <b>{w_desc}</b>",
+        f"💧 Humidity:   <b>{humidity}%</b>",
+        f"💨 Wind:       <b>{wind_sp} km/h {wind_label}</b>",
+        f"🌧️ Precip:     <b>{precip} mm</b>",
+        f"☀️ UV Index:   <b>{uv_label}</b>",
+        f"",
+        f"── 3-Day Forecast ─────────",
+    ] + forecast_lines + [
+        f"",
+        f"<i>📡 Open-Meteo · Updated every 10 min</i>",
+    ]
+
+    await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
 # ─── post_init & build_app ────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
@@ -5768,6 +5991,7 @@ async def post_init(application):
         BotCommand("groupcount",         "🔢 Count groups (owner)"),
         BotCommand("activegroups",       "📋 Active groups (owner)"),
         BotCommand("broadcast",          "📣 Broadcast (owner)"),
+        BotCommand("weather",            "🌤️ Weather forecast"),
         BotCommand("rps",                "🎮 Rock Paper Scissors"),
         BotCommand("xo",                 "⭕ X-O / Tic-Tac-Toe"),
         BotCommand("luckybox",           "🎁 Lucky Box game"),
@@ -5866,6 +6090,7 @@ def build_app():
     application.add_handler(CommandHandler("broadcastone",       on_broadcastone))
 
     # Games
+    application.add_handler(CommandHandler("weather",            on_weather))
     application.add_handler(CommandHandler("rps",                on_rps))
     application.add_handler(CommandHandler("xo",                 on_xo))
     application.add_handler(CommandHandler("luckybox",           on_luckybox))
