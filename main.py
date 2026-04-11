@@ -2247,7 +2247,7 @@ async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("")
     lines += [
         "━━━━━━━━━━━━━━━━━━",
-        "<i>🎯 RPS/XO Win = 2pts</i>",
+        "<i>RPS/XO Win = 2pts  ·  Play more to climb!</i>",
     ]
     try:
         await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
@@ -2478,8 +2478,10 @@ async def on_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎭 Mood wheel:    {mood}",
         "",
         "── Features ──────────────",
-        f"{on if voice_on else off} Voice  {on if del_svc_on else off} Del-svc  {on if hourly_on else off} Hourly",
-        f"{on if fest_on else off} Festival  {on if kw_on else off} Keywords",
+        (f"🎙 Voice  🗑 Del-svc  📨 Hourly" if (voice_on and del_svc_on and hourly_on)
+         else f"{'🎙' if voice_on else '○'} Voice  {'🗑' if del_svc_on else '○'} Del  {'📨' if hourly_on else '○'} Hourly"),
+        (f"🎉 Festival  💬 Keywords" if (fest_on and kw_on)
+         else f"{'🎉' if fest_on else '○'} Festival  {'💬' if kw_on else '○'} Keywords"),
         "",
         "── Msg Limits ────────────",
     ]
@@ -2535,17 +2537,13 @@ async def on_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📨 Hourly:    {h_bar} <b>{_fmt_num(hourly_s)}</b>",
         f"🏅 Milestone: <b>{milestone}</b>",
         "",
-        "── Welcome Config ─────────",
-        f"🎨 Style:   {style}",
-        f"🖼 Aura:    {aura}",
-        f"📝 Footer:  {html.escape(footer[:30])}",
-        f"✏️ Custom:  {custom_w}",
-        f"🎙 Voice:   {voice_ch}",
+        "── Config ─────────────────",
+        f"🎨 {style}  ·  🖼 {aura}  ·  🎙 {voice_ch}",
+        f"✏️ Custom welcome: {custom_w}",
         "",
-        "── AI Performance ─────────",
-        f"✅ Last AI success:   {ai_ok}",
-        f"📦 Last fallback:     {fb_used}",
-        f"🕐 Last welcome:      {last_w}",
+        "── AI ──────────────────────",
+        f"✅ Last AI:       {ai_ok}",
+        f"🕐 Last welcome:  {last_w}",
     ]
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
@@ -2589,21 +2587,13 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phase = phase_now()
     phase_icons = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}
     ph = phase_icons.get(phase, "🕐")
-    uptime_hint = random.choice([
-        "All systems running smoothly.",
-        "Ready and responsive.",
-        "Fully operational.",
-        "Online and healthy.",
-    ])
+    status_words = ["Flawless ⚡","Sharp 🎯","Smooth 🌊","Fast 🚀","Alive 🌸"]
     text = (
-        f"🏓 <b>Pong!</b>\n"
+        f"<b>● {BOT_NAME}</b>  <code>online</code>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 Bot:    <b>{BOT_NAME}</b>\n"
-        f"🕐 Time:   <b>{now.strftime('%I:%M:%S %p')}</b>\n"
-        f"📅 Date:   {now.strftime('%d %b %Y')}\n"
-        f"{ph} Phase:  {phase.capitalize()}\n"
-        f"🌍 TZ:     {TIMEZONE_NAME}\n\n"
-        f"<i>{uptime_hint}</i>"
+        f"⏱  <b>{now.strftime('%I:%M:%S %p')}</b>  ·  {now.strftime('%d %b %Y')}\n"
+        f"{ph}  {phase.capitalize()}  ·  🌍 {TIMEZONE_NAME}\n"
+        f"⚡  Status: <b>{random.choice(status_words)}</b>"
     )
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -2619,34 +2609,35 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase_g = phase_now()
         greet = {"morning":"☀️ Good morning","day":"🌤️ Hello","evening":"🌆 Good evening","night":"🌙 Good night"}.get(phase_g,"✨ Hello")
         text = (
-            f"{greet}, <b>{html.escape(chat.title or 'everyone')}!</b>\n"
+            f"{greet} <b>{html.escape(chat.title or 'everyone')}!</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"✨ <b>{BOT_NAME}</b> is active here!\n\n"
-            f"🎨 Premium welcomes · 🎙 Voice · 📨 Hourly\n"
-            f"🛡 Moderation · 🤖 AI replies · 🎮 Games\n\n"
-            f"<b>Quick commands:</b>\n"
-            f"📋 /status  📊 /analytics  👤 /profile\n"
-            f"🎮 /rps · /xo · /luckybox · /tod\n"
-            f"🏆 /leaderboard  👥 /top  📏 /rules\n\n"
-            f"<i>Admins: /lang · /voice · /hourly · /setmsglimit</i>"
+            f"<b>{BOT_NAME}</b> is online 🟢\n\n"
+            f"🎮 /rps  /xo  /luckybox  /tod  /poll\n"
+            f"🎲 /ship  /riddle  /fact  /quote  /weather\n"
+            f"🏆 /leaderboard  👤 /profile  📋 /rules\n\n"
+            f"<i>Admins → /status for full settings</i>"
         )
     else:
+        phase_p = phase_now()
+        ph_icon2 = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}.get(phase_p,"✨")
         text = (
-            f"✨ <b>{BOT_NAME}</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"Premium Telegram Group Bot\n\n"
-            f"<b>Admin Commands:</b>\n"
-            f"/lang · /voice · /hourly · /setwelcome\n"
-            f"/welcomestyle · /setfooter · /deleteservice\n"
-            f"/setcountdown · /setexamday · /hourlyclean\n\n"
-            f"<b>Info Commands:</b>\n"
-            f"/status · /analytics · /aistatus\n"
-            f"/ping · /myid · /support\n\n"
-            f"<b>Games:</b>\n"
-            f"/rps · /xo · /luckybox · /tod · /leaderboard\n\n"
-            f"<b>Owner:</b>\n"
-            f"/groupbrowser · /broadcastone\n"
-            f"/groupcount · /activegroups · /broadcast"
+            f"{ph_icon2} <b>{BOT_NAME}</b>  <i>Premium Group Bot</i>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"<b>🛡 Moderation</b>\n"
+            f"  /warn · /ban · /mute · /setmsglimit\n\n"
+            f"<b>🎨 Welcome</b>\n"
+            f"  /setwelcome · /welcomestyle · /setfooter\n\n"
+            f"<b>📨 Messaging</b>\n"
+            f"  /hourly · /setforward · /setreply\n\n"
+            f"<b>🎮 Games & Fun</b>\n"
+            f"  /rps · /xo · /luckybox · /tod\n"
+            f"  /poll · /ship · /riddle · /fact · /quote\n\n"
+            f"<b>🌤 Utilities</b>\n"
+            f"  /weather · /tr · /ask · /rules\n\n"
+            f"<b>📊 Stats</b>\n"
+            f"  /leaderboard · /top · /groupstats · /profile\n\n"
+            f"<b>👑 Owner</b>\n"
+            f"  /groupbrowser · /broadcast · /broadcastone"
         )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2656,11 +2647,10 @@ async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await human_delay_and_action(context, update)
     st = support_text()
     text = (
-        f"💬 <b>Support & Help</b>\n"
+        f"💬 <b>Support</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"📌 {html.escape(st)}\n\n"
-        f"<i>Have a question, suggestion, or issue?\n"
-        f"Reach out anytime — we're happy to help.</i>"
+        f"<i>Questions · Bugs · Suggestions → always welcome.</i>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2668,12 +2658,13 @@ async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id if update.effective_user else 0
     name = html.escape(clean_name(update.effective_user.first_name if update.effective_user else ""))
+    role = "👑 Bot Owner" if is_super_admin(uid) else "👤 Member"
     text = (
-        f"🪪 <b>Your Identity</b>\n"
+        f"🪪 <b>Identity Card</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"👤 Name: <b>{name}</b>\n"
-        f"🔢 User ID: <code>{uid}</code>\n"
-        f"{'👑 Bot Owner' if is_super_admin(uid) else ''}"
+        f"Name:  <b>{name}</b>\n"
+        f"ID:    <code>{uid}</code>\n"
+        f"Role:  {role}"
     )
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text(text.strip(), parse_mode=ParseMode.HTML)
@@ -4788,7 +4779,7 @@ async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     else:
         warn_bar  = "🟥" * warn_count + "⬜" * (MAX_WARNS - warn_count)
-        danger_txt = "🚨 One more warn = auto-kick!" if warn_count == MAX_WARNS - 1 else "⚠️ Be careful next time."
+        danger_txt = "🚨 <b>Final warning!</b> One more = auto-kick." if warn_count == MAX_WARNS - 1 else "⚠️ Noted. Behave well."
         admin_name = html.escape(clean_name(admin.first_name or "Admin"))
         await msg.reply_text(
             f"⚠️ <b>Warning Issued</b>\n"
@@ -4887,14 +4878,15 @@ async def on_setreply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     raw  = (msg.text or "").split(" ", 1)
     if len(raw) < 2 or "|" not in raw[1]:
+        with db_connect() as _c:
+            _count = _c.execute("SELECT COUNT(*) FROM autoreply_rules WHERE chat_id=? AND enabled=1", (chat.id,)).fetchone()[0]
         await msg.reply_text(
-            "🤖 <b>Set AutoReply</b>\n\nUsage:\n"
-            "<code>/setreply trigger | reply text</code>\n\n"
-            "Examples:\n"
-            "<code>/setreply hello | Hi there! 👋</code>\n"
-            "<code>/setreply link? | Check pinned message!</code>\n\n"
-            "Match types: contains (default), exact, startswith\n"
-            "<code>/setreply [exact] yes | Noted!</code>",
+            f"🤖 <b>AutoReply</b>  <i>({_count} active rules)</i>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"<code>/setreply trigger | reply</code>\n\n"
+            f"Match: [contains] (default) · [exact] · [startswith]\n\n"
+            f"<code>/setreply hello | Hi! 👋</code>\n"
+            f"<code>/setreply [exact] yes | Got it!</code>",
             parse_mode=ParseMode.HTML)
         return
     content = raw[1].strip()
@@ -5220,9 +5212,10 @@ async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     max_msgs = max(int(r["msg_count"]) for r in rows) or 1
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    now_top = local_now().strftime("%d %b · %I:%M %p")
     lines = [
-        f"💬 <b>Most Active Members</b>",
-        f"<i>{html.escape(chat.title or '')}</i>",
+        f"💬 <b>Most Active</b>",
+        f"<i>{html.escape(chat.title or '')}  ·  {now_top}</i>",
         "━━━━━━━━━━━━━━━━━━",
         "",
     ]
@@ -5555,12 +5548,14 @@ async def on_forwardon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_forward_enabled(chat.id, 1)
     _start_forward_task(context.bot, chat.id)
     itv = int(row["fwd_interval"] or 300)
+    mins = itv // 60
+    secs = itv % 60
+    interval_str = f"{mins}m {secs}s" if secs else f"{mins}m"
     await msg.reply_text(
-        f"🟢 <b>Forward Button activated!</b>\n"
+        f"📢 <b>Forward Button</b>  🟢 Active\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⏰ Interval: every <b>{itv}s</b>\n"
-        f"🔗 Link: <code>{html.escape(row['group_link'])}</code>\n\n"
-        f"<i>Bot will send and rotate the forward message automatically.</i>",
+        f"⏰ Every <b>{interval_str}</b>\n"
+        f"🔗 <code>{html.escape(row['group_link'])}</code>",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
     )
@@ -5668,11 +5663,10 @@ async def on_ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await context.bot.ban_chat_member(chat_id=chat.id, user_id=target.id)
         await msg.reply_text(
-            f"🚫 <b>Banned</b>\n"
+            f"🚫 <b>Banned</b>  ·  {target.mention_html(tname)}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"👤 User:   {target.mention_html(tname)}\n"
-            f"👮 By:     {aname}\n"
-            f"📋 Reason: {html.escape(reason)}",
+            f"👮 By: {aname}\n"
+            f"📋 {html.escape(reason)}",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -5703,11 +5697,9 @@ async def on_unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
             chat_id=chat.id, user_id=target.id, only_if_banned=True
         )
         await msg.reply_text(
-            f"✅ <b>Unbanned</b>\n"
+            f"✅ <b>Unbanned</b>  ·  {target.mention_html(tname)}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"👤 User: {target.mention_html(tname)}\n"
-            f"👮 By:   {aname}\n\n"
-            f"<i>They can now rejoin the group.</i>",
+            f"👮 By: {aname}  ·  <i>Can rejoin now.</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception as e:
@@ -5733,7 +5725,7 @@ async def on_left_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Combined handler: msg-limit check → ultra features → keyword replies."""
+    """Combined handler: msg-limit check → riddle → ultra → keyword."""
     if await check_msg_length_limit(update, context):
         return
     await handle_ultra_message(update, context)
@@ -5916,27 +5908,264 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     now_str = local_now().strftime("%I:%M %p · %d %b")
 
+    # Comfort index
+    try:
+        heat_idx = float(temp) - (0.55 - 0.0055*float(humidity)) * (float(temp) - 14.5)
+        comfort = "🥶 Cold" if heat_idx < 10 else "❄️ Cool" if heat_idx < 18 else "😊 Comfortable" if heat_idx < 26 else "🥵 Hot" if heat_idx < 32 else "🔥 Very Hot"
+    except Exception:
+        comfort = "—"
+
     lines = [
-        f"{w_icon} <b>Weather — {html.escape(city_disp)}</b>",
-        f"<i>{now_str}</i>",
-        "━━━━━━━━━━━━━━━━━━",
+        f"{w_icon} <b>{html.escape(city_disp)}</b>",
+        f"<code>{now_str}</code>  ·  <i>{w_desc}</i>",
+        f"━━━━━━━━━━━━━━━━━━",
         f"",
-        f"🌡️ Temp:       <b>{temp}°C</b>  (feels {feels}°C)",
-        f"☁️ Condition:  <b>{w_desc}</b>",
-        f"💧 Humidity:   <b>{humidity}%</b>",
-        f"💨 Wind:       <b>{wind_sp} km/h {wind_label}</b>",
-        f"🌧️ Precip:     <b>{precip} mm</b>",
-        f"☀️ UV Index:   <b>{uv_label}</b>",
+        f"🌡  <b>{temp}°C</b>  <i>(feels like {feels}°C)</i>",
+        f"💧  Humidity  <b>{humidity}%</b>  ·  {comfort}",
+        f"💨  Wind  <b>{wind_sp} km/h {wind_label}</b>",
+        f"🌧  Rain  <b>{precip} mm</b>  ·  UV: <b>{uv_label}</b>",
         f"",
-        f"── 3-Day Forecast ─────────",
+        f"── Forecast ───────────────",
     ] + forecast_lines + [
         f"",
-        f"<i>📡 Open-Meteo · Updated every 10 min</i>",
+        f"<i>Open-Meteo  ·  Cached 10 min</i>",
     ]
 
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
-# ─── post_init & build_app ────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# MAYA SUPER FEATURES — Poll · Confess · Quote · Riddle · Ship · Fact
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import json as _json2
+import hashlib as _hashlib
+
+# ─── Interactive Poll System ──────────────────────────────────────────────────
+def init_poll_db():
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS polls (
+            poll_id TEXT PRIMARY KEY,
+            chat_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL DEFAULT 0,
+            creator_id INTEGER NOT NULL,
+            question TEXT NOT NULL,
+            options TEXT NOT NULL,
+            votes TEXT NOT NULL DEFAULT '{}',
+            status TEXT NOT NULL DEFAULT 'open',
+            created_at INTEGER NOT NULL,
+            closes_at INTEGER NOT NULL DEFAULT 0
+        )""")
+        conn.execute("""CREATE TABLE IF NOT EXISTS confessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            target_chat_id INTEGER NOT NULL,
+            sender_user_id INTEGER NOT NULL,
+            msg_id INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )""")
+        conn.commit()
+
+def poll_make_id(): return f"pl{int(time.time())}{random.randint(100,999)}"
+
+def poll_get(poll_id: str):
+    with db_connect() as conn:
+        return conn.execute("SELECT * FROM polls WHERE poll_id=?", (poll_id,)).fetchone()
+
+def poll_set_msg(poll_id: str, msg_id: int):
+    with db_connect() as conn:
+        conn.execute("UPDATE polls SET message_id=? WHERE poll_id=?", (msg_id, poll_id))
+        conn.commit()
+
+def poll_vote(poll_id: str, user_id: int, opt_idx: int) -> tuple[bool, str]:
+    """Returns (success, message)."""
+    row = poll_get(poll_id)
+    if not row: return False, "Poll not found."
+    if row["status"] != "open": return False, "This poll is closed."
+    votes = _json2.loads(row["votes"] or "{}")
+    uid   = str(user_id)
+    if uid in votes: return False, f"You already voted for option {votes[uid]+1}."
+    opts  = _json2.loads(row["options"])
+    if opt_idx < 0 or opt_idx >= len(opts): return False, "Invalid option."
+    votes[uid] = opt_idx
+    with db_connect() as conn:
+        conn.execute("UPDATE polls SET votes=? WHERE poll_id=?", (_json2.dumps(votes), poll_id))
+        conn.commit()
+    return True, opts[opt_idx]
+
+def poll_close(poll_id: str):
+    with db_connect() as conn:
+        conn.execute("UPDATE polls SET status='closed' WHERE poll_id=?", (poll_id,))
+        conn.commit()
+
+def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    opts    = _json2.loads(row["options"])
+    votes   = _json2.loads(row["votes"] or "{}")
+    total   = len(votes)
+    q       = html.escape(row["question"])
+    status  = "🔒 Closed" if (row["status"] == "closed" or closed) else "🟢 Open"
+
+    # Count votes per option
+    counts = [0] * len(opts)
+    for v in votes.values():
+        if 0 <= v < len(opts):
+            counts[v] += 1
+
+    # Modern poll card
+    created = ""
+    try:
+        from datetime import datetime as _dt2
+        ts = int(row["created_at"] or 0)
+        created = _dt2.fromtimestamp(ts, tz=__import__("zoneinfo").ZoneInfo(TIMEZONE_NAME)).strftime("%d %b · %I:%M %p") if ts else ""
+    except Exception:
+        pass
+
+    lines = [
+        f"📊 <b>Poll</b>  <code>{status}</code>",
+        f"<i>{created}</i>" if created else "",
+        f"━━━━━━━━━━━━━━━━━━",
+        f"❓ <b>{q}</b>",
+        "",
+    ]
+
+    opt_letters = ["A","B","C","D","E","F"]
+    winner_idx = counts.index(max(counts)) if total > 0 else -1
+    for i, (opt, cnt) in enumerate(zip(opts, counts)):
+        pct    = round(cnt / max(1, total) * 100)
+        filled = round(pct / 10)
+        bar    = "▰" * filled + "▱" * (10 - filled)
+        letter = opt_letters[i] if i < len(opt_letters) else str(i+1)
+        crown  = " 👑" if (i == winner_idx and total > 0 and row["status"] == "closed") else ""
+        lines.append(f"<b>{letter}.</b> {html.escape(opt)}{crown}")
+        lines.append(f"   {bar} {pct}%  <i>({cnt} vote{'s' if cnt!=1 else ''})</i>")
+        lines.append("")
+
+    lines.append(f"<i>👥 {total} vote{'s' if total!=1 else ''} total</i>")
+
+    # Buttons
+    if row["status"] == "closed" or closed:
+        markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Poll Closed", callback_data="poll|noop|0")]])
+    else:
+        pid = row["poll_id"]
+        btns = []
+        for i, opt in enumerate(opts):
+            em = opt_emojis[i] if i < len(opt_emojis) else f"{i+1}"
+            btns.append([InlineKeyboardButton(f"{em} {opt[:20]}", callback_data=f"poll|vote|{pid}|{i}")])
+        btns.append([
+            InlineKeyboardButton("📊 Results", callback_data=f"poll|results|{pid}|0"),
+            InlineKeyboardButton("🔒 Close",   callback_data=f"poll|close|{pid}|0"),
+        ])
+        markup = InlineKeyboardMarkup(btns)
+
+    return "\n".join(lines), markup
+
+async def on_poll_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg  = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    if not msg or not chat or not user: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("📊 Use /poll inside a group!")
+        return
+
+    raw = (msg.text or "").split(" ", 1)
+    if len(raw) < 2 or "|" not in raw[1]:
+        await msg.reply_text(
+            "📊 <b>Create a Poll</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n"
+            "Usage:\n"
+            "<code>/poll Question | Option 1 | Option 2 | Option 3</code>\n\n"
+            "Example:\n"
+            "<code>/poll Best food? | Biryani | Pizza | Burger</code>\n\n"
+            "<i>2–6 options supported.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    parts = [p.strip() for p in raw[1].split("|")]
+    question = parts[0]
+    options  = parts[1:]
+    if len(options) < 2: await msg.reply_text("❌ Need at least 2 options."); return
+    if len(options) > 6: await msg.reply_text("❌ Maximum 6 options."); return
+
+    poll_id = poll_make_id()
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT INTO polls (poll_id,chat_id,message_id,creator_id,question,options,votes,status,created_at) VALUES (?,?,0,?,?,?,?,?,?)",
+            (poll_id, chat.id, user.id, question[:200], _json2.dumps(options), "{}", "open", now)
+        )
+        conn.commit()
+
+    row = poll_get(poll_id)
+    text, markup = poll_render(row)
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
+    except: pass
+    sent = await msg.reply_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+    poll_set_msg(poll_id, sent.message_id)
+
+async def on_poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user  = update.effective_user
+    if not query or not user or not query.data: return
+    try:
+        parts = query.data.split("|")
+        _, action = parts[0], parts[1]
+    except:
+        await query.answer(); return
+
+    if action == "noop":
+        await query.answer("This poll is closed.", show_alert=True); return
+
+    if action == "vote":
+        poll_id = parts[2]
+        opt_idx = int(parts[3])
+        ok, msg_txt = poll_vote(poll_id, user.id, opt_idx)
+        await query.answer(f"✅ Voted: {msg_txt}" if ok else f"⚠️ {msg_txt}", show_alert=not ok)
+        if ok:
+            row = poll_get(poll_id)
+            if row:
+                text, markup = poll_render(row)
+                try: await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+                except: pass
+        return
+
+    if action in ("results", "close"):
+        poll_id = parts[2]
+        row = poll_get(poll_id)
+        if not row: await query.answer("Poll not found.", True); return
+        # Only creator can close
+        if action == "close" and int(row["creator_id"]) != int(user.id):
+            await query.answer("Only the poll creator can close it.", True); return
+        if action == "close":
+            poll_close(poll_id)
+            row = poll_get(poll_id)
+        text, markup = poll_render(row, closed=(action=="close"))
+        await query.answer("📊 Poll closed!" if action=="close" else "📊 Current results")
+        try: await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except: pass
+
+# ─── Anonymous Confession System ──────────────────────────────────────────────
+async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg  = update.effective_message
+    chat = update.effective_chat
+    if not msg or not chat: return
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    pool = _FACTS_BN if lang == "bn" else _FACTS_EN
+    last = _fact_last_sent.get(chat.id, "")
+    choices = [f for f in pool if f != last]
+    fact = random.choice(choices or pool)
+    _fact_last_sent[chat.id] = fact
+    title = "মজাদার তথ্য" if lang == "bn" else "Fun Fact"
+    note  = "আরেকটার জন্য /fact দাও!" if lang == "bn" else "Type /fact for another!"
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"💡 <b>{title}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"{fact}\n\n"
+        f"<i>{note}</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Ship / Compatibility ─────────────────────────────────────────────────────
 async def post_init(application):
     delete_webhook()
     commands = [
@@ -5996,6 +6225,8 @@ async def post_init(application):
         BotCommand("xo",                 "⭕ X-O / Tic-Tac-Toe"),
         BotCommand("luckybox",           "🎁 Lucky Box game"),
         BotCommand("tod",                "🎭 Truth or Dare"),
+        BotCommand("poll",               "📊 Create a group poll"),
+        BotCommand("fact",               "💡 Fun fact"),
     ]
     for scope in [BotCommandScopeDefault(), BotCommandScopeAllPrivateChats(),
                   BotCommandScopeAllGroupChats(), BotCommandScopeAllChatAdministrators()]:
@@ -6090,6 +6321,8 @@ def build_app():
     application.add_handler(CommandHandler("broadcastone",       on_broadcastone))
 
     # Games
+    application.add_handler(CommandHandler("poll",               on_poll_cmd))
+    application.add_handler(CommandHandler("fact",               on_fact))
     application.add_handler(CommandHandler("weather",            on_weather))
     application.add_handler(CommandHandler("rps",                on_rps))
     application.add_handler(CommandHandler("xo",                 on_xo))
@@ -6101,6 +6334,7 @@ def build_app():
     application.add_handler(CallbackQueryHandler(on_xo_callback,           pattern=r"^xo\|"))
     application.add_handler(CallbackQueryHandler(on_rps_callback,          pattern=r"^rps\|"))
     application.add_handler(CallbackQueryHandler(on_luckybox_callback,     pattern=r"^lb\|"))
+    application.add_handler(CallbackQueryHandler(on_poll_callback,          pattern=r"^poll\|"))
     application.add_handler(CallbackQueryHandler(on_tod_callback,          pattern=r"^tod\|"))
 
     # Message handlers (ORDER MATTERS)
@@ -6127,6 +6361,7 @@ def main():
     init_extra_games_db()
     init_ultra_db()
     init_forward_db()
+    init_poll_db()
     threading.Thread(target=run_flask,       daemon=True).start()
     threading.Thread(target=hourly_loop,     daemon=True).start()
     threading.Thread(target=cleanup_loop,    daemon=True).start()
