@@ -1,4 +1,5 @@
 import asyncio, html, logging, os, random, re, sqlite3, threading, time
+import json as _json2
 from collections import defaultdict, deque
 from datetime import datetime
 from io import BytesIO
@@ -5937,10 +5938,49 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAYA SUPER FEATURES — Poll · Confess · Quote · Riddle · Ship · Fact
 # ═══════════════════════════════════════════════════════════════════════════════
 
-import json as _json2
 import hashlib as _hashlib
 
 # ─── Interactive Poll System ──────────────────────────────────────────────────
+# ─── Poll + Fact data ─────────────────────────────────────────────────────────
+_fact_last_sent: dict[int, str] = {}
+
+_FACTS_EN = [
+    "🧠 The human brain generates about 70,000 thoughts per day.",
+    "🐙 Octopuses have three hearts, blue blood, and nine brains.",
+    "🌊 The ocean produces over 50% of Earth's oxygen.",
+    "🍯 Honey never expires — 3,000-year-old honey has been found still edible.",
+    "⚡ A bolt of lightning is 5x hotter than the surface of the Sun.",
+    "🦋 Butterflies taste with their feet.",
+    "🌍 There are more trees on Earth than stars in the Milky Way.",
+    "🐘 Elephants are the only animals that cannot jump.",
+    "📱 The average person unlocks their phone 150 times per day.",
+    "🎵 Music can physically change your brain structure over time.",
+    "🌙 The Moon drifts 3.8 cm farther from Earth every year.",
+    "🐬 Dolphins have unique names — they use signature whistles.",
+    "🌺 Sunflowers track the Sun daily — called heliotropism.",
+    "💤 Humans spend about 26 years of their life sleeping.",
+    "🦈 Sharks are older than trees — they've existed for 450 million years.",
+]
+
+_FACTS_BN = [
+    "🧠 মানব মস্তিষ্ক প্রতিদিন প্রায় ৭০,০০০ চিন্তা তৈরি করে।",
+    "🐙 অক্টোপাসের তিনটি হৃদয়, নীল রক্ত ও নয়টি মস্তিষ্ক আছে।",
+    "🌊 পৃথিবীর ৫০%+ অক্সিজেন সমুদ্র থেকে আসে।",
+    "🍯 মধু কখনো নষ্ট হয় না — ৩,০০০ বছর পুরনো মধু এখনো খাওয়ার যোগ্য।",
+    "⚡ বজ্রপাতের তাপমাত্রা সূর্যপৃষ্ঠের চেয়ে ৫ গুণ বেশি।",
+    "🦋 প্রজাপতি পা দিয়ে স্বাদ নেয়।",
+    "🌍 পৃথিবীতে মিল্কিওয়ের তারার চেয়ে বেশি গাছ আছে।",
+    "🐘 হাতি একমাত্র প্রাণী যারা লাফ দিতে পারে না।",
+    "📱 গড়ে মানুষ প্রতিদিন ১৫০ বার ফোন আনলক করে।",
+    "🎵 নিয়মিত সঙ্গীত শুনলে মস্তিষ্কের গঠন বদলে যায়।",
+    "🌙 চাঁদ প্রতি বছর পৃথিবী থেকে ৩.৮ সেমি দূরে সরে যায়।",
+    "🐬 ডলফিনের নিজস্ব নাম থাকে — তারা শিস দিয়ে একে অপরকে ডাকে।",
+    "🌺 সূর্যমুখী সারাদিন সূর্যের দিকে মুখ ঘোরায় — হেলিওট্রপিজম।",
+    "💤 মানুষ জীবনে প্রায় ২৬ বছর ঘুমিয়ে কাটায়।",
+    "🦈 হাঙর গাছের চেয়ে পুরনো — ৪৫ কোটি বছর আগে থেকে আছে।",
+]
+
+
 def init_poll_db():
     with db_connect() as conn:
         conn.execute("""CREATE TABLE IF NOT EXISTS polls (
@@ -6026,7 +6066,7 @@ def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
         "",
     ]
 
-    opt_letters = ["A","B","C","D","E","F"]
+    opt_letters = ["A","B","C","D","E","F"]  # display letters in body
     winner_idx = counts.index(max(counts)) if total > 0 else -1
     for i, (opt, cnt) in enumerate(zip(opts, counts)):
         pct    = round(cnt / max(1, total) * 100)
@@ -6041,14 +6081,15 @@ def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     lines.append(f"<i>👥 {total} vote{'s' if total!=1 else ''} total</i>")
 
     # Buttons
+    _btn_letters = ["🇦","🇧","🇨","🇩","🇪","🇫"]
     if row["status"] == "closed" or closed:
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Poll Closed", callback_data="poll|noop|0")]])
     else:
         pid = row["poll_id"]
         btns = []
         for i, opt in enumerate(opts):
-            em = opt_emojis[i] if i < len(opt_emojis) else f"{i+1}"
-            btns.append([InlineKeyboardButton(f"{em} {opt[:20]}", callback_data=f"poll|vote|{pid}|{i}")])
+            em = _btn_letters[i] if i < len(_btn_letters) else f"{i+1}"
+            btns.append([InlineKeyboardButton(f"{em} {opt[:22]}", callback_data=f"poll|vote|{pid}|{i}")])
         btns.append([
             InlineKeyboardButton("📊 Results", callback_data=f"poll|results|{pid}|0"),
             InlineKeyboardButton("🔒 Close",   callback_data=f"poll|close|{pid}|0"),
@@ -6119,7 +6160,7 @@ async def on_poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         poll_id = parts[2]
         opt_idx = int(parts[3])
         ok, msg_txt = poll_vote(poll_id, user.id, opt_idx)
-        await query.answer(f"✅ Voted: {msg_txt}" if ok else f"⚠️ {msg_txt}", show_alert=not ok)
+        await query.answer(f"✅ {msg_txt[:60]}" if ok else f"⚠️ {msg_txt[:60]}", show_alert=not ok)
         if ok:
             row = poll_get(poll_id)
             if row:
