@@ -60,21 +60,12 @@ EID_ADHA_DATE = os.environ.get("EID_ADHA_DATE","").strip()
 COUNTDOWN_NOTIFY_WINDOW_DAYS = int(os.environ.get("COUNTDOWN_NOTIFY_WINDOW_DAYS","7"))
 SUPER_ADMINS = {int(x.strip()) for x in os.environ.get("SUPER_ADMINS","").split(",") if x.strip().isdigit()}
 
-# Hourly key (dedicated to group hourly messages)
-GROQ_HOURLY_KEY = os.environ.get("GROQ_HOURLY_KEY","").strip()
-# Caption key (dedicated to channel caption posts)
-GROQ_CAPTION_KEY = os.environ.get("GROQ_CAPTION_KEY","").strip()
-# Fallback: GROQ_API_KEYS comma-separated, or single GROQ_API_KEY
 GROQ_API_KEYS_RAW = os.environ.get("GROQ_API_KEYS","").strip()
 GROQ_API_KEYS = [k.strip() for k in GROQ_API_KEYS_RAW.split(",") if k.strip()]
 if not GROQ_API_KEYS and GROQ_API_KEY:
     GROQ_API_KEYS = [GROQ_API_KEY]
-# Build dedicated pools
-GROQ_HOURLY_KEYS  = [GROQ_HOURLY_KEY]  if GROQ_HOURLY_KEY  else GROQ_API_KEYS[:1] if GROQ_API_KEYS else []
-GROQ_CAPTION_KEYS = [GROQ_CAPTION_KEY] if GROQ_CAPTION_KEY else GROQ_API_KEYS[1:] if len(GROQ_API_KEYS)>1 else GROQ_API_KEYS
-# Channel caption config
-CAPTION_CHANNEL_ID  = os.environ.get("CAPTION_CHANNEL_ID","").strip()  # e.g. @mychannel
-CAPTION_INTERVAL    = int(os.environ.get("CAPTION_INTERVAL","3600"))    # seconds between posts
+# Channel caption config (interval in seconds, default 1 hour)
+CAPTION_INTERVAL = int(os.environ.get("CAPTION_INTERVAL","3600"))
 
 NAGER_COUNTRY_CODE = (os.environ.get("NAGER_COUNTRY_CODE","BD").strip() or "BD").upper()
 ALADHAN_COUNTRY = os.environ.get("ALADHAN_COUNTRY","Bangladesh").strip() or "Bangladesh"
@@ -857,7 +848,7 @@ def groq_generate_batch(lang,phase,mood="soft",festival_key=""):
     fn=f"- lightly reflect a festive mood for {festival_hourly_prefix(lang)}\n" if festival_key else ""
     prompt=(f"Write {AI_BATCH_SIZE} short premium Telegram group hourly messages in {'Bengali' if lang=='bn' else 'English'}.\nCurrent time phase: {pl['bn' if lang=='bn' else 'en'][phase]}.\nCurrent mood: {mood}.\nRules:\n- warm, elegant, premium, tasteful, group-safe\n- non-sexual, non-romantic, non-political, non-religious\n- no flirting, no hashtags\n- each line complete and natural\n- do NOT mention the wrong time phase\n{fn}- keep each between 18 and {AI_MAX_TEXT_LEN} characters\n- each line different, avoid robotic phrases\nReturn only the messages, one per line.")
     try:
-        data=_groq_chat_request_with_keys({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":280}, GROQ_HOURLY_KEYS or GROQ_API_KEYS)
+        data=_groq_chat_request({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":280})
         content=data["choices"][0]["message"]["content"]
         lines=sanitize_ai_lines(content,lang,phase)
         if lines:
@@ -1823,8 +1814,7 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
             f"\nশুধু {AI_BATCH_SIZE}টি বার্তা দাও, একটি করে লাইনে, কোনো নম্বর বা bullet নয়।"
         )
     try:
-        # Use dedicated hourly key pool
-        data = _groq_chat_request_with_keys({
+        data = _groq_chat_request({
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": _GROQ_SYSTEM_V2},
@@ -1832,7 +1822,7 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
             ],
             "temperature": 0.88,
             "max_tokens": 300,
-        }, GROQ_HOURLY_KEYS or GROQ_API_KEYS)
+        })
         content = data["choices"][0]["message"]["content"]
         lines = sanitize_ai_lines(content, lang, phase)
         if lines:
@@ -6251,146 +6241,291 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # CHANNEL CAPTION SYSTEM
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_CAPTION_STYLES = [
-    "motivational","emotional","philosophical","nature",
-    "love_of_life","wisdom","inspirational","poetic","thoughtful",
-]
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHANNEL CAPTION SYSTEM — posts beautiful Bengali captions to all admin channels
+# No Groq used — built-in curated caption bank with smart rotation
+# ═══════════════════════════════════════════════════════════════════════════════
 
-_CAPTION_FALLBACKS = [
-    "🌸 জীবনটা একটা অসাধারণ উপহার। প্রতিটি মুহূর্তকে ভালোবাসো।",
-    "✨ স্বপ্ন দেখো, বিশ্বাস করো, এগিয়ে যাও — সাফল্য আসবেই।",
-    "💫 নিজের উপর বিশ্বাস রাখো। তুমি যা ভাবছ তার চেয়ে অনেক বেশি সক্ষম।",
-    "🌿 প্রকৃতির মতো শান্ত থাকো — ঝড় আসলেও শিকড় ধরে রাখো।",
-    "🌙 রাতের অন্ধকারই প্রমাণ করে যে তারাগুলো কতটা উজ্জ্বল।",
-    "💎 কঠিন সময়গুলোই তোমাকে গড়ে তোলে। ভাঙো না, গড়ে উঠো।",
-    "🌺 ভালো মানুষ হওয়াটা সবচেয়ে বড় সাফল্য।",
-    "⭐ ছোট ছোট মুহূর্তগুলোই সবচেয়ে সুন্দর স্মৃতি হয়।",
-    "🔥 চেষ্টা করতে থাকো — একদিন না একদিন হবেই।",
-    "🌊 জীবনের ঢেউয়ে ভেসে যেও না, সাঁতার কাটতে শেখো।",
-    "💙 যে মানুষটা সবার জন্য হাসে, তার ব্যথাটাও সবচেয়ে গভীর।",
-    "🌸 ক্লান্তি লাগলে থামো, কিন্তু থেমে যেও না।",
-    "✨ তোমার গল্পটা এখনো শেষ হয়নি। সেরা অধ্যায়টা হয়তো এখনো আসেনি।",
-    "🌿 প্রতিটি নতুন দিন একটি নতুন সুযোগ।",
-    "💫 অন্যকে ভালোবাসলে নিজেও ভালো থাকা যায়।",
-    "🌟 তুমি যতটা ভাবছ, তুমি তার চেয়ে অনেক বেশি শক্তিশালী।",
-    "🍃 শান্তি খুঁজে নাও — বাইরে নয়, নিজের ভেতরে।",
-    "💐 যা হারিয়ে গেছে তার জন্য কাঁদো না, যা আছে তাকে ভালোবাসো।",
-]
+# DB for tracking channels bot is admin in
+def init_caption_db():
+    with db_connect() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS caption_channels (
+            chat_id INTEGER PRIMARY KEY,
+            title TEXT NOT NULL DEFAULT '',
+            enabled INTEGER NOT NULL DEFAULT 1,
+            last_posted INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL
+        )""")
+        conn.commit()
 
-_caption_style_idx: list = [0]
-_caption_task_ref: list  = [None]
+def register_caption_channel(chat_id: int, title: str):
+    now = int(time.time())
+    with db_connect() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO caption_channels (chat_id,title,enabled,last_posted,created_at) VALUES (?,?,1,0,?)",
+            (chat_id, title[:80], now)
+        )
+        conn.execute("UPDATE caption_channels SET title=? WHERE chat_id=?", (title[:80], chat_id))
+        conn.commit()
 
-def _generate_channel_caption() -> str:
-    style = _CAPTION_STYLES[_caption_style_idx[0] % len(_CAPTION_STYLES)]
-    _caption_style_idx[0] += 1
-    style_map = {
-        "motivational":  "অনুপ্রেরণামূলক — মানুষকে এগিয়ে যেতে উৎসাহিত করে",
-        "emotional":     "আবেগময় — হৃদয়ের গভীরে স্পর্শ করে",
-        "philosophical": "দার্শনিক — জীবন ও সত্য নিয়ে গভীর ভাবনা",
-        "nature":        "প্রকৃতি-নির্ভর — নদী, আকাশ, বৃষ্টি, ফুলের রূপক",
-        "love_of_life":  "জীবনের প্রতি ভালোবাসা — কৃতজ্ঞতা ও আনন্দ",
-        "wisdom":        "জ্ঞানগর্ভ — জীবনের শিক্ষা ও অভিজ্ঞতা",
-        "inspirational": "অনুপ্রেরণাদায়ক — স্বপ্ন ও সম্ভাবনার কথা",
-        "poetic":        "কাব্যিক — সুন্দর ভাষায় অনুভূতির প্রকাশ",
-        "thoughtful":    "চিন্তাশীল — মানুষকে ভাবায় এমন কথা",
-    }
-    style_desc = style_map.get(style, "অনুপ্রেরণামূলক")
-    phase_bn = {"morning":"সকাল","day":"দিন","evening":"সন্ধ্যা","night":"রাত"}.get(phase_now(),"দিন")
-    prompt = (
-        f"একটি সুন্দর বাংলা ক্যাপশন লেখো Telegram channel-এর জন্য।\n"
-        f"Style: {style_desc}\n"
-        f"সময়: {phase_bn}\n\n"
-        f"নিয়ম:\n"
-        f"- সম্পূর্ণ বাংলায়\n"
-        f"- ২-৪ বাক্য, ১৫০-২৫০ অক্ষর\n"
-        f"- শুরুতে ১-২টি emoji\n"
-        f"- গভীর, সুন্দর, মানবিক\n"
-        f"- কোনো hashtag বা cliché নয়\n"
-        f"- শুধু caption text, কোনো explanation নয়।"
-    )
-    if not GROQ_CAPTION_KEYS:
-        return random.choice(_CAPTION_FALLBACKS)
-    try:
-        data = _groq_chat_request_with_keys({
-            "model": GROQ_MODEL,
-            "messages": [
-                {"role": "system", "content":
-                 "তুমি একজন expert বাংলা content writer। Telegram channel-এর জন্য গভীর, সুন্দর, "
-                 "মানবিক বাংলা caption লেখো। প্রতিটি caption unique এবং হৃদয়গ্রাহী।"},
-                {"role": "user", "content": prompt},
-            ],
-            "temperature": 0.95, "max_tokens": 220,
-        }, GROQ_CAPTION_KEYS)
-        text = (data["choices"][0]["message"]["content"] or "").strip()
-        text = re.sub(r'^["\']|["\']$', "", text).strip()
-        if len(text) > 40:
-            return text
-    except Exception as e:
-        logger.warning("Caption Groq failed: %s", e)
-    return random.choice(_CAPTION_FALLBACKS)
+def get_caption_channels():
+    with db_connect() as conn:
+        return conn.execute(
+            "SELECT * FROM caption_channels WHERE enabled=1"
+        ).fetchall()
+
+def set_caption_channel_enabled(chat_id: int, enabled: int):
+    with db_connect() as conn:
+        conn.execute("UPDATE caption_channels SET enabled=? WHERE chat_id=?", (enabled, chat_id))
+        conn.commit()
+
+def update_caption_last_posted(chat_id: int):
+    with db_connect() as conn:
+        conn.execute("UPDATE caption_channels SET last_posted=? WHERE chat_id=?", (int(time.time()), chat_id))
+        conn.commit()
+
+# ─── Curated Bengali Caption Bank (no Groq) ───────────────────────────────────
+_CAPTION_BANK = {
+    "morning": [
+        "🌅 ভোরের আলো নতুন সম্ভাবনার বার্তা নিয়ে আসে। আজকের দিনটা হোক তোমার সেরা।",
+        "☀️ প্রতিটি সকাল একটি নতুন সুযোগ। কাজে লাগাও, ভালো থাকো।",
+        "🌸 সকালের শান্ত মুহূর্তে নিজেকে একটু সময় দাও। দিনটা হোক সুন্দর।",
+        "🍃 নতুন ভোর মানেই নতুন শুরু। ভুলে যাও গতকালের ক্লান্তি।",
+        "🌤️ আলোর সাথে পাল্লা দিয়ে এগিয়ে যাও। সফলতা তোমার অপেক্ষায়।",
+        "💛 সকালের প্রথম শ্বাসটা নাও কৃতজ্ঞতার সাথে। আজও বেঁচে আছো — এটাই বড় পাওয়া।",
+        "🌻 ভোরের কোমল আলোয় মনটাকে প্রস্তুত করো। আজকের দিন তোমারই।",
+    ],
+    "day": [
+        "✨ যা করছ তা ভালোবাসো, যা ভালোবাসো তা করো — জীবন তখনই সুন্দর।",
+        "💫 ছোট ছোট প্রচেষ্টাই একদিন বড় সাফল্য হয়। থামো না।",
+        "🌿 শান্ত থাকো, মনোযোগ রাখো। ফলাফল আসবেই।",
+        "🔥 কঠিন লাগলেই বুঝতে হবে — তুমি বড় কিছুর দিকে এগোচ্ছ।",
+        "💎 সময় হলো সবচেয়ে দামি সম্পদ। অর্থবহভাবে ব্যবহার করো।",
+        "🌊 জীবনে ঢেউ আসবেই, কিন্তু সাঁতার তোমাকেই কাটতে হবে।",
+        "⭐ প্রতিদিন একটু একটু করে এগোলেই একসময় অনেক দূর পৌঁছানো যায়।",
+        "🎯 লক্ষ্য স্থির রাখো, পথ কঠিন হলেও।",
+        "💪 তোমার ভেতরে যে শক্তি আছে, তাকে কখনো ছোট করো না।",
+        "🌱 প্রতিটি ব্যর্থতা একটি শিক্ষা। এগিয়ে যাও নতুন জ্ঞান নিয়ে।",
+    ],
+    "evening": [
+        "🌆 সন্ধ্যার নরম আলোয় একটু থামো। নিজেকে প্রশ্ন করো — আজ কী ভালো করলে?",
+        "🌇 দিনের শেষে যা পেয়েছ তার জন্য কৃতজ্ঞ থাকো।",
+        "🕊️ সন্ধ্যাটা হোক শান্ত আর কোমল। মনের ভেতর শান্তি খুঁজে নাও।",
+        "💜 দিনের ক্লান্তি ভুলে যাও একটু। তুমি অনেক কিছু করেছ আজ।",
+        "🌸 সন্ধ্যার এই মুহূর্তটা শুধু তোমার। উপভোগ করো।",
+        "🌙 সূর্য অস্ত যায়, কিন্তু পরদিন আবার ওঠে। তোমার জীবনেও তাই।",
+    ],
+    "night": [
+        "🌙 রাতের নীরবতায় নিজের সাথে কথা বলো। নিজেকে চেনো।",
+        "⭐ তারার আলোর মতো ছোট ছোট ভালো কাজ পৃথিবীকে আলোকিত করে।",
+        "💙 রাতটা হোক শান্ত আর স্বপ্নময়। কালকে আরও সুন্দর হবে।",
+        "🌌 অন্ধকারও সুন্দর — সে তারাদের দেখতে শেখায়।",
+        "🕊️ দিনের সব ভার নামিয়ে রেখে ঘুমাও। নতুন দিনে নতুন শক্তি পাবে।",
+        "💫 স্বপ্ন দেখো — কারণ স্বপ্নই পরিবর্তনের শুরু।",
+    ],
+    "general": [
+        "🌸 জীবনটা একটা অসাধারণ উপহার। প্রতিটি মুহূর্তকে ভালোবাসো।",
+        "✨ স্বপ্ন দেখো, বিশ্বাস করো, এগিয়ে যাও — সাফল্য আসবেই।",
+        "💫 নিজের উপর বিশ্বাস রাখো। তুমি যা ভাবছ তার চেয়ে অনেক বেশি সক্ষম।",
+        "🌿 প্রকৃতির মতো শান্ত থাকো — ঝড় আসলেও শিকড় ধরে রাখো।",
+        "🌙 রাতের অন্ধকারই প্রমাণ করে যে তারাগুলো কতটা উজ্জ্বল।",
+        "💎 কঠিন সময়গুলোই তোমাকে গড়ে তোলে। ভাঙো না, গড়ে উঠো।",
+        "🌺 ভালো মানুষ হওয়াটা সবচেয়ে বড় সাফল্য।",
+        "⭐ ছোট ছোট মুহূর্তগুলোই সবচেয়ে সুন্দর স্মৃতি হয়।",
+        "🔥 চেষ্টা করতে থাকো — একদিন না একদিন হবেই।",
+        "🌊 জীবনের ঢেউয়ে ভেসে যেও না, সাঁতার কাটতে শেখো।",
+        "💙 যে মানুষটা সবার জন্য হাসে, তার ব্যথাটাও সবচেয়ে গভীর।",
+        "🌸 ক্লান্তি লাগলে থামো, কিন্তু থেমে যেও না।",
+        "✨ তোমার গল্পটা এখনো শেষ হয়নি। সেরা অধ্যায়টা হয়তো এখনো আসেনি।",
+        "🌟 তুমি যতটা ভাবছ, তুমি তার চেয়ে অনেক বেশি শক্তিশালী।",
+        "🍃 শান্তি খুঁজে নাও — বাইরে নয়, নিজের ভেতরে।",
+        "💐 যা হারিয়ে গেছে তার জন্য কাঁদো না, যা আছে তাকে ভালোবাসো।",
+        "🌈 প্রতিটি ঝড়ের পরে রংধনু আসে। ধৈর্য ধরো।",
+        "🦋 পরিবর্তন সুন্দর — কারণ সে নতুনের দরজা খোলে।",
+        "🌻 সূর্যমুখীর মতো সবসময় আলোর দিকে মুখ রাখো।",
+        "💖 ভালোবাসা দিলে ভালোবাসা পাওয়া যায় — এটাই জীবনের সত্য।",
+        "🎋 বাঁশের মতো নমনীয় হও — ঝড়ে ভাঙে না, ঝুঁকে যায়।",
+        "🌠 রাতের আকাশে তারার মতো — অন্ধকারেই সবচেয়ে উজ্জ্বল।",
+        "🏔️ পাহাড় চূড়ায় উঠতে সময় লাগে, কিন্তু দৃশ্য অতুলনীয়।",
+        "🎯 একদিনে সব হয় না — কিন্তু প্রতিদিন একটু করে এগোলে সব হয়।",
+        "🌺 মানুষের মন ফুলের মতো — যত্ন পেলে ফোটে।",
+    ],
+}
+
+_caption_sent_idx: dict[int, int] = {}  # chat_id -> last index
+_caption_task_ref: list = [None]
+
+def _pick_channel_caption(chat_id: int) -> str:
+    """Pick next caption from bank, rotating through all captions."""
+    phase = phase_now()
+    # Blend phase captions with general
+    pool = _CAPTION_BANK.get(phase, []) + _CAPTION_BANK["general"]
+    # Deduplicate while preserving order
+    seen: set = set(); unique_pool: list = []
+    for c in pool:
+        if c not in seen: seen.add(c); unique_pool.append(c)
+    idx = _caption_sent_idx.get(chat_id, 0)
+    caption = unique_pool[idx % len(unique_pool)]
+    _caption_sent_idx[chat_id] = (idx + 1) % len(unique_pool)
+    return caption
 
 async def _caption_channel_loop(bot):
-    if not CAPTION_CHANNEL_ID:
-        return
-    logger.info("Channel caption loop started → %s every %ds", CAPTION_CHANNEL_ID, CAPTION_INTERVAL)
-    await asyncio.sleep(60)
+    """Posts captions to ALL channels where bot is admin. No Groq used."""
+    logger.info("Channel caption loop started (interval=%ds)", CAPTION_INTERVAL)
+    await asyncio.sleep(90)  # Let bot fully start
     while True:
         try:
-            caption = await asyncio.to_thread(_generate_channel_caption)
-            if caption:
-                await bot.send_message(chat_id=CAPTION_CHANNEL_ID, text=caption)
-                logger.info("Caption posted to %s", CAPTION_CHANNEL_ID)
+            channels = get_caption_channels()
+            if channels:
+                for ch in channels:
+                    chat_id = int(ch["chat_id"])
+                    caption = _pick_channel_caption(chat_id)
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=caption)
+                        update_caption_last_posted(chat_id)
+                        logger.info("Caption posted to channel %s", chat_id)
+                    except Exception as e:
+                        logger.warning("Caption post failed for %s: %s", chat_id, e)
+                        # If bot was removed, disable this channel
+                        if "chat not found" in str(e).lower() or "forbidden" in str(e).lower():
+                            set_caption_channel_enabled(chat_id, 0)
+                    await asyncio.sleep(2)  # Small gap between channels
         except Exception as e:
-            logger.warning("Caption post failed: %s", e)
+            logger.exception("Caption loop error: %s", e)
         await asyncio.sleep(CAPTION_INTERVAL)
 
 async def start_caption_loop(bot):
-    if not CAPTION_CHANNEL_ID:
-        return
     task = asyncio.create_task(_caption_channel_loop(bot))
     _caption_task_ref[0] = task
 
+async def on_captionon(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Enable channel captions for this channel. Must be used in the channel by admin."""
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+
+    # Can be used in channel or private by owner
+    if chat.type == "channel":
+        register_caption_channel(chat.id, chat.title or "")
+        set_caption_channel_enabled(chat.id, 1)
+        await msg.reply_text(
+            f"✅ <b>Caption posts enabled!</b>\n"
+            f"Channel: <b>{html.escape(chat.title or str(chat.id))}</b>\n\n"
+            f"<i>Bot will post captions every {CAPTION_INTERVAL//60}m.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    if not is_super_admin(user.id):
+        await msg.reply_text("🔒 Owner only.")
+        return
+
+    # Owner in private: /captionon <channel_id>
+    if context.args and context.args[0].lstrip("-").isdigit():
+        cid = int(context.args[0])
+        with db_connect() as conn:
+            row = conn.execute("SELECT title FROM caption_channels WHERE chat_id=?", (cid,)).fetchone()
+        title = row["title"] if row else str(cid)
+        set_caption_channel_enabled(cid, 1)
+        register_caption_channel(cid, title)
+        await msg.reply_text(f"✅ Captions enabled for {html.escape(title or str(cid))}")
+    else:
+        channels = get_caption_channels()
+        if not channels:
+            await msg.reply_text(
+                "📢 <b>Channel Caption System</b>\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "No channels registered yet.\n\n"
+                "<b>How to add a channel:</b>\n"
+                "1. Add bot as admin to your channel\n"
+                "2. Use <code>/captionon</code> in that channel\n"
+                "3. Bot will post captions automatically\n\n"
+                f"<i>Interval: every {CAPTION_INTERVAL//60} minutes</i>",
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            lines = ["📢 <b>Caption Channels</b>", "━━━━━━━━━━━━━━━━━━"]
+            for ch in channels:
+                last = format_ts(int(ch["last_posted"])) if ch["last_posted"] else "Never"
+                lines.append(f"✅ <b>{html.escape(ch['title'] or str(ch['chat_id']))}</b>")
+                lines.append(f"   Last post: {last}")
+            await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+async def on_captionoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Disable captions for this channel."""
+    chat = update.effective_chat
+    user = update.effective_user
+    msg  = update.effective_message
+    if not chat or not user or not msg: return
+    if chat.type == "channel":
+        set_caption_channel_enabled(chat.id, 0)
+        await msg.reply_text("🔴 Caption posts disabled for this channel.")
+        return
+    if not is_super_admin(user.id):
+        await msg.reply_text("🔒 Owner only.")
+        return
+    if context.args and context.args[0].lstrip("-").isdigit():
+        cid = int(context.args[0])
+        set_caption_channel_enabled(cid, 0)
+        await msg.reply_text(f"🔴 Disabled captions for {cid}")
+    else:
+        await msg.reply_text("Usage: /captionoff <channel_id>")
+
 async def on_captiontest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Owner: generate and preview a caption."""
     user = update.effective_user
     if not user or not is_super_admin(user.id):
         await update.effective_message.reply_text("🔒 Owner only.")
         return
-    if not CAPTION_CHANNEL_ID:
-        await update.effective_message.reply_text("❌ Set CAPTION_CHANNEL_ID env var first.")
+    channels = get_caption_channels()
+    if not channels:
+        await update.effective_message.reply_text(
+            "❌ No channels enabled. Use /captionon in your channel first."
+        )
         return
-    thinking = await update.effective_message.reply_text("✍️ Generating...")
-    caption = await asyncio.to_thread(_generate_channel_caption)
-    await thinking.edit_text(
-        f"📝 <b>Preview:</b>\n\n{html.escape(caption)}\n\n"
-        f"<i>Posting to {html.escape(CAPTION_CHANNEL_ID)}...</i>",
-        parse_mode=ParseMode.HTML
+    # Post to all enabled channels
+    ok_count = 0
+    for ch in channels:
+        caption = _pick_channel_caption(int(ch["chat_id"]))
+        try:
+            await context.bot.send_message(chat_id=int(ch["chat_id"]), text=caption)
+            update_caption_last_posted(int(ch["chat_id"]))
+            ok_count += 1
+        except Exception as e:
+            logger.warning("Caption test failed for %s: %s", ch["chat_id"], e)
+    await update.effective_message.reply_text(
+        f"✅ Caption posted to {ok_count}/{len(channels)} channel(s)."
     )
-    try:
-        await context.bot.send_message(chat_id=CAPTION_CHANNEL_ID, text=caption)
-        await update.effective_message.reply_text("✅ Posted!")
-    except Exception as e:
-        await update.effective_message.reply_text(f"❌ {html.escape(str(e)[:120])}")
 
 async def on_captionstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     if not user or not is_super_admin(user.id):
         await update.effective_message.reply_text("🔒 Owner only.")
         return
-    alive  = bool(_caption_task_ref[0] and not _caption_task_ref[0].done())
-    ch     = html.escape(CAPTION_CHANNEL_ID or "Not set")
-    itv    = CAPTION_INTERVAL // 60
-    h_keys = len(GROQ_HOURLY_KEYS)
-    c_keys = len(GROQ_CAPTION_KEYS)
-    await update.effective_message.reply_text(
-        f"📢 <b>Caption System</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Channel:      <code>{ch}</code>\n"
-        f"Interval:     <b>{itv}m</b>\n"
-        f"Loop:         {'🟢 Running' if alive else '🔴 Stopped'}\n"
-        f"Hourly keys:  <b>{h_keys}</b>\n"
-        f"Caption keys: <b>{c_keys}</b>",
-        parse_mode=ParseMode.HTML
-    )
+    alive    = bool(_caption_task_ref[0] and not _caption_task_ref[0].done())
+    channels = get_caption_channels()
+    groq_cnt = len(GROQ_API_KEYS)
+    itv      = CAPTION_INTERVAL // 60
+    lines = [
+        "📢 <b>Caption System Status</b>",
+        "━━━━━━━━━━━━━━━━━━",
+        f"Loop:      {'🟢 Running' if alive else '🔴 Stopped'}",
+        f"Interval:  <b>{itv}m</b>",
+        f"Channels:  <b>{len(channels)}</b>",
+        f"Groq keys: <b>{groq_cnt}</b>  (shared with hourly)",
+        f"AI:        <b>OFF</b>  (built-in captions)",
+        "",
+    ]
+    if channels:
+        lines.append("── Active Channels ────────")
+        for ch in channels:
+            last = format_ts(int(ch["last_posted"])) if ch["last_posted"] else "Never"
+            lines.append(f"  📣 {html.escape(ch['title'] or str(ch['chat_id']))}")
+            lines.append(f"     Last: {last}")
+    else:
+        lines.append("<i>No channels. Use /captionon in your channel.</i>")
+    await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 async def post_init(application):
     delete_webhook()
@@ -6439,6 +6574,10 @@ async def post_init(application):
         BotCommand("countdown",          "📅 Show countdown card"),
         BotCommand("clearcountdown",     "❌ Clear countdown"),
         BotCommand("setexamday",         "📘 Set exam day reminder"),
+        BotCommand("captionon",          "📢 Enable channel captions"),
+        BotCommand("captionoff",         "🔴 Disable channel captions"),
+        BotCommand("captiontest",        "✍️ Post caption now (owner)"),
+        BotCommand("captionstatus",      "📊 Caption system status (owner)"),
         BotCommand("aistatus",           "🤖 AI engine status (owner)"),
         BotCommand("testwelcome",        "🧪 Test welcome message"),
         BotCommand("groupbrowser",       "🗂 Browse groups (owner)"),
@@ -6467,11 +6606,10 @@ async def post_init(application):
     except Exception:
         logger.exception("Failed to restore forward tasks")
 
-    # Start channel caption loop
+    # Start channel caption loop (posts to all admin channels)
     try:
         await start_caption_loop(application.bot)
-        if CAPTION_CHANNEL_ID:
-            logger.info("📢 Channel caption loop started → %s", CAPTION_CHANNEL_ID)
+        logger.info("📢 Channel caption loop started (interval=%ds)", CAPTION_INTERVAL)
     except Exception:
         logger.exception("Failed to start caption loop")
 
@@ -6551,7 +6689,9 @@ def build_app():
     application.add_handler(CommandHandler("broadcastphoto",     on_broadcast))
     application.add_handler(CommandHandler("broadcastvoice",     on_broadcast))
     application.add_handler(CommandHandler("broadcast",          on_broadcast))
-    application.add_handler(CommandHandler("captiontest",        on_captiontest))
+    application.add_handler(CommandHandler("captionon",           on_captionon))
+    application.add_handler(CommandHandler("captionoff",          on_captionoff))
+    application.add_handler(CommandHandler("captiontest",         on_captiontest))
     application.add_handler(CommandHandler("captionstatus",       on_captionstatus))
     application.add_handler(CommandHandler("groupbrowser",       on_groupbrowser))
     application.add_handler(CommandHandler("broadcastone",       on_broadcastone))
@@ -6598,6 +6738,7 @@ def main():
     init_ultra_db()
     init_forward_db()
     init_poll_db()
+    init_caption_db()
     threading.Thread(target=run_flask,       daemon=True).start()
     threading.Thread(target=hourly_loop,     daemon=True).start()
     threading.Thread(target=cleanup_loop,    daemon=True).start()
