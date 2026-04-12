@@ -60,10 +60,21 @@ EID_ADHA_DATE = os.environ.get("EID_ADHA_DATE","").strip()
 COUNTDOWN_NOTIFY_WINDOW_DAYS = int(os.environ.get("COUNTDOWN_NOTIFY_WINDOW_DAYS","7"))
 SUPER_ADMINS = {int(x.strip()) for x in os.environ.get("SUPER_ADMINS","").split(",") if x.strip().isdigit()}
 
+# Hourly key (dedicated to group hourly messages)
+GROQ_HOURLY_KEY = os.environ.get("GROQ_HOURLY_KEY","").strip()
+# Caption key (dedicated to channel caption posts)
+GROQ_CAPTION_KEY = os.environ.get("GROQ_CAPTION_KEY","").strip()
+# Fallback: GROQ_API_KEYS comma-separated, or single GROQ_API_KEY
 GROQ_API_KEYS_RAW = os.environ.get("GROQ_API_KEYS","").strip()
 GROQ_API_KEYS = [k.strip() for k in GROQ_API_KEYS_RAW.split(",") if k.strip()]
 if not GROQ_API_KEYS and GROQ_API_KEY:
     GROQ_API_KEYS = [GROQ_API_KEY]
+# Build dedicated pools
+GROQ_HOURLY_KEYS  = [GROQ_HOURLY_KEY]  if GROQ_HOURLY_KEY  else GROQ_API_KEYS[:1] if GROQ_API_KEYS else []
+GROQ_CAPTION_KEYS = [GROQ_CAPTION_KEY] if GROQ_CAPTION_KEY else GROQ_API_KEYS[1:] if len(GROQ_API_KEYS)>1 else GROQ_API_KEYS
+# Channel caption config
+CAPTION_CHANNEL_ID  = os.environ.get("CAPTION_CHANNEL_ID","").strip()  # e.g. @mychannel
+CAPTION_INTERVAL    = int(os.environ.get("CAPTION_INTERVAL","3600"))    # seconds between posts
 
 NAGER_COUNTRY_CODE = (os.environ.get("NAGER_COUNTRY_CODE","BD").strip() or "BD").upper()
 ALADHAN_COUNTRY = os.environ.get("ALADHAN_COUNTRY","Bangladesh").strip() or "Bangladesh"
@@ -770,6 +781,32 @@ def _groq_mark_rate_limited(key: str, error_msg: str):
     _GROQ_RATE_LIMITED[key] = time.time() + wait
     logger.warning("Groq key rate-limited, cooling for %ds: %s...", wait, key[:12])
 
+def _groq_chat_request_with_keys(payload, key_pool: list) -> dict:
+    """Use a specific key pool instead of the global rotation."""
+    last_error = None
+    for key in key_pool:
+        if _groq_is_rate_limited(key):
+            last_error = f"key rate-limited"
+            continue
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                json=payload,
+                timeout=GROQ_TIMEOUT_SECONDS,
+            )
+            data = resp.json()
+            if isinstance(data, dict) and data.get("choices"):
+                return data
+            err_msg = str(data.get("error", {}).get("message", ""))
+            if "rate_limit" in err_msg or "Rate limit" in err_msg:
+                _groq_mark_rate_limited(key, err_msg)
+            last_error = data
+        except Exception as e:
+            last_error = e
+            continue
+    raise RuntimeError(str(last_error)[:500] if last_error else "No key available")
+
 def _groq_chat_request(payload):
     last_error = None
     candidates = groq_candidate_keys()
@@ -820,7 +857,7 @@ def groq_generate_batch(lang,phase,mood="soft",festival_key=""):
     fn=f"- lightly reflect a festive mood for {festival_hourly_prefix(lang)}\n" if festival_key else ""
     prompt=(f"Write {AI_BATCH_SIZE} short premium Telegram group hourly messages in {'Bengali' if lang=='bn' else 'English'}.\nCurrent time phase: {pl['bn' if lang=='bn' else 'en'][phase]}.\nCurrent mood: {mood}.\nRules:\n- warm, elegant, premium, tasteful, group-safe\n- non-sexual, non-romantic, non-political, non-religious\n- no flirting, no hashtags\n- each line complete and natural\n- do NOT mention the wrong time phase\n{fn}- keep each between 18 and {AI_MAX_TEXT_LEN} characters\n- each line different, avoid robotic phrases\nReturn only the messages, one per line.")
     try:
-        data=_groq_chat_request({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":280})
+        data=_groq_chat_request_with_keys({"model":GROQ_MODEL,"messages":[{"role":"system","content":"You write tasteful, premium, natural Telegram group texts. Never mismatch time-of-day greetings."},{"role":"user","content":prompt}],"temperature":0.9,"max_tokens":280}, GROQ_HOURLY_KEYS or GROQ_API_KEYS)
         content=data["choices"][0]["message"]["content"]
         lines=sanitize_ai_lines(content,lang,phase)
         if lines:
@@ -1267,25 +1304,26 @@ def http_humanize(chat_id,action="typing",kind="auto"):
     except: pass
     if HUMAN_DELAY_ENABLED: time.sleep(random.uniform(0.4,1.0) if kind=="auto" else random.choice([1.5,3.0]))
 
-async def bot_humanize(bot,chat_id,action="typing",kind="reply"):
-    gap=get_presence_gap(chat_id)
-    try: await bot.send_chat_action(chat_id=chat_id,action=action)
+async def bot_humanize(bot, chat_id, action="typing", kind="reply"):
+    """Lightweight humanize — fast response, minimal delay."""
+    try: await bot.send_chat_action(chat_id=chat_id, action=action)
     except: pass
     if not HUMAN_DELAY_ENABLED: return
-    if gap>=4*3600: delay=random.uniform(2.4,4.2) if kind=="reply" else random.uniform(1.8,3.1)
-    elif gap>=1800: delay=random.uniform(1.6,2.8) if kind=="reply" else random.uniform(1.2,2.1)
-    elif gap>=600: delay=random.uniform(1.0,1.9) if kind=="reply" else random.uniform(0.9,1.5)
-    else: delay=random.uniform(0.6,1.2) if kind=="reply" else random.uniform(0.5,1.0)
-    if delay>2.2:
-        await asyncio.sleep(delay/2)
-        try: await bot.send_chat_action(chat_id=chat_id,action=action)
-        except: pass
-        await asyncio.sleep(delay/2)
-    else: await asyncio.sleep(delay)
+    # Fast delays: max 1.0s for commands, 0.5s for photo/voice
+    if kind in ("photo", "voice"):
+        await asyncio.sleep(random.uniform(0.3, 0.6))
+    elif kind == "reply":
+        await asyncio.sleep(random.uniform(0.4, 0.9))
+    else:
+        await asyncio.sleep(random.uniform(0.2, 0.5))
 
-async def human_delay_and_action(context,update,action="typing"):
-    chat=update.effective_chat if update else None
-    if chat: await bot_humanize(context.bot,chat.id,action=action,kind="reply")
+async def human_delay_and_action(context, update, action="typing"):
+    chat = update.effective_chat if update else None
+    if not chat: return
+    try: await context.bot.send_chat_action(chat_id=chat.id, action=action)
+    except: pass
+    if HUMAN_DELAY_ENABLED:
+        await asyncio.sleep(random.uniform(0.3, 0.7))
 
 async def send_photo_with_retry(bot,**kwargs):
     last_error=None; chat_id=kwargs.get("chat_id")
@@ -1785,7 +1823,8 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
             f"\nশুধু {AI_BATCH_SIZE}টি বার্তা দাও, একটি করে লাইনে, কোনো নম্বর বা bullet নয়।"
         )
     try:
-        data = _groq_chat_request({
+        # Use dedicated hourly key pool
+        data = _groq_chat_request_with_keys({
             "model": GROQ_MODEL,
             "messages": [
                 {"role": "system", "content": _GROQ_SYSTEM_V2},
@@ -1793,7 +1832,7 @@ def groq_generate_batch_v2(lang: str, phase: str, mood: str = "soft", festival_k
             ],
             "temperature": 0.88,
             "max_tokens": 300,
-        })
+        }, GROQ_HOURLY_KEYS or GROQ_API_KEYS)
         content = data["choices"][0]["message"]["content"]
         lines = sanitize_ai_lines(content, lang, phase)
         if lines:
@@ -6207,6 +6246,152 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─── Ship / Compatibility ─────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# CHANNEL CAPTION SYSTEM
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_CAPTION_STYLES = [
+    "motivational","emotional","philosophical","nature",
+    "love_of_life","wisdom","inspirational","poetic","thoughtful",
+]
+
+_CAPTION_FALLBACKS = [
+    "🌸 জীবনটা একটা অসাধারণ উপহার। প্রতিটি মুহূর্তকে ভালোবাসো।",
+    "✨ স্বপ্ন দেখো, বিশ্বাস করো, এগিয়ে যাও — সাফল্য আসবেই।",
+    "💫 নিজের উপর বিশ্বাস রাখো। তুমি যা ভাবছ তার চেয়ে অনেক বেশি সক্ষম।",
+    "🌿 প্রকৃতির মতো শান্ত থাকো — ঝড় আসলেও শিকড় ধরে রাখো।",
+    "🌙 রাতের অন্ধকারই প্রমাণ করে যে তারাগুলো কতটা উজ্জ্বল।",
+    "💎 কঠিন সময়গুলোই তোমাকে গড়ে তোলে। ভাঙো না, গড়ে উঠো।",
+    "🌺 ভালো মানুষ হওয়াটা সবচেয়ে বড় সাফল্য।",
+    "⭐ ছোট ছোট মুহূর্তগুলোই সবচেয়ে সুন্দর স্মৃতি হয়।",
+    "🔥 চেষ্টা করতে থাকো — একদিন না একদিন হবেই।",
+    "🌊 জীবনের ঢেউয়ে ভেসে যেও না, সাঁতার কাটতে শেখো।",
+    "💙 যে মানুষটা সবার জন্য হাসে, তার ব্যথাটাও সবচেয়ে গভীর।",
+    "🌸 ক্লান্তি লাগলে থামো, কিন্তু থেমে যেও না।",
+    "✨ তোমার গল্পটা এখনো শেষ হয়নি। সেরা অধ্যায়টা হয়তো এখনো আসেনি।",
+    "🌿 প্রতিটি নতুন দিন একটি নতুন সুযোগ।",
+    "💫 অন্যকে ভালোবাসলে নিজেও ভালো থাকা যায়।",
+    "🌟 তুমি যতটা ভাবছ, তুমি তার চেয়ে অনেক বেশি শক্তিশালী।",
+    "🍃 শান্তি খুঁজে নাও — বাইরে নয়, নিজের ভেতরে।",
+    "💐 যা হারিয়ে গেছে তার জন্য কাঁদো না, যা আছে তাকে ভালোবাসো।",
+]
+
+_caption_style_idx: list = [0]
+_caption_task_ref: list  = [None]
+
+def _generate_channel_caption() -> str:
+    style = _CAPTION_STYLES[_caption_style_idx[0] % len(_CAPTION_STYLES)]
+    _caption_style_idx[0] += 1
+    style_map = {
+        "motivational":  "অনুপ্রেরণামূলক — মানুষকে এগিয়ে যেতে উৎসাহিত করে",
+        "emotional":     "আবেগময় — হৃদয়ের গভীরে স্পর্শ করে",
+        "philosophical": "দার্শনিক — জীবন ও সত্য নিয়ে গভীর ভাবনা",
+        "nature":        "প্রকৃতি-নির্ভর — নদী, আকাশ, বৃষ্টি, ফুলের রূপক",
+        "love_of_life":  "জীবনের প্রতি ভালোবাসা — কৃতজ্ঞতা ও আনন্দ",
+        "wisdom":        "জ্ঞানগর্ভ — জীবনের শিক্ষা ও অভিজ্ঞতা",
+        "inspirational": "অনুপ্রেরণাদায়ক — স্বপ্ন ও সম্ভাবনার কথা",
+        "poetic":        "কাব্যিক — সুন্দর ভাষায় অনুভূতির প্রকাশ",
+        "thoughtful":    "চিন্তাশীল — মানুষকে ভাবায় এমন কথা",
+    }
+    style_desc = style_map.get(style, "অনুপ্রেরণামূলক")
+    phase_bn = {"morning":"সকাল","day":"দিন","evening":"সন্ধ্যা","night":"রাত"}.get(phase_now(),"দিন")
+    prompt = (
+        f"একটি সুন্দর বাংলা ক্যাপশন লেখো Telegram channel-এর জন্য।\n"
+        f"Style: {style_desc}\n"
+        f"সময়: {phase_bn}\n\n"
+        f"নিয়ম:\n"
+        f"- সম্পূর্ণ বাংলায়\n"
+        f"- ২-৪ বাক্য, ১৫০-২৫০ অক্ষর\n"
+        f"- শুরুতে ১-২টি emoji\n"
+        f"- গভীর, সুন্দর, মানবিক\n"
+        f"- কোনো hashtag বা cliché নয়\n"
+        f"- শুধু caption text, কোনো explanation নয়।"
+    )
+    if not GROQ_CAPTION_KEYS:
+        return random.choice(_CAPTION_FALLBACKS)
+    try:
+        data = _groq_chat_request_with_keys({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content":
+                 "তুমি একজন expert বাংলা content writer। Telegram channel-এর জন্য গভীর, সুন্দর, "
+                 "মানবিক বাংলা caption লেখো। প্রতিটি caption unique এবং হৃদয়গ্রাহী।"},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.95, "max_tokens": 220,
+        }, GROQ_CAPTION_KEYS)
+        text = (data["choices"][0]["message"]["content"] or "").strip()
+        text = re.sub(r'^["\']|["\']$', "", text).strip()
+        if len(text) > 40:
+            return text
+    except Exception as e:
+        logger.warning("Caption Groq failed: %s", e)
+    return random.choice(_CAPTION_FALLBACKS)
+
+async def _caption_channel_loop(bot):
+    if not CAPTION_CHANNEL_ID:
+        return
+    logger.info("Channel caption loop started → %s every %ds", CAPTION_CHANNEL_ID, CAPTION_INTERVAL)
+    await asyncio.sleep(60)
+    while True:
+        try:
+            caption = await asyncio.to_thread(_generate_channel_caption)
+            if caption:
+                await bot.send_message(chat_id=CAPTION_CHANNEL_ID, text=caption)
+                logger.info("Caption posted to %s", CAPTION_CHANNEL_ID)
+        except Exception as e:
+            logger.warning("Caption post failed: %s", e)
+        await asyncio.sleep(CAPTION_INTERVAL)
+
+async def start_caption_loop(bot):
+    if not CAPTION_CHANNEL_ID:
+        return
+    task = asyncio.create_task(_caption_channel_loop(bot))
+    _caption_task_ref[0] = task
+
+async def on_captiontest(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        await update.effective_message.reply_text("🔒 Owner only.")
+        return
+    if not CAPTION_CHANNEL_ID:
+        await update.effective_message.reply_text("❌ Set CAPTION_CHANNEL_ID env var first.")
+        return
+    thinking = await update.effective_message.reply_text("✍️ Generating...")
+    caption = await asyncio.to_thread(_generate_channel_caption)
+    await thinking.edit_text(
+        f"📝 <b>Preview:</b>\n\n{html.escape(caption)}\n\n"
+        f"<i>Posting to {html.escape(CAPTION_CHANNEL_ID)}...</i>",
+        parse_mode=ParseMode.HTML
+    )
+    try:
+        await context.bot.send_message(chat_id=CAPTION_CHANNEL_ID, text=caption)
+        await update.effective_message.reply_text("✅ Posted!")
+    except Exception as e:
+        await update.effective_message.reply_text(f"❌ {html.escape(str(e)[:120])}")
+
+async def on_captionstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user or not is_super_admin(user.id):
+        await update.effective_message.reply_text("🔒 Owner only.")
+        return
+    alive  = bool(_caption_task_ref[0] and not _caption_task_ref[0].done())
+    ch     = html.escape(CAPTION_CHANNEL_ID or "Not set")
+    itv    = CAPTION_INTERVAL // 60
+    h_keys = len(GROQ_HOURLY_KEYS)
+    c_keys = len(GROQ_CAPTION_KEYS)
+    await update.effective_message.reply_text(
+        f"📢 <b>Caption System</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"Channel:      <code>{ch}</code>\n"
+        f"Interval:     <b>{itv}m</b>\n"
+        f"Loop:         {'🟢 Running' if alive else '🔴 Stopped'}\n"
+        f"Hourly keys:  <b>{h_keys}</b>\n"
+        f"Caption keys: <b>{c_keys}</b>",
+        parse_mode=ParseMode.HTML
+    )
+
 async def post_init(application):
     delete_webhook()
     commands = [
@@ -6282,7 +6467,15 @@ async def post_init(application):
     except Exception:
         logger.exception("Failed to restore forward tasks")
 
-    logger.info("🌸 Maya Ultra v10 — ready")
+    # Start channel caption loop
+    try:
+        await start_caption_loop(application.bot)
+        if CAPTION_CHANNEL_ID:
+            logger.info("📢 Channel caption loop started → %s", CAPTION_CHANNEL_ID)
+    except Exception:
+        logger.exception("Failed to start caption loop")
+
+    logger.info("🌸 Maya Ultra — ready")
 
 def build_app():
     application = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
@@ -6358,6 +6551,8 @@ def build_app():
     application.add_handler(CommandHandler("broadcastphoto",     on_broadcast))
     application.add_handler(CommandHandler("broadcastvoice",     on_broadcast))
     application.add_handler(CommandHandler("broadcast",          on_broadcast))
+    application.add_handler(CommandHandler("captiontest",        on_captiontest))
+    application.add_handler(CommandHandler("captionstatus",       on_captionstatus))
     application.add_handler(CommandHandler("groupbrowser",       on_groupbrowser))
     application.add_handler(CommandHandler("broadcastone",       on_broadcastone))
 
