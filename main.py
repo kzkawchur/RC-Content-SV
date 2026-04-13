@@ -6045,18 +6045,30 @@ def poll_set_msg(poll_id: str, msg_id: int):
         conn.commit()
 
 def poll_vote(poll_id: str, user_id: int, opt_idx: int) -> tuple[bool, str]:
-    """Returns (success, message)."""
+    """Returns (success, message). Thread-safe via SQLite."""
     row = poll_get(poll_id)
-    if not row: return False, "Poll not found."
-    if row["status"] != "open": return False, "This poll is closed."
-    votes = _json2.loads(row["votes"] or "{}")
-    uid   = str(user_id)
-    if uid in votes: return False, f"You already voted for option {votes[uid]+1}."
-    opts  = _json2.loads(row["options"])
-    if opt_idx < 0 or opt_idx >= len(opts): return False, "Invalid option."
+    if not row:
+        return False, "Poll not found."
+    if row["status"] != "open":
+        return False, "This poll is closed."
+    try:
+        votes = _json2.loads(row["votes"] or "{}")
+        opts  = _json2.loads(row["options"])
+    except Exception:
+        return False, "Poll data error."
+    uid = str(user_id)
+    if uid in votes:
+        prev = int(votes[uid])
+        label = opts[prev] if 0 <= prev < len(opts) else f"option {prev+1}"
+        return False, f"Already voted: {label[:30]}"
+    if opt_idx < 0 or opt_idx >= len(opts):
+        return False, "Invalid option."
     votes[uid] = opt_idx
     with db_connect() as conn:
-        conn.execute("UPDATE polls SET votes=? WHERE poll_id=?", (_json2.dumps(votes), poll_id))
+        conn.execute(
+            "UPDATE polls SET votes=? WHERE poll_id=?",
+            (_json2.dumps(votes), poll_id)
+        )
         conn.commit()
     return True, opts[opt_idx]
 
@@ -6078,36 +6090,36 @@ def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
         if 0 <= v < len(opts):
             counts[v] += 1
 
-    # Modern poll card
-    created = ""
     try:
-        from datetime import datetime as _dt2
         ts = int(row["created_at"] or 0)
-        created = _dt2.fromtimestamp(ts, tz=__import__("zoneinfo").ZoneInfo(TIMEZONE_NAME)).strftime("%d %b · %I:%M %p") if ts else ""
+        created = local_now().strftime("%d %b · %I:%M %p") if not ts else                   datetime.fromtimestamp(ts, ZoneInfo(TIMEZONE_NAME)).strftime("%d %b · %I:%M %p")
     except Exception:
-        pass
+        created = ""
 
     lines = [
-        f"📊 <b>Poll</b>  <code>{status}</code>",
+        f"📊 <b>Poll</b>  {status}",
         f"<i>{created}</i>" if created else "",
         f"━━━━━━━━━━━━━━━━━━",
         f"❓ <b>{q}</b>",
         "",
     ]
 
-    opt_letters = ["A","B","C","D","E","F"]  # display letters in body
-    winner_idx = counts.index(max(counts)) if total > 0 else -1
+    opt_letters = ["A","B","C","D","E","F"]
+    winner_idx  = counts.index(max(counts)) if total > 0 else -1
     for i, (opt, cnt) in enumerate(zip(opts, counts)):
-        pct    = round(cnt / max(1, total) * 100)
+        pct    = round(cnt / max(1, total) * 100) if total > 0 else 0
         filled = round(pct / 10)
-        bar    = "▰" * filled + "▱" * (10 - filled)
+        bar    = "█" * filled + "░" * (10 - filled)
         letter = opt_letters[i] if i < len(opt_letters) else str(i+1)
-        crown  = " 👑" if (i == winner_idx and total > 0 and row["status"] == "closed") else ""
+        is_winner = (i == winner_idx and total > 0 and (row["status"] == "closed" or closed))
+        crown  = " 👑" if is_winner else ""
+        pct_str = f"<b>{pct}%</b>" if is_winner else f"{pct}%"
         lines.append(f"<b>{letter}.</b> {html.escape(opt)}{crown}")
-        lines.append(f"   {bar} {pct}%  <i>({cnt} vote{'s' if cnt!=1 else ''})</i>")
+        lines.append(f"   {bar} {pct_str} — {cnt} vote{'s' if cnt != 1 else ''}")
         lines.append("")
 
-    lines.append(f"<i>👥 {total} vote{'s' if total!=1 else ''} total</i>")
+    suffix = "  ·  <b>Vote closed</b>" if (row["status"] == "closed" or closed) else "  ·  tap to vote"
+    lines.append(f"<i>👥 {total} vote{'s' if total != 1 else ''}{suffix}</i>")
 
     # Buttons
     _btn_letters = ["🇦","🇧","🇨","🇩","🇪","🇫"]
@@ -6187,15 +6199,27 @@ async def on_poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "vote":
         poll_id = parts[2]
-        opt_idx = int(parts[3])
+        try:
+            opt_idx = int(parts[3])
+        except (IndexError, ValueError):
+            await query.answer("Invalid option.", True)
+            return
         ok, msg_txt = poll_vote(poll_id, user.id, opt_idx)
-        await query.answer(f"✅ {msg_txt[:60]}" if ok else f"⚠️ {msg_txt[:60]}", show_alert=not ok)
+        # Always answer the callback query first (Telegram requires this within 10s)
+        await query.answer(
+            f"✅ Voted: {msg_txt[:50]}" if ok else f"⚠️ {msg_txt[:60]}",
+            show_alert=False  # No alert = faster UX
+        )
         if ok:
             row = poll_get(poll_id)
             if row:
                 text, markup = poll_render(row)
-                try: await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
-                except: pass
+                try:
+                    await query.edit_message_text(
+                        text, reply_markup=markup, parse_mode=ParseMode.HTML
+                    )
+                except Exception:
+                    pass  # Message unchanged or other error, ignore
         return
 
     if action in ("results", "close"):
@@ -6399,58 +6423,83 @@ async def start_caption_loop(bot):
     _caption_task_ref[0] = task
 
 async def on_captionon(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Enable channel captions for this channel. Must be used in the channel by admin."""
     chat = update.effective_chat
     user = update.effective_user
     msg  = update.effective_message
     if not chat or not user or not msg: return
-
-    # Can be used in channel or private by owner
-    if chat.type == "channel":
-        register_caption_channel(chat.id, chat.title or "")
-        set_caption_channel_enabled(chat.id, 1)
-        await msg.reply_text(
-            f"✅ <b>Caption posts enabled!</b>\n"
-            f"Channel: <b>{html.escape(chat.title or str(chat.id))}</b>\n\n"
-            f"<i>Bot will post captions every {CAPTION_INTERVAL//60}m.</i>",
-            parse_mode=ParseMode.HTML
-        )
-        return
-
     if not is_super_admin(user.id):
         await msg.reply_text("🔒 Owner only.")
         return
-
-    # Owner in private: /captionon <channel_id>
-    if context.args and context.args[0].lstrip("-").isdigit():
-        cid = int(context.args[0])
-        with db_connect() as conn:
-            row = conn.execute("SELECT title FROM caption_channels WHERE chat_id=?", (cid,)).fetchone()
-        title = row["title"] if row else str(cid)
-        set_caption_channel_enabled(cid, 1)
-        register_caption_channel(cid, title)
-        await msg.reply_text(f"✅ Captions enabled for {html.escape(title or str(cid))}")
-    else:
+    if chat.type != "private":
+        await msg.reply_text(
+            "📢 Use this command in <b>private chat</b> with me!\n\n"
+            "<code>/captionon -100XXXXXXXXX</code>\n"
+            "<i>Get channel ID from @getidsbot</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    arg = context.args[0].strip() if context.args else ""
+    if not arg:
         channels = get_caption_channels()
+        itv = CAPTION_INTERVAL // 60
         if not channels:
             await msg.reply_text(
                 "📢 <b>Channel Caption System</b>\n"
                 "━━━━━━━━━━━━━━━━━━\n"
                 "No channels registered yet.\n\n"
-                "<b>How to add a channel:</b>\n"
-                "1. Add bot as admin to your channel\n"
-                "2. Use <code>/captionon</code> in that channel\n"
-                "3. Bot will post captions automatically\n\n"
-                f"<i>Interval: every {CAPTION_INTERVAL//60} minutes</i>",
+                "<b>Setup:</b>\n"
+                "1. Add bot as Admin in your channel\n"
+                "2. Get channel ID via @getidsbot\n"
+                "3. Send: <code>/captionon -100XXXXXXXXX</code>\n\n"
+                f"<i>Posts every {itv} minutes automatically.</i>",
                 parse_mode=ParseMode.HTML
             )
         else:
-            lines = ["📢 <b>Caption Channels</b>", "━━━━━━━━━━━━━━━━━━"]
+            lines2 = ["📢 <b>Caption Channels</b>", "━━━━━━━━━━━━━━━━━━"]
             for ch in channels:
-                last = format_ts(int(ch["last_posted"])) if ch["last_posted"] else "Never"
-                lines.append(f"✅ <b>{html.escape(ch['title'] or str(ch['chat_id']))}</b>")
-                lines.append(f"   Last post: {last}")
-            await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+                last_ts = int(ch["last_posted"] or 0)
+                last = format_ts(last_ts) if last_ts else "Never"
+                lines2.append(f"📣 <b>{html.escape(ch['title'] or str(ch['chat_id']))}</b>  <code>{ch['chat_id']}</code>")
+                lines2.append(f"   Last: {last}")
+            lines2.append("")
+            lines2.append("<i>/captionoff &lt;id&gt; to remove</i>")
+            await msg.reply_text("\n".join(lines2), parse_mode=ParseMode.HTML)
+        return
+    target_id = None
+    target_title = arg
+    if arg.lstrip("-").isdigit():
+        target_id = int(arg)
+    else:
+        try:
+            ch_info = await context.bot.get_chat(arg)
+            target_id    = ch_info.id
+            target_title = ch_info.title or arg
+        except Exception as e2:
+            await msg.reply_text(f"❌ Channel not found: {html.escape(str(e2)[:80])}", parse_mode=ParseMode.HTML)
+            return
+    try:
+        await context.bot.send_message(chat_id=target_id, text="✅ Caption system activated!")
+        try:
+            ch_info2 = await context.bot.get_chat(target_id)
+            target_title = ch_info2.title or target_title
+        except Exception: pass
+        register_caption_channel(target_id, target_title)
+        set_caption_channel_enabled(target_id, 1)
+        await msg.reply_text(
+            f"✅ <b>Registered!</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📣 {html.escape(target_title)}\n"
+            f"🆔 <code>{target_id}</code>\n\n"
+            f"⏰ Posts every <b>{CAPTION_INTERVAL//60}m</b>\n"
+            f"<i>/captiontest to post now</i>",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e3:
+        await msg.reply_text(
+            f"❌ <b>Failed!</b>\n{html.escape(str(e3)[:120])}\n\n"
+            "<b>Check:</b>\n• Bot is Admin in channel\n• Has Post Messages permission",
+            parse_mode=ParseMode.HTML
+        )
 
 async def on_captionoff(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Disable captions for this channel."""
@@ -6505,27 +6554,67 @@ async def on_captionstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     alive    = bool(_caption_task_ref[0] and not _caption_task_ref[0].done())
     channels = get_caption_channels()
-    groq_cnt = len(GROQ_API_KEYS)
     itv      = CAPTION_INTERVAL // 60
     lines = [
-        "📢 <b>Caption System Status</b>",
+        "📢 <b>Caption System</b>",
         "━━━━━━━━━━━━━━━━━━",
-        f"Loop:      {'🟢 Running' if alive else '🔴 Stopped'}",
-        f"Interval:  <b>{itv}m</b>",
-        f"Channels:  <b>{len(channels)}</b>",
-        f"Groq keys: <b>{groq_cnt}</b>  (shared with hourly)",
-        f"AI:        <b>OFF</b>  (built-in captions)",
+        f"Loop:     {'🟢 Running' if alive else '🔴 Stopped'}",
+        f"Interval: <b>{itv}m</b>",
+        f"Channels: <b>{len(channels)}</b>",
+        f"Mode:     Built-in captions (no AI)",
         "",
     ]
     if channels:
-        lines.append("── Active Channels ────────")
+        lines.append("── Registered Channels ────")
         for ch in channels:
-            last = format_ts(int(ch["last_posted"])) if ch["last_posted"] else "Never"
-            lines.append(f"  📣 {html.escape(ch['title'] or str(ch['chat_id']))}")
-            lines.append(f"     Last: {last}")
+            last_ts = int(ch["last_posted"] or 0)
+            last = format_ts(last_ts) if last_ts else "Never"
+            lines.append(f"📣 <b>{html.escape(ch['title'] or str(ch['chat_id']))}</b>")
+            lines.append(f"   <code>{ch['chat_id']}</code>")
+            lines.append(f"   Last post: {last}")
+            lines.append("")
     else:
-        lines.append("<i>No channels. Use /captionon in your channel.</i>")
+        lines.append("<i>No channels registered.</i>")
+        lines.append(f"<code>/captionon -100XXXXXXXXX</code>")
     await update.effective_message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
+
+
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Auto-detect when bot is made admin in a channel — notify owner."""
+    cmu  = update.my_chat_member
+    if not cmu: return
+    chat = cmu.chat
+    new  = cmu.new_chat_member
+
+    # Bot was made admin in a channel
+    if (chat.type == "channel" and
+            new.user.id == context.bot.id and
+            new.status == ChatMemberStatus.ADMINISTRATOR):
+        # Notify all super admins
+        channel_title = chat.title or str(chat.id)
+        for owner_id in SUPER_ADMINS:
+            try:
+                await context.bot.send_message(
+                    chat_id=owner_id,
+                    text=(
+                        f"📣 <b>Bot made admin in a channel!</b>\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"Channel: <b>{html.escape(channel_title)}</b>\n"
+                        f"ID: <code>{chat.id}</code>\n\n"
+                        f"To enable auto-captions:\n"
+                        f"<code>/captionon {chat.id}</code>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+
+    # Bot was removed from channel
+    elif (chat.type == "channel" and
+            new.user.id == context.bot.id and
+            new.status in {ChatMemberStatus.LEFT, ChatMemberStatus.BANNED}):
+        set_caption_channel_enabled(chat.id, 0)
+        logger.info("Bot removed from channel %s — captions disabled", chat.id)
 
 async def post_init(application):
     delete_webhook()
