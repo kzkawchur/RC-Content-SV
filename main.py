@@ -5992,39 +5992,49 @@ import hashlib as _hashlib
 _fact_last_sent: dict[int, str] = {}
 
 _FACTS_EN = [
-    "🧠 The human brain generates about 70,000 thoughts per day.",
-    "🐙 Octopuses have three hearts, blue blood, and nine brains.",
+    "🧠 Your brain generates about 70,000 thoughts every single day.",
+    "🐙 Octopuses have 3 hearts, blue blood, and 9 brains.",
     "🌊 The ocean produces over 50% of Earth's oxygen.",
-    "🍯 Honey never expires — 3,000-year-old honey has been found still edible.",
-    "⚡ A bolt of lightning is 5x hotter than the surface of the Sun.",
+    "🍯 Honey never expires — 3,000-year-old honey is still edible.",
+    "⚡ Lightning is 5x hotter than the surface of the Sun.",
     "🦋 Butterflies taste with their feet.",
-    "🌍 There are more trees on Earth than stars in the Milky Way.",
+    "🌍 Earth has more trees than stars in the Milky Way.",
     "🐘 Elephants are the only animals that cannot jump.",
     "📱 The average person unlocks their phone 150 times per day.",
-    "🎵 Music can physically change your brain structure over time.",
-    "🌙 The Moon drifts 3.8 cm farther from Earth every year.",
-    "🐬 Dolphins have unique names — they use signature whistles.",
-    "🌺 Sunflowers track the Sun daily — called heliotropism.",
-    "💤 Humans spend about 26 years of their life sleeping.",
-    "🦈 Sharks are older than trees — they've existed for 450 million years.",
+    "🎵 Regular music listening physically reshapes your brain.",
+    "🌙 The Moon drifts 3.8 cm farther from Earth each year.",
+    "🐬 Dolphins call each other by name using signature whistles.",
+    "🌻 Sunflowers track the Sun across the sky each day.",
+    "💤 You spend about 26 years of your life asleep.",
+    "🦈 Sharks existed 200 million years before trees evolved.",
+    "🧬 Human DNA is 98.7% identical to chimpanzee DNA.",
+    "🌡️ Venus is hotter than Mercury despite being farther from the Sun.",
+    "🐜 An ant can lift 50 times its own body weight.",
+    "🧪 Your body contains about 37 trillion cells.",
+    "💀 You replace most of your body's cells every 7 to 10 years.",
 ]
 
 _FACTS_BN = [
     "🧠 মানব মস্তিষ্ক প্রতিদিন প্রায় ৭০,০০০ চিন্তা তৈরি করে।",
-    "🐙 অক্টোপাসের তিনটি হৃদয়, নীল রক্ত ও নয়টি মস্তিষ্ক আছে।",
-    "🌊 পৃথিবীর ৫০%+ অক্সিজেন সমুদ্র থেকে আসে।",
-    "🍯 মধু কখনো নষ্ট হয় না — ৩,০০০ বছর পুরনো মধু এখনো খাওয়ার যোগ্য।",
+    "🐙 অক্টোপাসের তিনটি হৃদয় ও নয়টি মস্তিষ্ক আছে।",
+    "🌊 পৃথিবীর ৫০%-এর বেশি অক্সিজেন সমুদ্র থেকে আসে।",
+    "🍯 মধু কখনো নষ্ট হয় না — ৩,০০০ বছরের পুরনো মধু এখনো খাওয়ার যোগ্য।",
     "⚡ বজ্রপাতের তাপমাত্রা সূর্যপৃষ্ঠের চেয়ে ৫ গুণ বেশি।",
     "🦋 প্রজাপতি পা দিয়ে স্বাদ নেয়।",
-    "🌍 পৃথিবীতে মিল্কিওয়ের তারার চেয়ে বেশি গাছ আছে।",
+    "🌍 পৃথিবীতে মিল্কিওয়ের তারার চেয়ে বেশি গাছ রয়েছে।",
     "🐘 হাতি একমাত্র প্রাণী যারা লাফ দিতে পারে না।",
-    "📱 গড়ে মানুষ প্রতিদিন ১৫০ বার ফোন আনলক করে।",
-    "🎵 নিয়মিত সঙ্গীত শুনলে মস্তিষ্কের গঠন বদলে যায়।",
-    "🌙 চাঁদ প্রতি বছর পৃথিবী থেকে ৩.৮ সেমি দূরে সরে যায়।",
-    "🐬 ডলফিনের নিজস্ব নাম থাকে — তারা শিস দিয়ে একে অপরকে ডাকে।",
-    "🌺 সূর্যমুখী সারাদিন সূর্যের দিকে মুখ ঘোরায় — হেলিওট্রপিজম।",
-    "💤 মানুষ জীবনে প্রায় ২৬ বছর ঘুমিয়ে কাটায়।",
+    "📱 গড়ে একজন মানুষ প্রতিদিন ১৫০ বার ফোন আনলক করেন।",
+    "🎵 নিয়মিত সঙ্গীত শুনলে মস্তিষ্কের গঠন পরিবর্তন হয়।",
+    "🌙 চাঁদ প্রতি বছর পৃথিবী থেকে ৩.৮ সেমি দূরে সরে যাচ্ছে।",
+    "🐬 ডলফিনের নিজস্ব নাম আছে — তারা শিস দিয়ে ডাকে।",
+    "🌻 সূর্যমুখী ফুল সারাদিন সূর্যের দিকে মুখ ঘোরায়।",
+    "💤 মানুষ জীবনের প্রায় ২৬ বছর ঘুমিয়ে কাটায়।",
     "🦈 হাঙর গাছের চেয়ে পুরনো — ৪৫ কোটি বছর আগে থেকে আছে।",
+    "🧬 মানব DNA-র ৯৮.৭% শিম্পাঞ্জির সাথে মিলে যায়।",
+    "🌡️ শুক্র গ্রহ সৌরজগতের সবচেয়ে গরম গ্রহ — ৪৬৫°C।",
+    "🐜 পিঁপড়ে নিজের ওজনের ৫০ গুণ ভার বহন করতে পারে।",
+    "💧 পানির রং আসলে হালকা নীল, তবে পাতলা স্তরে রঙহীন দেখায়।",
+    "🧪 মানুষের শরীরে ৩৭ লক্ষ কোটি কোষ রয়েছে।",
 ]
 
 
@@ -6293,43 +6303,60 @@ _FACT_CATEGORIES_BN = [
 ]
 
 def _groq_generate_fact(lang: str) -> str | None:
-    """Generate a fresh, surprising fact using Groq. Returns None on failure."""
+    """Generate a short, complete, verified fact. Max ~80 chars to avoid cutoff."""
     if not GROQ_API_KEYS:
         return None
     cat_list = _FACT_CATEGORIES_BN if lang == "bn" else _FACT_CATEGORIES_EN
     category = cat_list[int(time.time() // 60) % len(cat_list)]
+
     if lang == "bn":
-        prompt = (
+        sys_prompt = (
+            "তুমি একজন বিজ্ঞান ও তথ্য বিশেষজ্ঞ। "
+            "তুমি শুধু সত্য ও যাচাইকৃত তথ্য দাও। "
+            "প্রতিটি fact সংক্ষিপ্ত, সম্পূর্ণ এবং বাংলায়।"
+        )
+        user_prompt = (
             f"বিষয়: {category}\n\n"
-            "একটি সত্যিকারের আশ্চর্যজনক ও অজানা তথ্য বাংলায় লেখো। "
-            "যে তথ্যটা অধিকাংশ মানুষ জানে না। "
-            "১-২ বাক্য, সংখ্যা/পরিসংখ্যান থাকলে ভালো। "
-            "শুরুতে একটি উপযুক্ত emoji। "
-            "শুধু fact, কোনো introduction বা explanation নয়।"
+            "নিয়ম:\n"
+            "- মাত্র ১টি বাক্য (সর্বোচ্চ ১৫ শব্দ)\n"
+            "- সংখ্যা বা পরিসংখ্যান থাকলে ভালো\n"
+            "- শুরুতে ১টি emoji\n"
+            "- সম্পূর্ণ বাক্য — অর্ধেক থেমে যাবে না\n"
+            "- শুধু তথ্যটি লেখো, আর কিছু নয়"
         )
     else:
-        prompt = (
+        sys_prompt = (
+            "You are a science and knowledge expert. "
+            "You share only true, verified facts. "
+            "Keep every fact SHORT and COMPLETE."
+        )
+        user_prompt = (
             f"Topic: {category}\n\n"
-            "Share ONE surprising, little-known fact that most people don't know. "
-            "1-2 sentences. Include specific numbers or statistics if possible. "
-            "Start with a relevant emoji. Just the fact, no preamble."
+            "Rules:\n"
+            "- Exactly 1 sentence (max 15 words)\n"
+            "- Include a number or statistic\n"
+            "- Start with 1 emoji\n"
+            "- COMPLETE sentence — do not trail off\n"
+            "- Just the fact, nothing else"
         )
     try:
         data = _groq_chat_request({
             "model": GROQ_MODEL,
             "messages": [
-                {"role": "system", "content":
-                 "You are a fascinating facts expert. Share surprising, verified, "
-                 "specific facts with exact numbers. Never make up facts."},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": sys_prompt},
+                {"role": "user",   "content": user_prompt},
             ],
-            "temperature": 0.85,
-            "max_tokens": 120,
+            "temperature": 0.75,
+            "max_tokens": 80,   # Short enough to always complete within token limit
         })
         text = (data["choices"][0]["message"]["content"] or "").strip()
-        text = text.strip('"\' ')
-        if len(text) > 20:
+        text = text.strip('"\' ').strip()
+        # Must be complete — ends with punctuation
+        if len(text) > 15 and text[-1] in ".!।?":
             return text
+        # If no ending punctuation, try to add it
+        if len(text) > 15:
+            return text.rstrip(".,!।?") + ("।" if lang == "bn" else ".")
     except Exception as e:
         logger.warning("Fact Groq failed: %s", e)
     return None
@@ -6354,7 +6381,7 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if use_groq:
         try:
             thinking_msg = await msg.reply_text(
-                "🔍 <i>Searching for an amazing fact...</i>",
+                "🔍 <i>Maya is finding an amazing fact...</i>",
                 parse_mode=ParseMode.HTML
             )
         except Exception:
@@ -6377,22 +6404,39 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fact    = random.choice(choices or pool)
         _fact_last_sent[chat_id] = fact
 
-    # Category label
-    if lang == "bn":
-        title     = "💡 অজানা তথ্য"
-        ai_badge  = "🤖 <i>AI Generated</i>" if source == "ai" else "📚 <i>Fact Bank</i>"
-        note      = "আরও জানতে /fact দাও!"
+    # Build premium response
+    if source == "ai":
+        if lang == "bn":
+            badge = "✨ <i>Generated by Maya</i>"
+            note  = "আরও জানতে /fact"
+        else:
+            badge = "✨ <i>Generated by Maya</i>"
+            note  = "/fact for another"
     else:
-        title     = "💡 Fun Fact"
-        ai_badge  = "🤖 <i>AI Generated</i>" if source == "ai" else "📚 <i>Fact Bank</i>"
-        note      = "Type /fact for another!"
+        if lang == "bn":
+            badge = "📚 <i>Maya Fact Bank</i>"
+            note  = "আরও জানতে /fact"
+        else:
+            badge = "📚 <i>Maya Fact Bank</i>"
+            note  = "/fact for another"
 
-    response = (
-        f"{title}\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"{fact}\n\n"
-        f"{ai_badge}  ·  <i>{note}</i>"
-    )
+    # Ensure fact doesn't overflow Telegram message
+    fact_clean = html.escape(fact[:300])  # Hard cap
+
+    if lang == "bn":
+        response = (
+            f"💡 <b>অজানা তথ্য</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"{fact_clean}\n\n"
+            f"{badge}  ·  <i>{note}</i>"
+        )
+    else:
+        response = (
+            f"💡 <b>Fun Fact</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n\n"
+            f"{fact_clean}\n\n"
+            f"{badge}  ·  <i>{note}</i>"
+        )
 
     try:
         if thinking_msg:
