@@ -2221,12 +2221,25 @@ def keyword_reply_variants(lang,matched,chat_id):
 
 # ─── Premium Text Renderers ───────────────────────────────────────────────────
 def _bar(value: int, max_val: int, length: int = 10) -> str:
-    """Render a text progress bar."""
-    filled = round((value / max(1, max_val)) * length)
+    """Render a premium text progress bar."""
+    if max_val <= 0: return "▱" * length
+    ratio  = min(1.0, value / max_val)
+    filled = round(ratio * length)
+    return "▰" * filled + "▱" * (length - filled)
+
+def _bar2(value: int, max_val: int, length: int = 10) -> str:
+    """Block-style bar."""
+    if max_val <= 0: return "░" * length
+    filled = round(min(1.0, value / max_val) * length)
+    return "█" * filled + "░" * (length - filled)
+
+def _pct_bar(pct: int, length: int = 10) -> str:
+    """Percentage bar 0-100."""
+    filled = round(pct / 100 * length)
     return "█" * filled + "░" * (length - filled)
 
 def _medal(rank: int) -> str:
-    return {0:"🥇", 1:"🥈", 2:"🥉"}.get(rank, f"{rank+1}.")
+    return {0:"🥇", 1:"🥈", 2:"🥉", 3:"4️⃣", 4:"5️⃣", 5:"6️⃣", 6:"7️⃣", 7:"8️⃣", 8:"9️⃣", 9:"🔟"}.get(rank, f"{rank+1}.")
 
 def _fmt_num(n: int) -> str:
     if n >= 1_000_000: return f"{n/1_000_000:.1f}M"
@@ -3561,12 +3574,12 @@ async def on_rps_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             game = rps_get_game(game_id)
 
             # Suspense: show locked state
-            await rps_edit(query, game, "Both choices locked... 🔒", "choosing")
-            await asyncio.sleep(1.2)
-
-            # Suspense: revealing
-            await rps_edit(query, game, "Revealing... 🎴", "revealing")
-            await asyncio.sleep(1.0)
+            await rps_edit(query, game, "🔒 Both locked in...", "choosing")
+            await asyncio.sleep(0.8)
+            await rps_edit(query, game, "⏳ Counting down...", "revealing")
+            await asyncio.sleep(0.6)
+            await rps_edit(query, game, "🎴 Revealing...", "revealing")
+            await asyncio.sleep(0.6)
 
             # Final result
             winner = rps_determine_winner(p1_choice, p2_choice)
@@ -4720,11 +4733,12 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rps_w  = (lb_row["rps_wins"] if lb_row else 0) or 0
     xo_w   = (lb_row["xo_wins"] if lb_row else 0) or 0
     total_score = rps_w*2 + xo_w*2 + msgs//20
-    rank_label = ("🏅 Bronze"  if total_score < 20  else
-                  "🥈 Silver"  if total_score < 60  else
-                  "🥇 Gold"    if total_score < 150 else
-                  "💎 Diamond" if total_score < 400 else
-                  "👑 Legend"  if total_score < 1000 else "🌟 Mythic")
+    rank_label = ("🌱 Newcomer"  if total_score < 10  else
+                  "🥉 Bronze"   if total_score < 30  else
+                  "🥈 Silver"  if total_score < 80  else
+                  "🥇 Gold"    if total_score < 200 else
+                  "💎 Diamond" if total_score < 500 else
+                  "👑 Legend"  if total_score < 1200 else "🌟 Mythic")
     # Score bar (out of next rank threshold)
     next_thresh = next((t for t in [20,60,150,400,1000,9999] if t > total_score), 9999)
     score_bar = _bar(total_score, next_thresh, 10)
@@ -4808,8 +4822,11 @@ async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode=ParseMode.HTML
             )
     else:
-        warn_bar  = "🟥" * warn_count + "⬜" * (MAX_WARNS - warn_count)
-        danger_txt = "🚨 <b>Final warning!</b> One more = auto-kick." if warn_count == MAX_WARNS - 1 else "⚠️ Noted. Behave well."
+        _warn_dots = ["🔴","🔴","🔴"]
+        _warn_dots = ["🔴" if j < warn_count else "⚪" for j in range(MAX_WARNS)]
+        warn_bar   = " ".join(_warn_dots)
+        danger_txt = ("🚨 <b>Final warning!</b> Next = auto-kick." 
+                      if warn_count == MAX_WARNS - 1 else "⚠️ Noted.")
         admin_name = html.escape(clean_name(admin.first_name or "Admin"))
         await msg.reply_text(
             f"⚠️ <b>Warning Issued</b>\n"
@@ -5242,6 +5259,7 @@ async def on_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     max_msgs = max(int(r["msg_count"]) for r in rows) or 1
     medals = ["🥇","🥈","🥉","4️⃣","5️⃣","6️⃣","7️⃣","8️⃣","9️⃣","🔟"]
+    max_msgs = max(int(r["msg_count"]) for r in rows) if rows else 1
     now_top = local_now().strftime("%d %b · %I:%M %p")
     lines = [
         f"💬 <b>Most Active</b>",
@@ -6122,7 +6140,7 @@ def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
     lines.append(f"<i>👥 {total} vote{'s' if total != 1 else ''}{suffix}</i>")
 
     # Buttons
-    _btn_letters = ["🇦","🇧","🇨","🇩","🇪","🇫"]
+    _btn_letters = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣"]
     if row["status"] == "closed" or closed:
         markup = InlineKeyboardMarkup([[InlineKeyboardButton("🔒 Poll Closed", callback_data="poll|noop|0")]])
     else:
@@ -6223,41 +6241,169 @@ async def on_poll_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if action in ("results", "close"):
-        poll_id = parts[2]
+        try:
+            poll_id = parts[2]
+        except IndexError:
+            await query.answer("Invalid poll.", True); return
         row = poll_get(poll_id)
-        if not row: await query.answer("Poll not found.", True); return
-        # Only creator can close
-        if action == "close" and int(row["creator_id"]) != int(user.id):
-            await query.answer("Only the poll creator can close it.", True); return
+        if not row:
+            await query.answer("Poll not found.", True); return
         if action == "close":
+            if int(row["creator_id"]) != int(user.id):
+                await query.answer("Only the poll creator can close it.", True); return
             poll_close(poll_id)
             row = poll_get(poll_id)
-        text, markup = poll_render(row, closed=(action=="close"))
-        await query.answer("📊 Poll closed!" if action=="close" else "📊 Current results")
-        try: await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
-        except: pass
+            await query.answer("🔒 Poll closed!")
+        else:
+            await query.answer()  # answer immediately — prevents timeout
+        text, markup = poll_render(row, closed=(action == "close"))
+        try:
+            await query.edit_message_text(text, reply_markup=markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
 
 # ─── Anonymous Confession System ──────────────────────────────────────────────
+# Per-chat fact cooldown for Groq (avoid spam)
+_fact_groq_cooldown: dict[int, float] = {}
+_FACT_GROQ_COOLDOWN = 30  # seconds between Groq fact calls
+
+_FACT_CATEGORIES_EN = [
+    "space and astronomy",
+    "human brain and psychology",
+    "animals and nature",
+    "history and ancient civilizations",
+    "science and physics",
+    "technology and inventions",
+    "oceans and deep sea",
+    "strange and surprising world records",
+    "food science",
+    "the human body",
+]
+_FACT_CATEGORIES_BN = [
+    "মহাকাশ ও জ্যোতির্বিজ্ঞান",
+    "মানব মস্তিষ্ক ও মনোবিজ্ঞান",
+    "প্রাণী ও প্রকৃতি",
+    "ইতিহাস ও প্রাচীন সভ্যতা",
+    "বিজ্ঞান ও পদার্থবিদ্যা",
+    "প্রযুক্তি ও আবিষ্কার",
+    "সমুদ্র ও গভীর সমুদ্র",
+    "অদ্ভুত ও আশ্চর্যজনক তথ্য",
+    "খাদ্য বিজ্ঞান",
+    "মানব শরীর",
+]
+
+def _groq_generate_fact(lang: str) -> str | None:
+    """Generate a fresh, surprising fact using Groq. Returns None on failure."""
+    if not GROQ_API_KEYS:
+        return None
+    cat_list = _FACT_CATEGORIES_BN if lang == "bn" else _FACT_CATEGORIES_EN
+    category = cat_list[int(time.time() // 60) % len(cat_list)]
+    if lang == "bn":
+        prompt = (
+            f"বিষয়: {category}\n\n"
+            "একটি সত্যিকারের আশ্চর্যজনক ও অজানা তথ্য বাংলায় লেখো। "
+            "যে তথ্যটা অধিকাংশ মানুষ জানে না। "
+            "১-২ বাক্য, সংখ্যা/পরিসংখ্যান থাকলে ভালো। "
+            "শুরুতে একটি উপযুক্ত emoji। "
+            "শুধু fact, কোনো introduction বা explanation নয়।"
+        )
+    else:
+        prompt = (
+            f"Topic: {category}\n\n"
+            "Share ONE surprising, little-known fact that most people don't know. "
+            "1-2 sentences. Include specific numbers or statistics if possible. "
+            "Start with a relevant emoji. Just the fact, no preamble."
+        )
+    try:
+        data = _groq_chat_request({
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content":
+                 "You are a fascinating facts expert. Share surprising, verified, "
+                 "specific facts with exact numbers. Never make up facts."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.85,
+            "max_tokens": 120,
+        })
+        text = (data["choices"][0]["message"]["content"] or "").strip()
+        text = text.strip('"\' ')
+        if len(text) > 20:
+            return text
+    except Exception as e:
+        logger.warning("Fact Groq failed: %s", e)
+    return None
+
 async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg  = update.effective_message
     chat = update.effective_chat
     if not msg or not chat: return
-    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
-    pool = _FACTS_BN if lang == "bn" else _FACTS_EN
-    last = _fact_last_sent.get(chat.id, "")
-    choices = [f for f in pool if f != last]
-    fact = random.choice(choices or pool)
-    _fact_last_sent[chat.id] = fact
-    title = "মজাদার তথ্য" if lang == "bn" else "Fun Fact"
-    note  = "আরেকটার জন্য /fact দাও!" if lang == "bn" else "Type /fact for another!"
+
+    lang   = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    chat_id = chat.id if chat else 0
+
+    # Check Groq cooldown (per chat)
+    now = time.time()
+    last_groq = _fact_groq_cooldown.get(chat_id, 0)
+    use_groq  = (now - last_groq) >= _FACT_GROQ_COOLDOWN and bool(GROQ_API_KEYS)
+
     await human_delay_and_action(context, update)
-    await msg.reply_text(
-        f"💡 <b>{title}</b>\n"
+
+    # Show "thinking" for Groq
+    thinking_msg = None
+    if use_groq:
+        try:
+            thinking_msg = await msg.reply_text(
+                "🔍 <i>Searching for an amazing fact...</i>",
+                parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+
+    fact = None
+    source = "builtin"
+
+    if use_groq:
+        _fact_groq_cooldown[chat_id] = now
+        fact = await asyncio.to_thread(_groq_generate_fact, lang)
+        if fact:
+            source = "ai"
+
+    # Fallback to built-in
+    if not fact:
+        pool    = _FACTS_BN if lang == "bn" else _FACTS_EN
+        last    = _fact_last_sent.get(chat_id, "")
+        choices = [f for f in pool if f != last]
+        fact    = random.choice(choices or pool)
+        _fact_last_sent[chat_id] = fact
+
+    # Category label
+    if lang == "bn":
+        title     = "💡 অজানা তথ্য"
+        ai_badge  = "🤖 <i>AI Generated</i>" if source == "ai" else "📚 <i>Fact Bank</i>"
+        note      = "আরও জানতে /fact দাও!"
+    else:
+        title     = "💡 Fun Fact"
+        ai_badge  = "🤖 <i>AI Generated</i>" if source == "ai" else "📚 <i>Fact Bank</i>"
+        note      = "Type /fact for another!"
+
+    response = (
+        f"{title}\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
         f"{fact}\n\n"
-        f"<i>{note}</i>",
-        parse_mode=ParseMode.HTML
+        f"{ai_badge}  ·  <i>{note}</i>"
     )
+
+    try:
+        if thinking_msg:
+            await thinking_msg.edit_text(response, parse_mode=ParseMode.HTML)
+        else:
+            await msg.reply_text(response, parse_mode=ParseMode.HTML)
+    except Exception:
+        try:
+            await msg.reply_text(response, parse_mode=ParseMode.HTML)
+        except Exception:
+            pass
 
 # ─── Ship / Compatibility ─────────────────────────────────────────────────────
 
@@ -6379,19 +6525,22 @@ _CAPTION_BANK = {
 _caption_sent_idx: dict[int, int] = {}  # chat_id -> last index
 _caption_task_ref: list = [None]
 
-def _pick_channel_caption(chat_id: int) -> str:
-    """Pick next caption from bank, rotating through all captions."""
+def _pick_builtin_caption(chat_id: int) -> str:
+    """Rotate through built-in caption bank. Phase-aware."""
     phase = phase_now()
-    # Blend phase captions with general
-    pool = _CAPTION_BANK.get(phase, []) + _CAPTION_BANK["general"]
-    # Deduplicate while preserving order
-    seen: set = set(); unique_pool: list = []
+    pool  = _CAPTION_BANK.get(phase, []) + _CAPTION_BANK["general"]
+    seen: set = set(); unique: list = []
     for c in pool:
-        if c not in seen: seen.add(c); unique_pool.append(c)
+        if c not in seen: seen.add(c); unique.append(c)
     idx = _caption_sent_idx.get(chat_id, 0)
-    caption = unique_pool[idx % len(unique_pool)]
-    _caption_sent_idx[chat_id] = (idx + 1) % len(unique_pool)
+    caption = unique[idx % len(unique)]
+    _caption_sent_idx[chat_id] = (idx + 1) % len(unique)
     return caption
+
+def _get_channel_caption(chat_id: int) -> str:
+    """Get next caption from built-in bank. Phase-aware rotation."""
+    return _pick_builtin_caption(chat_id)
+
 
 async def _caption_channel_loop(bot):
     """Posts captions to ALL channels where bot is admin. No Groq used."""
@@ -6403,7 +6552,7 @@ async def _caption_channel_loop(bot):
             if channels:
                 for ch in channels:
                     chat_id = int(ch["chat_id"])
-                    caption = _pick_channel_caption(chat_id)
+                    caption = _get_channel_caption(chat_id)
                     try:
                         await bot.send_message(chat_id=chat_id, text=caption)
                         update_caption_last_posted(chat_id)
@@ -6561,7 +6710,7 @@ async def on_captionstatus(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Loop:     {'🟢 Running' if alive else '🔴 Stopped'}",
         f"Interval: <b>{itv}m</b>",
         f"Channels: <b>{len(channels)}</b>",
-        f"Mode:     Built-in captions (no AI)",
+        f"Mode:     📚 Built-in caption bank",
         "",
     ]
     if channels:
