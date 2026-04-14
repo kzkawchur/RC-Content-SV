@@ -2258,8 +2258,11 @@ async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     rows = get_chat_leaderboard(chat.id, limit=15)
     if not rows:
         await msg.reply_text(
-            "🏆 <b>Leaderboard</b>\n━━━━━━━━━━━━━━━━━━\n"
-            "<i>No game data yet!\n\nPlay /rps, /xo, /luckybox or /tod to appear here.</i>",
+            "🏆 <b>Leaderboard</b>\n"
+            "━━━━━━━━━━━━━━━━━━\n\n"
+            "<i>No players yet!</i>\n\n"
+            "🎮 /rps  ⭕ /xo  🎁 /luckybox  🎭 /tod\n\n"
+            "<i>Play games to claim your spot!</i>",
             parse_mode=ParseMode.HTML
         )
         return
@@ -5138,7 +5141,7 @@ async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _ask_cooldowns[chat.id] = now
     lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
     await human_delay_and_action(context, update)
-    thinking = await msg.reply_text("🧠 <i>Thinking...</i>", parse_mode=ParseMode.HTML)
+    thinking = await msg.reply_text("🧠 <i>Maya is thinking...</i>", parse_mode=ParseMode.HTML)
     def _do_ask():
         sys_prompt = (
             "You are Maya, a helpful and warm Telegram group assistant. "
@@ -5169,8 +5172,9 @@ async def on_ask(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await thinking.edit_text(
             f"🧠 <b>Maya AI</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"❓ <i>{html.escape(question[:100])}{'...' if len(question)>100 else ''}</i>\n\n"
-            f"💡 {html.escape(answer)}",
+            f"❓ <i>{html.escape(question[:90])}{'...' if len(question)>90 else ''}</i>\n\n"
+            f"{html.escape(answer)}\n\n"
+            f"<i>— Maya</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception:
@@ -5213,7 +5217,7 @@ async def on_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target_lang, direction = "English", "বাংলা → English"
     else:
         target_lang, direction = "Bangla (Bengali)", "English → বাংলা"
-    thinking = await msg.reply_text("🌐 <i>Translating...</i>", parse_mode=ParseMode.HTML)
+    thinking = await msg.reply_text("🌐 <i>Maya is translating...</i>", parse_mode=ParseMode.HTML)
     def _do_translate():
         return _groq_chat_request({
             "model": GROQ_MODEL,
@@ -5234,8 +5238,9 @@ async def on_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await thinking.edit_text(
             f"🌐 <b>Translation</b>  <i>{direction}</i>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"<b>Original:</b> {html.escape(text[:100])}{'...' if len(text)>100 else ''}\n\n"
-            f"<b>Translated:</b> {html.escape(result)}",
+            f"<i>{html.escape(text[:100])}{'...' if len(text)>100 else ''}</i>\n\n"
+            f"<b>→</b> {html.escape(result)}\n\n"
+            f"<i>✨ Translated by Maya</i>",
             parse_mode=ParseMode.HTML
         )
     except Exception:
@@ -5811,20 +5816,62 @@ _WMO_CODES = {
     95: ("⛈️", "Thunderstorm"),       96: ("⛈️", "Thunderstorm + hail"),
 }
 
+# Built-in coordinates for common BD cities (instant, no API call needed)
+_BD_CITY_COORDS = {
+    "dhaka":         (23.8103, 90.4125, "Dhaka, Bangladesh"),
+    "ঢাকা":          (23.8103, 90.4125, "Dhaka, Bangladesh"),
+    "chittagong":    (22.3569, 91.7832, "Chittagong, Bangladesh"),
+    "চট্টগ্রাম":     (22.3569, 91.7832, "Chittagong, Bangladesh"),
+    "sylhet":        (24.8949, 91.8687, "Sylhet, Bangladesh"),
+    "সিলেট":         (24.8949, 91.8687, "Sylhet, Bangladesh"),
+    "rajshahi":      (24.3745, 88.6042, "Rajshahi, Bangladesh"),
+    "রাজশাহী":       (24.3745, 88.6042, "Rajshahi, Bangladesh"),
+    "khulna":        (22.8456, 89.5403, "Khulna, Bangladesh"),
+    "খুলনা":         (22.8456, 89.5403, "Khulna, Bangladesh"),
+    "barishal":      (22.7010, 90.3535, "Barishal, Bangladesh"),
+    "barisal":       (22.7010, 90.3535, "Barishal, Bangladesh"),
+    "বরিশাল":        (22.7010, 90.3535, "Barishal, Bangladesh"),
+    "mymensingh":    (24.7471, 90.4203, "Mymensingh, Bangladesh"),
+    "ময়মনসিংহ":      (24.7471, 90.4203, "Mymensingh, Bangladesh"),
+    "rangpur":       (25.7439, 89.2752, "Rangpur, Bangladesh"),
+    "রংপুর":         (25.7439, 89.2752, "Rangpur, Bangladesh"),
+    "comilla":       (23.4607, 91.1809, "Comilla, Bangladesh"),
+    "cumilla":       (23.4607, 91.1809, "Comilla, Bangladesh"),
+    "কুমিল্লা":      (23.4607, 91.1809, "Comilla, Bangladesh"),
+    "cox's bazar":   (21.4272, 92.0058, "Cox's Bazar, Bangladesh"),
+    "coxsbazar":     (21.4272, 92.0058, "Cox's Bazar, Bangladesh"),
+    "কক্সবাজার":     (21.4272, 92.0058, "Cox's Bazar, Bangladesh"),
+    "gazipur":       (23.9999, 90.4203, "Gazipur, Bangladesh"),
+    "গাজীপুর":       (23.9999, 90.4203, "Gazipur, Bangladesh"),
+    "narayanganj":   (23.6238, 90.4960, "Narayanganj, Bangladesh"),
+    "jessore":       (23.1664, 89.2182, "Jessore, Bangladesh"),
+    "jashore":       (23.1664, 89.2182, "Jessore, Bangladesh"),
+    "যশোর":          (23.1664, 89.2182, "Jessore, Bangladesh"),
+    "bogra":         (24.8465, 89.3773, "Bogra, Bangladesh"),
+    "বগুড়া":         (24.8465, 89.3773, "Bogra, Bangladesh"),
+    "dinajpur":      (25.6279, 88.6332, "Dinajpur, Bangladesh"),
+}
+
 def _geocode_city(city: str) -> tuple[float, float, str] | None:
-    """Returns (lat, lon, display_name) or None."""
+    """Returns (lat, lon, display_name) or None. Checks built-in BD coords first."""
+    key = city.lower().strip()
+    # Fast path: built-in BD cities
+    if key in _BD_CITY_COORDS:
+        lat, lon, name = _BD_CITY_COORDS[key]
+        return lat, lon, name
+    # Fallback: Nominatim geocoding API
     try:
         resp = requests.get(
             "https://nominatim.openstreetmap.org/search",
-            params={"q": city, "format": "json", "limit": 1},
-            headers={"User-Agent": f"{BOT_NAME}WeatherBot/1.0"},
-            timeout=8,
+            params={"q": city, "format": "json", "limit": 1, "addressdetails": 1},
+            headers={"User-Agent": f"{BOT_NAME}/1.0 (weather bot)"},
+            timeout=10,
         )
         data = resp.json()
         if data:
             return float(data[0]["lat"]), float(data[0]["lon"]), data[0].get("display_name", city)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Geocode failed for '%s': %s", city, e)
     return None
 
 def _fetch_weather(lat: float, lon: float) -> dict | None:
@@ -5833,16 +5880,30 @@ def _fetch_weather(lat: float, lon: float) -> dict | None:
         resp = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
-                "latitude": lat, "longitude": lon,
-                "current": "temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weathercode,windspeed_10m,winddirection_10m,uv_index",
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode",
-                "timezone": "Asia/Dhaka",
+                "latitude": round(lat, 4),
+                "longitude": round(lon, 4),
+                "current_weather": "true",
+                "current": ",".join([
+                    "temperature_2m", "relative_humidity_2m",
+                    "apparent_temperature", "precipitation",
+                    "weather_code", "windspeed_10m", "winddirection_10m",
+                ]),
+                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                "timezone": "auto",
                 "forecast_days": 3,
             },
-            timeout=8,
+            timeout=15,
         )
-        return resp.json()
-    except Exception:
+        data = resp.json()
+        # Return if we got any valid response
+        if isinstance(data, dict) and "error" not in data:
+            logger.info("Weather fetched OK for lat=%s lon=%s", lat, lon)
+            return data
+        if "error" in data:
+            logger.warning("Weather API error: %s", data.get("reason", data))
+        return None
+    except Exception as e:
+        logger.warning("Weather fetch failed: %s", e)
         return None
 
 def _wind_direction(deg: float) -> str:
@@ -5890,7 +5951,7 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await human_delay_and_action(context, update)
         thinking = await msg.reply_text(
-            f"🔍 <i>Fetching weather for {html.escape(city_query)}...</i>",
+            f"🌐 <i>Checking weather for <b>{html.escape(city_query)}</b>...</i>",
             parse_mode=ParseMode.HTML
         )
 
@@ -5915,17 +5976,17 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # Parse current weather
-    cur = weather_data.get("current", {})
+    # Parse current weather (handle both API response formats)
+    cur   = weather_data.get("current", weather_data.get("current_weather", {}))
     daily = weather_data.get("daily", {})
 
-    temp     = cur.get("temperature_2m", "—")
-    feels    = cur.get("apparent_temperature", "—")
+    temp     = cur.get("temperature_2m", cur.get("temperature", "—"))
+    feels    = cur.get("apparent_temperature", temp)
     humidity = cur.get("relative_humidity_2m", "—")
     precip   = cur.get("precipitation", 0)
-    wcode    = int(cur.get("weathercode", 0))
-    wind_sp  = cur.get("windspeed_10m", "—")
-    wind_dir = cur.get("winddirection_10m", 0)
+    wcode    = int(cur.get("weather_code", cur.get("weathercode", cur.get("weathercode", 0))))
+    wind_sp  = cur.get("windspeed_10m", cur.get("windspeed", "—"))
+    wind_dir = cur.get("winddirection_10m", cur.get("winddirection", 0))
     uv       = cur.get("uv_index", 0)
 
     w_icon, w_desc = _WMO_CODES.get(wcode, ("🌡️", "Unknown"))
@@ -5940,12 +6001,13 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3-day forecast
     forecast_lines = []
     days = ["Today", "Tomorrow", "Day 3"]
-    d_codes  = daily.get("weathercode", [])
+    d_codes  = daily.get("weather_code", daily.get("weathercode", []))
     d_maxes  = daily.get("temperature_2m_max", [])
     d_mins   = daily.get("temperature_2m_min", [])
     d_precip = daily.get("precipitation_sum", [])
     for i in range(min(3, len(d_codes))):
-        fi, fd = _WMO_CODES.get(int(d_codes[i]), ("🌡️", ""))
+        try: fi, fd = _WMO_CODES.get(int(d_codes[i]), ("🌡️", ""))
+        except: fi, fd = "🌡️", ""
         f_max  = f"{d_maxes[i]:.0f}°" if i < len(d_maxes) else "—"
         f_min  = f"{d_mins[i]:.0f}°"  if i < len(d_mins)  else "—"
         f_rain = f"{d_precip[i]:.1f}mm" if i < len(d_precip) else ""
@@ -5963,20 +6025,22 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         comfort = "—"
 
+    temp_str  = f"{temp}°C" if temp != "—" else "—"
+    feels_str = f"{feels}°C" if feels != "—" else "—"
     lines = [
         f"{w_icon} <b>{html.escape(city_disp)}</b>",
-        f"<code>{now_str}</code>  ·  <i>{w_desc}</i>",
+        f"<i>{now_str}  ·  {w_desc}</i>",
         f"━━━━━━━━━━━━━━━━━━",
         f"",
-        f"🌡  <b>{temp}°C</b>  <i>(feels like {feels}°C)</i>",
-        f"💧  Humidity  <b>{humidity}%</b>  ·  {comfort}",
-        f"💨  Wind  <b>{wind_sp} km/h {wind_label}</b>",
-        f"🌧  Rain  <b>{precip} mm</b>  ·  UV: <b>{uv_label}</b>",
+        f"🌡  Temperature:  <b>{temp_str}</b>  <i>(feels {feels_str})</i>",
+        f"💧  Humidity:     <b>{humidity}%</b>  ·  {comfort}",
+        f"💨  Wind:         <b>{wind_sp} km/h {wind_label}</b>",
+        f"🌧  Rain:         <b>{precip} mm</b>",
         f"",
-        f"── Forecast ───────────────",
+        f"── 3-Day Forecast ─────────",
     ] + forecast_lines + [
         f"",
-        f"<i>Open-Meteo  ·  Cached 10 min</i>",
+        f"<i>📡 Maya Weather  ·  Open-Meteo</i>",
     ]
 
     await msg.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
@@ -5989,7 +6053,7 @@ import hashlib as _hashlib
 
 # ─── Interactive Poll System ──────────────────────────────────────────────────
 # ─── Poll + Fact data ─────────────────────────────────────────────────────────
-_fact_last_sent: dict[int, str] = {}
+_fact_sent_set: dict[int, set] = {}  # chat_id -> set of sent facts (reset when all shown)
 
 _FACTS_EN = [
     "🧠 Your brain generates about 70,000 thoughts every single day.",
@@ -6395,14 +6459,27 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         fact = await asyncio.to_thread(_groq_generate_fact, lang)
         if fact:
             source = "ai"
+            # Track AI facts too to avoid repetition
+            history = _fact_sent_history.get(chat_id, [])
+            history.append(fact)
+            if len(history) > 15:
+                history = history[-15:]
+            _fact_sent_history[chat_id] = history
+            # Track AI facts to avoid re-showing same text
+            _fact_sent_set.setdefault(chat_id, set()).add(fact[:50])
 
-    # Fallback to built-in
+    # Fallback to built-in — full dedup (no repeat until all shown)
     if not fact:
-        pool    = _FACTS_BN if lang == "bn" else _FACTS_EN
-        last    = _fact_last_sent.get(chat_id, "")
-        choices = [f for f in pool if f != last]
-        fact    = random.choice(choices or pool)
-        _fact_last_sent[chat_id] = fact
+        pool = _FACTS_BN if lang == "bn" else _FACTS_EN
+        sent = _fact_sent_set.get(chat_id, set())
+        # Filter out already-seen facts
+        unseen = [f for f in pool if f not in sent]
+        if not unseen:
+            # All shown — reset and start fresh
+            _fact_sent_set[chat_id] = set()
+            unseen = list(pool)
+        fact = random.choice(unseen)
+        _fact_sent_set.setdefault(chat_id, set()).add(fact)
 
     # Build premium response
     if source == "ai":
