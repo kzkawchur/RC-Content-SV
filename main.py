@@ -5967,7 +5967,11 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lat, lon, geo_name = geo
         weather_data = await asyncio.to_thread(_fetch_weather, lat, lon)
         if not weather_data:
-            await thinking.edit_text("❌ Weather data unavailable. Try again later.")
+            await thinking.edit_text(
+                f"❌ <b>Weather unavailable for</b> <code>{html.escape(city_query)}</code>\n"
+                f"<i>Try again in a moment.</i>",
+                parse_mode=ParseMode.HTML
+            )
             return
 
         _WEATHER_CACHE[city_lower] = (weather_data, time.time(), geo_name)
@@ -6053,7 +6057,8 @@ import hashlib as _hashlib
 
 # ─── Interactive Poll System ──────────────────────────────────────────────────
 # ─── Poll + Fact data ─────────────────────────────────────────────────────────
-_fact_sent_set: dict[int, set] = {}  # chat_id -> set of sent facts (reset when all shown)
+_fact_sent_set: dict[int, set] = {}
+_fact_sent_history: dict[int, list] = {}  # chat_id -> set of sent facts (reset when all shown)
 
 _FACTS_EN = [
     "🧠 Your brain generates about 70,000 thoughts every single day.",
@@ -6411,16 +6416,17 @@ def _groq_generate_fact(lang: str) -> str | None:
                 {"role": "user",   "content": user_prompt},
             ],
             "temperature": 0.75,
-            "max_tokens": 80,   # Short enough to always complete within token limit
+            "max_tokens": 80,
         })
         text = (data["choices"][0]["message"]["content"] or "").strip()
         text = text.strip('"\' ').strip()
-        # Must be complete — ends with punctuation
         if len(text) > 15 and text[-1] in ".!।?":
             return text
-        # If no ending punctuation, try to add it
         if len(text) > 15:
             return text.rstrip(".,!।?") + ("।" if lang == "bn" else ".")
+    except RuntimeError as e:
+        # All keys rate-limited or unavailable — fall through to built-in
+        logger.info("Fact: Groq unavailable (%s), using built-in", str(e)[:60])
     except Exception as e:
         logger.warning("Fact Groq failed: %s", e)
     return None
@@ -6456,16 +6462,24 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if use_groq:
         _fact_groq_cooldown[chat_id] = now
-        fact = await asyncio.to_thread(_groq_generate_fact, lang)
+        try:
+            fact = await asyncio.wait_for(
+                asyncio.to_thread(_groq_generate_fact, lang),
+                timeout=12.0  # Max 12s for fact generation
+            )
+        except asyncio.TimeoutError:
+            logger.warning("Fact Groq timeout for chat %s", chat_id)
+            fact = None
+        except Exception as e:
+            logger.warning("Fact async error: %s", e)
+            fact = None
         if fact:
             source = "ai"
-            # Track AI facts too to avoid repetition
             history = _fact_sent_history.get(chat_id, [])
             history.append(fact)
             if len(history) > 15:
                 history = history[-15:]
             _fact_sent_history[chat_id] = history
-            # Track AI facts to avoid re-showing same text
             _fact_sent_set.setdefault(chat_id, set()).add(fact[:50])
 
     # Fallback to built-in — full dedup (no repeat until all shown)
@@ -6806,7 +6820,7 @@ async def on_captiontest(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Post to all enabled channels
     ok_count = 0
     for ch in channels:
-        caption = _pick_channel_caption(int(ch["chat_id"]))
+        caption = _pick_builtin_caption(int(ch["chat_id"]))
         try:
             await context.bot.send_message(chat_id=int(ch["chat_id"]), text=caption)
             update_caption_last_posted(int(ch["chat_id"]))
