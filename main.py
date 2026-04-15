@@ -3172,6 +3172,24 @@ import asyncio, html, random, time, sqlite3
 from typing import Optional
 
 # ── DB helpers for games ──────────────────────────────────────────────────────
+# ─── Per-user game cooldown (anti-spam) ──────────────────────────────────────
+_game_user_cooldown: dict[tuple, float] = {}  # (user_id, game_name) -> last_ts
+_GAME_COOLDOWN_SECS = 8  # seconds between same game commands per user
+
+def _check_game_cooldown(user_id: int, game: str) -> int:
+    """Returns 0 if OK, else seconds remaining."""
+    key = (user_id, game)
+    last = _game_user_cooldown.get(key, 0)
+    wait = _game_user_cooldown.get((user_id, "any"), 0)  # global per-user
+    elapsed = time.time() - max(last, wait)
+    if elapsed < _GAME_COOLDOWN_SECS:
+        return int(_GAME_COOLDOWN_SECS - elapsed)
+    return 0
+
+def _set_game_cooldown(user_id: int, game: str):
+    _game_user_cooldown[(user_id, game)] = time.time()
+
+
 def init_games_db():
     with db_connect() as conn:
         # Coins ledger
@@ -3441,6 +3459,12 @@ async def on_rps(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat or not user: return
+    if chat.type in {"group","supergroup"}:
+        wait = _check_game_cooldown(user.id, "rps")
+        if wait:
+            await msg.reply_text(f"⏳ {wait}s বাকি আছে। একটু অপেক্ষা করো!", quote=True)
+            return
+        _set_game_cooldown(user.id, "rps")
 
     mode = "pvp"
     challenge_target_id = 0
@@ -3857,6 +3881,12 @@ async def on_xo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat or not user: return
+    if chat.type in {"group","supergroup"}:
+        wait = _check_game_cooldown(user.id, "xo")
+        if wait:
+            await msg.reply_text(f"⏳ {wait}s বাকি আছে।", quote=True)
+            return
+        _set_game_cooldown(user.id, "xo")
     mode = "bot" if (context.args and context.args[0].strip().lower() == "bot") else "pvp"
     creator_name = clean_name(user.full_name or user.first_name or "Player")
     game_id = xo_create_game(chat.id, user.id, creator_name, mode)
@@ -4220,6 +4250,12 @@ async def on_luckybox(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
     if not msg or not chat or not user: return
+    if chat.type in {"group","supergroup"}:
+        wait = _check_game_cooldown(user.id, "luckybox")
+        if wait:
+            await msg.reply_text(f"⏳ {wait}s বাকি আছে।", quote=True)
+            return
+        _set_game_cooldown(user.id, "luckybox")
     creator_name = clean_name(user.full_name or user.first_name or "Player")
     lb_ensure_coins(user.id, creator_name)
     game_id = lb_create_round(chat.id, user.id, creator_name, 5)
@@ -4574,6 +4610,12 @@ TOD_DARES_BN = [
 async def on_tod(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.effective_message; chat = update.effective_chat; user = update.effective_user
     if not msg or not chat or not user: return
+    if chat.type in {"group","supergroup"}:
+        wait = _check_game_cooldown(user.id, "tod")
+        if wait:
+            await msg.reply_text(f"⏳ {wait}s বাকি আছে।", quote=True)
+            return
+        _set_game_cooldown(user.id, "tod")
     lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
     try: await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
     except: pass
@@ -6439,23 +6481,23 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lang   = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
     chat_id = chat.id if chat else 0
 
-    # Check Groq cooldown (per chat)
+    # Per-user fact cooldown (anti-spam)
     now = time.time()
+    user = update.effective_user
+    uid  = user.id if user else 0
+    fact_user_key = (uid, "fact")
+    last_user_fact = _game_user_cooldown.get(fact_user_key, 0)
+    if now - last_user_fact < 10 and chat.type in {"group","supergroup"}:
+        secs_left = int(10 - (now - last_user_fact))
+        await msg.reply_text(f"⏳ Wait {secs_left}s before /fact again.", quote=True)
+        return
+    _game_user_cooldown[fact_user_key] = now
+    # Groq cooldown (per chat — avoids API spam)
     last_groq = _fact_groq_cooldown.get(chat_id, 0)
     use_groq  = (now - last_groq) >= _FACT_GROQ_COOLDOWN and bool(GROQ_API_KEYS)
 
     await human_delay_and_action(context, update)
 
-    # Show "thinking" for Groq
-    thinking_msg = None
-    if use_groq:
-        try:
-            thinking_msg = await msg.reply_text(
-                "🔍 <i>Maya is finding an amazing fact...</i>",
-                parse_mode=ParseMode.HTML
-            )
-        except Exception:
-            pass
 
     fact = None
     source = "builtin"
@@ -6465,22 +6507,14 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             fact = await asyncio.wait_for(
                 asyncio.to_thread(_groq_generate_fact, lang),
-                timeout=12.0  # Max 12s for fact generation
+                timeout=7.0  # 7s max — fail fast, use builtin
             )
-        except asyncio.TimeoutError:
-            logger.warning("Fact Groq timeout for chat %s", chat_id)
-            fact = None
-        except Exception as e:
-            logger.warning("Fact async error: %s", e)
+        except (asyncio.TimeoutError, Exception) as e:
+            logger.info("Fact Groq skipped (%s), using built-in", type(e).__name__)
             fact = None
         if fact:
             source = "ai"
-            history = _fact_sent_history.get(chat_id, [])
-            history.append(fact)
-            if len(history) > 15:
-                history = history[-15:]
-            _fact_sent_history[chat_id] = history
-            _fact_sent_set.setdefault(chat_id, set()).add(fact[:50])
+            _fact_sent_set.setdefault(chat_id, set()).add(fact)
 
     # Fallback to built-in — full dedup (no repeat until all shown)
     if not fact:
@@ -6530,15 +6564,9 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     try:
-        if thinking_msg:
-            await thinking_msg.edit_text(response, parse_mode=ParseMode.HTML)
-        else:
-            await msg.reply_text(response, parse_mode=ParseMode.HTML)
-    except Exception:
-        try:
-            await msg.reply_text(response, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass
+        await msg.reply_text(response, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.warning("Fact reply failed: %s", e)
 
 # ─── Ship / Compatibility ─────────────────────────────────────────────────────
 
