@@ -4874,12 +4874,11 @@ async def on_warn(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       if warn_count == MAX_WARNS - 1 else "⚠️ Noted.")
         admin_name = html.escape(clean_name(admin.first_name or "Admin"))
         await msg.reply_text(
-            f"⚠️ <b>Warning Issued</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"👤 User:   <b>{html.escape(tname)}</b>\n"
-            f"👮 By:     {admin_name}\n"
-            f"📋 Reason: {html.escape(reason)}\n"
-            f"⚡ Warns:  {warn_bar} <b>{warn_count}/{MAX_WARNS}</b>\n\n"
+            f"⚠️ <b>Warning — {html.escape(tname)}</b>\n"
+            f"<blockquote>"
+            f"👮 {admin_name}  ·  {html.escape(reason)}\n"
+            f"⚡ {warn_bar} <b>{warn_count}/{MAX_WARNS}</b>"
+            f"</blockquote>\n"
             f"<i>{danger_txt}</i>",
             parse_mode=ParseMode.HTML
         )
@@ -5279,9 +5278,8 @@ async def on_translate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         await thinking.edit_text(
             f"🌐 <b>Translation</b>  <i>{direction}</i>\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"<i>{html.escape(text[:100])}{'...' if len(text)>100 else ''}</i>\n\n"
-            f"<b>→</b> {html.escape(result)}\n\n"
+            f"<blockquote><i>{html.escape(text[:100])}{'...' if len(text)>100 else ''}</i>\n"
+            f"<b>→</b> {html.escape(result)}</blockquote>"
             f"<i>✨ Translated by Maya</i>",
             parse_mode=ParseMode.HTML
         )
@@ -5369,11 +5367,9 @@ async def on_rules(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await human_delay_and_action(context, update)
     await msg.reply_text(
-        f"📋 <b>Group Rules</b>\n"
-        f"<i>{html.escape(chat.title or '')}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"{html.escape(rules_text)}\n\n"
-        f"<i>Please follow the rules to keep this group a great place! 🌟</i>",
+        f"📋 <b>Group Rules</b>  <i>{html.escape(chat.title or '')}</i>\n"
+        f"<blockquote>{html.escape(rules_text)}</blockquote>\n"
+        f"<i>Follow the rules. Keep it great 🌟</i>",
         parse_mode=ParseMode.HTML
     )
 
@@ -5922,17 +5918,14 @@ def _fetch_weather(lat: float, lon: float) -> dict | None:
         resp = requests.get(
             "https://api.open-meteo.com/v1/forecast",
             params={
-                "latitude": round(lat, 4),
+                "latitude":  round(lat, 4),
                 "longitude": round(lon, 4),
-                "current_weather": "true",
-                "current": ",".join([
-                    "temperature_2m", "relative_humidity_2m",
-                    "apparent_temperature", "precipitation",
-                    "weather_code", "windspeed_10m", "winddirection_10m",
-                ]),
-                "daily": "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
-                "timezone": "auto",
+                "current":   "temperature_2m,relative_humidity_2m,apparent_temperature,"
+                             "precipitation,weather_code,wind_speed_10m,wind_direction_10m,is_day",
+                "daily":     "temperature_2m_max,temperature_2m_min,precipitation_sum,weather_code",
+                "timezone":  "auto",
                 "forecast_days": 3,
+                "wind_speed_unit": "kmh",
             },
             timeout=15,
         )
@@ -6023,7 +6016,7 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pass
 
     # Parse current weather (handle both API response formats)
-    cur   = weather_data.get("current", weather_data.get("current_weather", {}))
+    cur   = weather_data.get("current", {})
     daily = weather_data.get("daily", {})
 
     temp     = cur.get("temperature_2m", cur.get("temperature", "—"))
@@ -6031,9 +6024,9 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     humidity = cur.get("relative_humidity_2m", "—")
     precip   = cur.get("precipitation", 0)
     wcode    = int(cur.get("weather_code", cur.get("weathercode", cur.get("weathercode", 0))))
-    wind_sp  = cur.get("windspeed_10m", cur.get("windspeed", "—"))
-    wind_dir = cur.get("winddirection_10m", cur.get("winddirection", 0))
-    uv       = cur.get("uv_index", 0)
+    wind_sp  = cur.get("wind_speed_10m", cur.get("windspeed_10m","—"))
+    wind_dir = cur.get("wind_direction_10m", cur.get("winddirection_10m", 0))
+    is_day   = int(cur.get("is_day", 1))
 
     w_icon, w_desc = _WMO_CODES.get(wcode, ("🌡️", "Unknown"))
     wind_label = _wind_direction(float(wind_dir)) if wind_dir else "—"
@@ -6257,8 +6250,8 @@ def poll_render(row, closed: bool = False) -> tuple[str, InlineKeyboardMarkup]:
         lines.append(f"   {bar} {pct_str} — {cnt} vote{'s' if cnt != 1 else ''}")
         lines.append("")
 
-    suffix = "  ·  <b>Vote closed</b>" if (row["status"] == "closed" or closed) else "  ·  tap to vote"
-    lines.append(f"<i>👥 {total} vote{'s' if total != 1 else ''}{suffix}</i>")
+    suffix = "🔒 Closed" if (row["status"] == "closed" or closed) else "👆 Tap to vote"
+    lines.append(f"<i>👥 {total} vote{'s' if total != 1 else ''}  ·  {suffix}</i>")
 
     # Buttons
     _btn_letters = ["1️⃣","2️⃣","3️⃣","4️⃣","5️⃣","6️⃣"]
@@ -6548,20 +6541,12 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ensure fact doesn't overflow Telegram message
     fact_clean = html.escape(fact[:300])  # Hard cap
 
-    if lang == "bn":
-        response = (
-            f"💡 <b>অজানা তথ্য</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"{fact_clean}\n\n"
-            f"{badge}  ·  <i>{note}</i>"
-        )
-    else:
-        response = (
-            f"💡 <b>Fun Fact</b>\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"{fact_clean}\n\n"
-            f"{badge}  ·  <i>{note}</i>"
-        )
+    title = "💡 <b>অজানা তথ্য</b>" if lang == "bn" else "💡 <b>Fun Fact</b>"
+    response = (
+        f"{title}\n"
+        f"<blockquote>{fact_clean}</blockquote>\n"
+        f"{badge}  ·  <i>{note}</i>"
+    )
 
     try:
         await msg.reply_text(response, parse_mode=ParseMode.HTML)
