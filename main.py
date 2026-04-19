@@ -2421,8 +2421,9 @@ async def on_leaderboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if i < len(rows) - 1:
             lines.append("")
     lines += [
+        "",
         "━━━━━━━━━━━━━━━━━━",
-        "<i>RPS/XO Win = 2pts  ·  Play more to climb!</i>",
+        f"<i>🎮 RPS/XO = 2pts each  ·  {len(rows)} players ranked</i>",
     ]
     try:
         await context.bot.send_chat_action(chat_id=chat.id, action=ChatAction.TYPING)
@@ -2824,9 +2825,8 @@ async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     st = support_text()
     text = (
         f"💬 <b>Support</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"📌 {html.escape(st)}\n\n"
-        f"<i>Questions · Bugs · Suggestions → always welcome.</i>"
+        f"<blockquote>📌 {html.escape(st)}</blockquote>"
+        f"<i>Questions · Bugs · Ideas — always welcome.</i>"
     )
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -2836,11 +2836,12 @@ async def on_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = html.escape(clean_name(update.effective_user.first_name if update.effective_user else ""))
     role = "👑 Bot Owner" if is_super_admin(uid) else "👤 Member"
     text = (
-        f"🪪 <b>Identity Card</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"Name:  <b>{name}</b>\n"
-        f"ID:    <code>{uid}</code>\n"
-        f"Role:  {role}"
+        f"🪪 <b>ID Card</b>\n"
+        f"<blockquote>"
+        f"<b>{name}</b>\n"
+        f"<code>{uid}</code>\n"
+        f"{role}"
+        f"</blockquote>"
     )
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text(text.strip(), parse_mode=ParseMode.HTML)
@@ -4855,6 +4856,10 @@ def init_ultra_db():
 # ─── Member Profile System ─────────────────────────────────────────────────────
 def _now_ts(): return int(time.time())
 
+def get_warn_count(user_id: int, chat_id: int) -> int:
+    row = get_profile(user_id, chat_id)
+    return int((row["warn_count"] if row else None) or 0)
+
 def ensure_profile(user_id: int, chat_id: int, user_name: str):
     now = _now_ts()
     with db_connect() as conn:
@@ -4916,8 +4921,8 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
                   "👑 Legend"  if total_score < 1200 else "🌟 Mythic")
     # Score bar (out of next rank threshold)
     next_thresh = next((t for t in [20,60,150,400,1000,9999] if t > total_score), 9999)
-    score_bar = _bar(total_score, next_thresh, 10)
-    warn_bar = ("🟥"*warns + "⬜"*(3-min(warns,3))) if warns <= 3 else "🚨🚨🚨"
+    score_bar = _bar(total_score, next_thresh, 8)
+    warn_bar = "🔴"*min(warns,MAX_WARNS) + "⚪"*max(0, MAX_WARNS-warns)
     is_veteran = msgs >= 100
     veteran_badge = " 🏅" if is_veteran else ""
     vip_badge = " ⭐" if is_vip else ""
@@ -4930,7 +4935,7 @@ async def on_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "",
         f"💬 Messages:  <b>{_fmt_num(msgs)}</b>",
         f"⚠️ Warns:     {warn_bar}  ({warns}/{MAX_WARNS})",
-        f"🎮 RPS: {rps_w}  ⭕ XO: {xo_w}",
+        f"🎮 RPS <b>{rps_w}</b>  ⭕ XO <b>{xo_w}</b>  ·  🏆 <b>{rps_w+xo_w}</b> total wins",
         "",
         f"<i>First seen: {first_s}  ·  Last: {last_s}</i>",
     ]
@@ -5248,18 +5253,19 @@ async def on_groupstats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_members = conn.execute(
             "SELECT COUNT(*) c FROM member_profiles WHERE chat_id=?", (chat.id,)
         ).fetchone()["c"]
-    if total_msgs == 0:     activity_label = "😶 No activity yet"
-    elif total_msgs < 50:   activity_label = "🌱 Growing"
-    elif total_msgs < 500:  activity_label = "💬 Active"
-    elif total_msgs < 2000: activity_label = "🔥 Very Active"
-    else:                   activity_label = "⚡ Highly Active"
+    if   total_msgs == 0:    activity_label, activity_bar = "😶 Quiet",          "○○○○○"
+    elif total_msgs < 50:   activity_label, activity_bar = "🌱 Growing",         "●○○○○"
+    elif total_msgs < 200:  activity_label, activity_bar = "💬 Active",          "●●○○○"
+    elif total_msgs < 500:  activity_label, activity_bar = "🔥 Very Active",     "●●●○○"
+    elif total_msgs < 2000: activity_label, activity_bar = "⚡ Highly Active",   "●●●●○"
+    else:                   activity_label, activity_bar = "🌟 Ultra Active",    "●●●●●"
 
     lines = [
         f"📊 <b>Group Stats</b>",
         f"<i>{html.escape(chat.title or '')}  ·  {local_now().strftime('%d %b %Y')}</i>",
         "━━━━━━━━━━━━━━━━━━",
         "",
-        f"⚡ Activity:  <b>{activity_label}</b>",
+        f"⚡ {activity_bar}  <b>{activity_label}</b>",
         f"💬 Messages: <b>{_fmt_num(total_msgs)}</b>",
         f"👥 Members:  <b>{_fmt_num(total_members)}</b>",
         f"👋 Welcomes: <b>{_fmt_num(welcomes)}</b>",
@@ -6198,7 +6204,12 @@ async def on_weather(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Comfort index
     try:
         heat_idx = float(temp) - (0.55 - 0.0055*float(humidity)) * (float(temp) - 14.5)
-        comfort = "🥶 Cold" if heat_idx < 10 else "❄️ Cool" if heat_idx < 18 else "😊 Comfortable" if heat_idx < 26 else "🥵 Hot" if heat_idx < 32 else "🔥 Very Hot"
+        if   heat_idx < 10: comfort = "🥶 Very Cold"
+        elif heat_idx < 18: comfort = "❄️ Cool"
+        elif heat_idx < 24: comfort = "😊 Pleasant"
+        elif heat_idx < 28: comfort = "🌤 Warm"
+        elif heat_idx < 33: comfort = "🥵 Hot"
+        else:               comfort = "🔥 Very Hot"
     except Exception:
         comfort = "—"
 
@@ -6673,10 +6684,16 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Ensure fact doesn't overflow Telegram message
     fact_clean = html.escape(fact[:300])  # Hard cap
 
-    title = "💡 <b>অজানা তথ্য</b>" if lang == "bn" else "💡 <b>Fun Fact</b>"
+    # Pick a style header based on time
+    phase_p = phase_now()
+    headers_bn = {"morning":"🌅 সকালের তথ্য","day":"💡 অজানা তথ্য",
+                  "evening":"🌆 বিকেলের ফ্যাক্ট","night":"🌙 রাতের তথ্য"}
+    headers_en = {"morning":"🌅 Morning Fact","day":"💡 Fun Fact",
+                  "evening":"🌆 Evening Fact","night":"🌙 Night Fact"}
+    title = f"<b>{headers_bn.get(phase_p,'💡 অজানা তথ্য')}</b>" if lang=="bn"             else f"<b>{headers_en.get(phase_p,'💡 Fun Fact')}</b>"
     response = (
         f"{title}\n"
-        f"<blockquote>{fact_clean}</blockquote>\n"
+        f"<blockquote>{fact_clean}</blockquote>"
         f"{badge}  ·  <i>{note}</i>"
     )
 
