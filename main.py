@@ -2762,14 +2762,22 @@ async def on_ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
     phase = phase_now()
     phase_icons = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}
     ph = phase_icons.get(phase, "🕐")
-    status_w = ["Flawless ⚡","Ultra Fast 🚀","All Good 🌸","Sharp 🎯","Smooth 🌊"]
+    codes = ["SYSTEM_OK","ALL_CLEAR","NOMINAL","PROCESSES_RUN","UPTIME_OK"]
+    bars  = ["▓▓▓▓▓▓▓▓▓▓","▓▓▓▓▓▓▓▓▓░","▓▓▓▓▓▓▓░░░"]
+    t_str = now.strftime('%H:%M:%S')
+    d_str = now.strftime('%d %b %Y')
+    ph_str = phase.upper()[:12]
+    code  = random.choice(codes)
+    bar   = random.choice(bars)
     text = (
-        f"🟢 <b>{BOT_NAME}</b>  <code>online</code>\n"
-        f"<blockquote>"
-        f"⏱ <b>{now.strftime('%I:%M:%S %p')}</b>  ·  {now.strftime('%d %b %Y')}\n"
-        f"{ph} {phase.capitalize()}  ·  🌍 {TIMEZONE_NAME}\n"
-        f"⚡ {random.choice(status_w)}"
-        f"</blockquote>"
+        f"<code>╔═══ {BOT_NAME.upper()[:10]} ═══╗</code>\n"
+        f"<code>║ STATUS  ● ONLINE     ║</code>\n"
+        f"<code>║ TIME    {t_str}   ║</code>\n"
+        f"<code>║ DATE    {d_str}  ║</code>\n"
+        f"<code>║ PHASE   {ph_str:<12} ║</code>\n"
+        f"<code>║ SIGNAL  {bar} ║</code>\n"
+        f"<code>║ CODE    {code:<12} ║</code>\n"
+        f"<code>╚══════════════════════╝</code>"
     )
     await human_delay_and_action(context, update)
     await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
@@ -2785,50 +2793,79 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phase_g = phase_now()
         greet = {"morning":"☀️ Good morning","day":"🌤️ Hello","evening":"🌆 Good evening","night":"🌙 Good night"}.get(phase_g,"✨ Hello")
         text = (
-            f"{greet} <b>{html.escape(chat.title or 'everyone')}!</b>\n"
-            f"<b>{BOT_NAME}</b> 🟢 is here\n\n"
+            f"✦ <b>{BOT_NAME}</b> online in <b>{html.escape(chat.title or 'this group')}!</b>\n\n"
             f"<blockquote>"
             f"🎮 /rps  /xo  /luckybox  /tod  /poll\n"
+            f"🔥 /vibe  /predict  /roast  /mayashow\n"
             f"💡 /fact  🌤 /weather  🧠 /ask  🌐 /tr\n"
             f"🏆 /leaderboard  👤 /profile  📋 /rules"
             f"</blockquote>"
-            f"<i>Admins → /status</i>"
+            f"<i>Admins → /status  ·  {greet}!</i>"
         )
     else:
         phase_p = phase_now()
         ph_icon2 = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}.get(phase_p,"✨")
+        user = update.effective_user
+        uname = html.escape(clean_name(user.first_name or "there")) if user else "there"
+        greet_phrases = {
+            "morning": f"Good morning, {uname}! ☀️",
+            "day":     f"Hello, {uname}! 👋",
+            "evening": f"Good evening, {uname}! 🌆",
+            "night":   f"Hey night owl, {uname}! 🌙",
+        }
+        greet = greet_phrases.get(phase_p, f"Hey {uname}!")
         text = (
-            f"{ph_icon2} <b>{BOT_NAME}</b>  <i>Premium Group Bot</i>\n"
-            f"━━━━━━━━━━━━━━━━━━\n\n"
-            f"<b>🛡 Moderation</b>\n"
-            f"  /warn · /ban · /mute · /setmsglimit\n\n"
-            f"<b>🎨 Welcome</b>\n"
-            f"  /setwelcome · /welcomestyle · /setfooter\n\n"
-            f"<b>📨 Messaging</b>\n"
-            f"  /hourly · /setforward · /setreply\n\n"
-            f"<b>🎮 Games & Fun</b>\n"
-            f"  /rps · /xo · /luckybox · /tod\n"
-            f"  /poll · /ship · /riddle · /fact · /quote\n\n"
-            f"<b>🌤 Utilities</b>\n"
-            f"  /weather · /tr · /ask · /rules\n\n"
-            f"<b>📊 Stats</b>\n"
-            f"  /leaderboard · /top · /groupstats · /profile\n\n"
-            f"<b>👑 Owner</b>\n"
-            f"  /groupbrowser · /broadcast · /broadcastone"
+            f"✦ <b>{greet}</b>\n"
+            f"I'm <b>{BOT_NAME}</b> — your premium group companion.\n\n"
+            f"<blockquote>"
+            f"🎮 <b>Games</b>  RPS · XO · LuckyBox · TOD · Poll\n"
+            f"🔥 <b>Unique</b>  Vibe · Predict · Roast · Maya Show\n"
+            f"🧠 <b>AI</b>      Ask · Translate · Facts · Weather\n"
+            f"🛡 <b>Mod</b>    Warn · Ban · LinkGuard · MsgLimit\n"
+            f"✨ <b>Smart</b>  Welcome Cards · Hourly · Keyword AI"
+            f"</blockquote>"
+            f"<i>Add me to your group and the magic begins! 🚀</i>"
         )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+        # Build inline keyboard
+        buttons = []
+        if SUPPORT_GROUP_URL:
+            buttons.append([
+                InlineKeyboardButton("💬 Support Group", url=SUPPORT_GROUP_URL),
+            ])
+        # Add to group button (bot's link)
+        try:
+            bot_username = (await context.bot.get_me()).username
+            add_url = f"https://t.me/{bot_username}?startgroup=true"
+        except Exception:
+            add_url = None
+        row2 = []
+        if add_url:
+            row2.append(InlineKeyboardButton("➕ Add to Group", url=add_url))
+        row2.append(InlineKeyboardButton("📋 Commands", callback_data="start_help"))
+        if row2:
+            buttons.append(row2)
+        markup = InlineKeyboardMarkup(buttons) if buttons else None
+        await update.effective_message.reply_text(
+            text, parse_mode=ParseMode.HTML, reply_markup=markup
+        )
 
 # ─── Premium /support ─────────────────────────────────────────────────────────
 async def on_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await track_group(update, context)
     await human_delay_and_action(context, update)
     st = support_text()
+    markup = None
+    if SUPPORT_GROUP_URL:
+        markup = InlineKeyboardMarkup([[
+            InlineKeyboardButton(f"💬 {SUPPORT_GROUP_NAME}", url=SUPPORT_GROUP_URL)
+        ]])
     text = (
         f"💬 <b>Support</b>\n"
-        f"<blockquote>📌 {html.escape(st)}</blockquote>"
         f"<i>Questions · Bugs · Ideas — always welcome.</i>"
     )
-    await update.effective_message.reply_text(text, parse_mode=ParseMode.HTML)
+    await update.effective_message.reply_text(
+        text, parse_mode=ParseMode.HTML, reply_markup=markup
+    )
 
 # ─── Premium /myid ────────────────────────────────────────────────────────────
 async def on_myid(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4099,6 +4136,24 @@ async def on_xo_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await xo_safe_answer(query, f"Round {new_round} started!")
         turn_name = html.escape(game["player_x_name"] if new_turn == "X" else game["player_o_name"] or BOT_NAME)
         await xo_edit(query, game, f"Round {new_round}! {turn_name} goes first.")
+        # If bot goes first in new round, make bot's move immediately
+        if game["mode"] == "bot" and new_turn == "O":
+            await asyncio.sleep(0.8)
+            board = game["board"]
+            bi = xo_best_bot_move(board)
+            if bi >= 0:
+                board = xo_apply_move(board, bi, "O")
+                bw = xo_check_winner(board)
+                if bw:
+                    new_so = int(game["score_o"] or 0) + 1
+                    xo_save_state(game_id, board, "O", "done", "O",
+                                  score_o=new_so, streak_o=1, streak_x=0, last_winner="O")
+                elif xo_is_draw(board):
+                    xo_save_state(game_id, board, "O", "done", "draw", streak_x=0, streak_o=0)
+                else:
+                    xo_save_state(game_id, board, "X", "active")
+                game = xo_get_game(game_id)
+                await xo_edit(query, game, f"Bot played. Your turn! ✖️")
         return
 
     if action != "tap":
@@ -5955,9 +6010,24 @@ async def on_left_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE
             pass
 
 async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Combined handler: msg-limit check → riddle → ultra → keyword."""
+    """Combined handler: msg-limit → vibe/show track → ultra → keyword."""
     if await check_msg_length_limit(update, context):
         return
+    if await check_link_only(update, context):
+        return
+    # @all mention check
+    txt = (update.effective_message.text or "") if update.effective_message else ""
+    import re as _re_chk
+    if _re_chk.search(r'@all\b', txt, _re_chk.IGNORECASE):
+        await on_all_mention(update, context)
+        return
+    try:
+        if update.effective_user and update.effective_chat:
+            u = update.effective_user
+            _vibe_track_message(update.effective_chat.id, update.effective_message.text or "")
+            _show_track(update.effective_chat.id, u.id, clean_name(u.full_name or u.first_name or ""), update.effective_message.text or "")
+    except Exception:
+        pass
     await handle_ultra_message(update, context)
     await on_keyword_message(update, context)
 
@@ -7062,6 +7132,530 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_caption_channel_enabled(chat.id, 0)
         logger.info("Bot removed from channel %s — captions disabled", chat.id)
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# NEW UNIQUE FEATURES: Vibe Meter · Daily Prediction · Maya Roast · Maya Show
+# ═══════════════════════════════════════════════════════════════════════════════
+
+import hashlib as _hash27
+
+# ─── Group Vibe Meter ─────────────────────────────────────────────────────────
+_vibe_msg_buffer: dict[int, list] = {}   # chat_id -> last 30 messages
+_VIBE_MAX_BUFFER = 30
+
+def _vibe_track_message(chat_id: int, text: str):
+    buf = _vibe_msg_buffer.setdefault(chat_id, [])
+    buf.append(text[:100])
+    if len(buf) > _VIBE_MAX_BUFFER:
+        buf.pop(0)
+
+def _vibe_analyze(chat_id: int) -> dict:
+    msgs  = _vibe_msg_buffer.get(chat_id, [])
+    total = len(msgs)
+    if not msgs:
+        return {"mood":"😶 Quiet","energy":0,"topic":"—","label":"Nothing here yet"}
+    joined = " ".join(msgs).lower()
+    # Score signals
+    fun_words    = sum(joined.count(w) for w in ["haha","lol","😂","🤣","মজা","হাহা","ফান","funny"])
+    sad_words    = sum(joined.count(w) for w in ["😢","কষ্ট","দুঃখ","sad","crying","😭"])
+    hype_words   = sum(joined.count(w) for w in ["🔥","⚡","wow","দারুণ","amazing","great","awesome","শাবাশ"])
+    chill_words  = sum(joined.count(w) for w in ["okay","ঠিক","আচ্ছা","ok","alright","hmm"])
+    food_words   = sum(joined.count(w) for w in ["খাবার","food","rice","biryani","বিরিয়ানি","রান্না","ভাত"])
+    study_words  = sum(joined.count(w) for w in ["পড়া","exam","study","class","পরীক্ষা","question"])
+    sports_words = sum(joined.count(w) for w in ["cricket","football","match","goal","বল","খেলা"])
+    # Topic
+    top_counts   = [("Cricket 🏏",sports_words),("Food 🍽️",food_words),
+                    ("Study 📚",study_words),("Vibes ✨",hype_words),("Fun 😂",fun_words)]
+    topic = max(top_counts, key=lambda x: x[1])
+    topic_str = topic[0] if topic[1] > 0 else "Mixed 🌀"
+    # Energy 0-100
+    energy = min(100, int((fun_words*3 + hype_words*4 + total*2) / max(1,total) * 15))
+    energy = max(5, energy)
+    bar_len = round(energy / 10)
+    bar = "█" * bar_len + "░" * (10 - bar_len)
+    # Mood
+    if fun_words > 3 or (fun_words > 0 and energy > 60):
+        mood, label = "😂 Chaotic Fun", "It's wild in here!"
+    elif hype_words > 2:
+        mood, label = "🔥 Hyped Up", "Energy through the roof!"
+    elif sad_words > 1:
+        mood, label = "💙 Emotional", "Feelings are flowing..."
+    elif food_words > 1:
+        mood, label = "🍽️ Foodie Mode", "Everyone's hungry!"
+    elif chill_words > 2:
+        mood, label = "😌 Chill Zone", "Nice and relaxed."
+    elif total < 5:
+        mood, label = "😶 Quiet", "Wake up, people!"
+    else:
+        mood, label = "💬 Active", "Good conversations going!"
+    return {"mood":mood,"energy":energy,"bar":bar,"topic":topic_str,"label":label,"total":total}
+
+async def on_vibe(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not chat or not msg: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("🌡️ Use /vibe inside a group!")
+        return
+    await human_delay_and_action(context, update)
+    v = _vibe_analyze(chat.id)
+    phase = phase_now()
+    ph = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}.get(phase,"✨")
+    now_s = local_now().strftime("%I:%M %p")
+    await msg.reply_text(
+        f"🌡️ <b>Group Vibe</b>  {ph} {now_s}\n"
+        f"<i>{html.escape(chat.title or '')}</i>\n"
+        f"<blockquote>"
+        f"{v['mood']}\n"
+        f"⚡ Energy:  {v['bar']} <b>{v['energy']}%</b>\n"
+        f"🔥 Topic:   <b>{v['topic']}</b>\n"
+        f"💬 Msgs:    last <b>{v['total']}</b> tracked\n"
+        f"<i>» {v['label']}</i>"
+        f"</blockquote>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Daily Prediction ─────────────────────────────────────────────────────────
+_PREDICT_TEMPLATES_BN = [
+    "আজকে তুমি একটা খুব unexpected সুখবর পাবে।",
+    "আজকে কেউ তোমাকে নিয়ে আলোচনা করছে — সম্ভবত ভালোই।",
+    "আজকে তোমার phone battery যখনই দরকার তখনই শেষ হবে।",
+    "আজকে তুমি এমন কাউকে মিস করবে যাকে মিস করার কথা না।",
+    "আজকে তোমার মেজাজ বিনা কারণেই ভালো থাকবে।",
+    "আজকে বিরিয়ানি খাওয়ার সুযোগ আসতে পারে।",
+    "আজকে তুমি group-এ এমন কিছু বলবে যা সবাই ignore করবে।",
+    "আজকে একটা পুরনো বন্ধুর কথা হঠাৎ মনে পড়বে।",
+    "আজকে তুমি কোনো কাজ করতে যাবে এবং ঘুমিয়ে পড়বে।",
+    "আজকে তোমার জীবনের best decision নেওয়ার দিন।",
+    "আজকে কেউ তোমার হাসি দেখে মুগ্ধ হবে।",
+    "আজকে তোমার ফোনে একটা অপরিচিত নম্বর থেকে call আসবে।",
+    "আজকে রাস্তায় বের হলে কিছু একটা interesting দেখবে।",
+    "আজকে তুমি এমন কিছু খাবে যা খুব মজাদার হবে।",
+    "আজকে universe তোমার পক্ষে — শুধু বিশ্বাস রাখো।",
+    "আজকে তোমার একটা গোপন কথা ফাঁস হয়ে যেতে পারে।",
+    "আজকে তুমি কারো কাছ থেকে একটা surprise পাবে।",
+    "আজকে social media-তে তুমি কিছু একটা viral করবে।",
+    "আজকে তোমার lucky color হলো নীল।",
+    "আজকে যা করার plan করেছ তার অর্ধেকও হবে না।",
+]
+_PREDICT_TEMPLATES_EN = [
+    "Today you'll receive unexpected good news.",
+    "Someone is talking about you right now — probably good things.",
+    "Your phone battery will die exactly when you need it most.",
+    "You'll randomly miss someone you shouldn't be missing.",
+    "Your mood will be good today for absolutely no reason.",
+    "A biryani opportunity may come your way today.",
+    "You'll say something in chat that everyone ignores.",
+    "You'll suddenly think of an old friend today.",
+    "You'll try to do something productive and end up napping.",
+    "Today is the day for your best life decision.",
+    "Someone will be charmed by your smile today.",
+    "An unknown number will call you today.",
+    "You'll see something interesting on the street today.",
+    "You'll eat something surprisingly delicious today.",
+    "The universe is on your side today — just trust it.",
+    "A secret of yours might accidentally slip out today.",
+    "You'll receive a surprise from someone today.",
+    "You'll post something that goes viral on social media.",
+    "Your lucky color today is blue.",
+    "Only half of what you planned today will actually happen.",
+]
+
+_LUCKY_THINGS_BN = ["💛 রঙ: সোনালী","🔢 সংখ্যা: ৭","🌿 উপাদান: পানি","⏰ সময়: বিকেল","🌟 তারা: শুক্র"]
+_LUCKY_THINGS_EN = ["💛 Color: Gold","🔢 Number: 7","🌿 Element: Water","⏰ Time: Evening","🌟 Star: Venus"]
+
+_prediction_cache: dict = {}  # "chat_id:user_id:date" -> prediction
+
+async def on_predict(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user: return
+    await human_delay_and_action(context, update)
+    lang = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
+    today = local_now().strftime("%Y-%m-%d")
+    cache_key = f"{chat.id}:{user.id}:{today}"
+    # Same prediction all day per user
+    if cache_key not in _prediction_cache:
+        # Deterministic but seems random: hash user+date
+        seed_val = int(_hash27.md5(f"{user.id}{today}".encode()).hexdigest(), 16)
+        pool = _PREDICT_TEMPLATES_BN if lang=="bn" else _PREDICT_TEMPLATES_EN
+        lucky = _LUCKY_THINGS_BN if lang=="bn" else _LUCKY_THINGS_EN
+        pred = pool[seed_val % len(pool)]
+        luck = lucky[(seed_val // 7) % len(lucky)]
+        _prediction_cache[cache_key] = (pred, luck)
+    pred, luck = _prediction_cache[cache_key]
+    uname = html.escape(clean_name(user.full_name or user.first_name or ""))
+    title = "🔮 আজকের ভবিষ্যৎ" if lang=="bn" else "🔮 Daily Prediction"
+    lucky_label = "🍀 আজকের ভাগ্য" if lang=="bn" else "🍀 Lucky Today"
+    note = "প্রতিদিন নতুন ভবিষ্যৎ! /predict করো।" if lang=="bn" else "New prediction every day!"
+    await msg.reply_text(
+        f"🔮 <b>{title}</b>  <i>·  {html.escape(uname)}</i>\n"
+        f"<i>{local_now().strftime('%d %b %Y')}</i>\n"
+        f"<blockquote>"
+        f"✦ {html.escape(pred)}\n\n"
+        f"{lucky_label}: <b>{luck}</b>"
+        f"</blockquote>"
+        f"<i>{note}</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Maya Roast Mode ──────────────────────────────────────────────────────────
+_ROAST_COOLDOWN: dict[int, float] = {}  # chat_id -> last roast time
+_ROAST_POOL_BN = [
+    "{name} এতো কিছু জানে, কিন্তু সঠিক সময়ে কিছুই মাথায় আসে না।",
+    "{name} group-এ আসে, দুটো message দেয়, তারপর গায়েব।",
+    "{name}-এর কমেন্ট দেখে মাঝে মাঝে ভাবি — AI লিখেছে নাকি ঘুমের মধ্যে?",
+    "{name} এতো smart হওয়ার পরেও ভুল autocorrect পাঠায়।",
+    "{name} কথা বলে কম কিন্তু reaction দেয় বেশি — true silent observer!",
+    "{name} সবসময় last minute-এ আসে, যেন bus-এর যাত্রী।",
+    "{name} এর jokes বোঝার জন্য PhD লাগে।",
+    "{name} offline থাকলে group অনেক বেশি productive।",
+    "{name} chat এ আসে সবার message পড়তে, নিজে কিছু বলে না।",
+    "{name} কখনো ভুল করে না — কারণ কিছুই করে না।",
+]
+_ROAST_POOL_EN = [
+    "{name} knows so much but forgets it all when it matters.",
+    "{name} drops into the group, sends 2 messages, then vanishes.",
+    "{name}'s comments make me wonder — AI or asleep?",
+    "{name} is so smart yet still sends wrong autocorrect.",
+    "{name} talks less but reacts more — the silent observer!",
+    "{name} always arrives last minute like a bus passenger.",
+    "{name}'s jokes need a PhD to understand.",
+    "{name} being offline makes the group 10x more productive.",
+    "{name} reads everyone's messages but says nothing.",
+    "{name} never makes mistakes — because they never do anything.",
+]
+
+async def on_roast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("🎭 Use /roast inside a group!")
+        return
+    # Cooldown 60s per chat
+    now = time.time()
+    last = _ROAST_COOLDOWN.get(chat.id, 0)
+    if now - last < 60:
+        wait = int(60 - (now - last))
+        await msg.reply_text(f"⏳ Roast cooldown: <b>{wait}s</b>", parse_mode=ParseMode.HTML)
+        return
+    _ROAST_COOLDOWN[chat.id] = now
+    lang = get_group_lang(chat.id)
+    # Get target
+    target = None
+    if msg.reply_to_message and msg.reply_to_message.from_user and not msg.reply_to_message.from_user.is_bot:
+        target = msg.reply_to_message.from_user
+    else:
+        await msg.reply_text(
+            "🎭 Reply to someone's message to roast them!\n"
+            "<code>Reply → /roast</code>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    if target.id == user.id:
+        # Self-roast
+        tname = clean_name(user.full_name or user.first_name or "you")
+    else:
+        tname = clean_name(target.full_name or target.first_name or "them")
+    pool = _ROAST_POOL_BN if lang=="bn" else _ROAST_POOL_EN
+    roast = random.choice(pool).replace("{name}", html.escape(tname))
+    intros_bn = ["😂 হুমম...", "🎭 সত্যি বলতে...", "🔥 না বললেই নয়..."]
+    intros_en = ["😂 Hmm...", "🎭 Let's be honest...", "🔥 Had to say it..."]
+    intro = random.choice(intros_bn if lang=="bn" else intros_en)
+    await human_delay_and_action(context, update)
+    await msg.reply_text(
+        f"🎭 <b>Maya Roast</b>  🔥\n"
+        f"<blockquote>"
+        f"{intro}\n"
+        f"{roast}"
+        f"</blockquote>"
+        f"<i>😂 Just for fun — no hard feelings!</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+# ─── Maya Show (Weekly/Daily Group Highlights) ────────────────────────────────
+_show_stats: dict[int, dict] = {}   # chat_id -> {date: {msgs, active_users, top_user, ...}}
+
+def _show_track(chat_id: int, user_id: int, user_name: str, text: str):
+    today = local_now().strftime("%Y-%m-%d")
+    stats = _show_stats.setdefault(chat_id, {})
+    day   = stats.setdefault(today, {"msgs":0, "users":{}, "reactions":0})
+    day["msgs"] += 1
+    uname = user_name[:20]
+    day["users"][str(user_id)] = (uname, day["users"].get(str(user_id), ("", 0))[1] + 1)
+
+async def on_mayashow(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    msg  = update.effective_message
+    if not chat or not msg: return
+    if chat.type not in {"group","supergroup"}:
+        await msg.reply_text("🎪 Use /mayashow inside a group!")
+        return
+    await human_delay_and_action(context, update)
+    lang  = get_group_lang(chat.id)
+    today = local_now().strftime("%Y-%m-%d")
+    stats = _show_stats.get(chat.id, {}).get(today, {})
+    total_msgs  = stats.get("msgs", 0)
+    users_today = stats.get("users", {})
+    # Top talker
+    if users_today:
+        top_id, (top_name, top_count) = max(users_today.items(), key=lambda x: x[1][1])
+    else:
+        top_name, top_count = "—", 0
+    # Vibe
+    v = _vibe_analyze(chat.id)
+    now_str = local_now().strftime("%d %b %Y · %I:%M %p")
+    if lang == "bn":
+        text = (
+            f"🎪 <b>Maya Show</b>  <i>·  আজকের Report</i>\n"
+            f"<i>{html.escape(chat.title or '')}  ·  {now_str}</i>\n"
+            f"<blockquote>"
+            f"📊 মোট message: <b>{total_msgs}</b>\n"
+            f"👥 Active members: <b>{len(users_today)}</b>\n"
+            f"🏆 সবচেয়ে active: <b>{html.escape(top_name)}</b>"
+            f" ({top_count} msgs)\n"
+            f"🌡️ Vibe: <b>{v['mood']}</b>  ·  ⚡ {v['energy']}%\n"
+            f"🔥 Hot topic: <b>{v['topic']}</b>"
+            f"</blockquote>"
+            f"<i>✨ Powered by Maya · প্রতিদিন /mayashow দিয়ে দেখো!</i>"
+        )
+    else:
+        text = (
+            f"🎪 <b>Maya Show</b>  <i>·  Today's Highlights</i>\n"
+            f"<i>{html.escape(chat.title or '')}  ·  {now_str}</i>\n"
+            f"<blockquote>"
+            f"📊 Total messages: <b>{total_msgs}</b>\n"
+            f"👥 Active members: <b>{len(users_today)}</b>\n"
+            f"🏆 Most active: <b>{html.escape(top_name)}</b>"
+            f" ({top_count} msgs)\n"
+            f"🌡️ Vibe: <b>{v['mood']}</b>  ·  ⚡ {v['energy']}%\n"
+            f"🔥 Hot topic: <b>{v['topic']}</b>"
+            f"</blockquote>"
+            f"<i>✨ Powered by Maya · Daily highlights!</i>"
+        )
+    await msg.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+
+async def on_start_help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query: return
+    await query.answer()
+    lang = "en"  # private chat — default English
+    text = (
+        f"📋 <b>All Commands</b>\n\n"
+        f"<b>🎮 Games</b>\n"
+        f"/rps · /xo · /luckybox · /tod · /poll\n\n"
+        f"<b>✨ Unique</b>\n"
+        f"/vibe · /predict · /roast · /mayashow\n\n"
+        f"<b>🧠 AI</b>\n"
+        f"/ask · /tr · /fact · /weather\n\n"
+        f"<b>👤 Profile</b>\n"
+        f"/profile · /top · /leaderboard · /groupstats\n\n"
+        f"<b>🛡 Moderation</b>\n"
+        f"/warn · /ban · /setmsglimit · /linkguard\n\n"
+        f"<b>⚙️ Settings</b>\n"
+        f"/status · /setwelcome · /hourly · /setforward"
+    )
+    back_btn = InlineKeyboardMarkup([[
+        InlineKeyboardButton("◀️ Back", callback_data="start_back")
+    ]])
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=back_btn)
+    except Exception:
+        pass
+
+async def on_start_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not query: return
+    await query.answer()
+    # Re-trigger start
+    await on_start(update, context)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# LINK-ONLY MODE + @ALL MENTION SYSTEM
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ─── Link-Only Mode ───────────────────────────────────────────────────────────
+_link_only_enabled: dict[int, bool] = {}   # chat_id -> enabled
+
+_URLISH_RE2 = re.compile(
+    r'(https?://\S+|t\.me/\S+|@\w{5,}|\w+\.\w{2,}/\S*)',
+    re.IGNORECASE
+)
+
+def is_link_only_on(chat_id: int) -> bool:
+    return _link_only_enabled.get(chat_id, False)
+
+async def on_linkonly(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Toggle link-only mode: only messages with links are allowed."""
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    args = context.args or []
+    if not args:
+        status = "ON" if is_link_only_on(chat.id) else "OFF"
+        await msg.reply_text(
+            f"🔗 <b>Link-Only Mode: {status}</b>\n\n"
+            f"Usage: <code>/linkonly on</code> or <code>/linkonly off</code>\n\n"
+            f"<i>When ON, messages without a link are auto-deleted.\n"
+            f"Admins are exempt.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+    val = args[0].strip().lower()
+    if val not in {"on","off"}:
+        await msg.reply_text("Usage: /linkonly on  or  /linkonly off")
+        return
+    _link_only_enabled[chat.id] = (val == "on")
+    icon = "🔗" if val == "on" else "💬"
+    await msg.reply_text(
+        f"{icon} <b>Link-Only Mode: {val.upper()}</b>\n"
+        f"<i>{'Only messages with links are allowed.' if val=='on' else 'All messages allowed again.'}</i>",
+        parse_mode=ParseMode.HTML
+    )
+
+async def check_link_only(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Returns True if message was deleted (caller should stop)."""
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user or user.is_bot:
+        return False
+    if chat.type not in {"group","supergroup"}:
+        return False
+    if not is_link_only_on(chat.id):
+        return False
+    # Admins exempt
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        if member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}:
+            return False
+    except Exception:
+        return False
+    text = msg.text or msg.caption or ""
+    # Check for links/mentions in text AND in entities
+    has_link = bool(_URLISH_RE2.search(text))
+    if not has_link and msg.entities:
+        for ent in msg.entities:
+            if ent.type in {"url","text_link","mention"}:
+                has_link = True
+                break
+    if has_link:
+        return False
+    # Delete and warn
+    try:
+        await msg.delete()
+    except Exception:
+        return True
+    uname = html.escape(clean_name(user.first_name or "Member"))
+    lang  = get_group_lang(chat.id)
+    warn_txt = (
+        f"🔗 {user.mention_html(uname)}, এই চ্যানেলে শুধু লিংক পাঠানো যায়!"
+        if lang == "bn" else
+        f"🔗 {user.mention_html(uname)}, this group is link-only mode!"
+    )
+    try:
+        note = await context.bot.send_message(chat.id, warn_txt, parse_mode=ParseMode.HTML)
+        asyncio.create_task(schedule_delete(context.bot, chat.id, note.message_id, 8))
+    except Exception:
+        pass
+    return True
+
+# ─── @All Mention System ──────────────────────────────────────────────────────
+_mention_active: dict[int, bool] = {}   # chat_id -> active
+
+async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Admin sends a message starting with @all (or containing @all).
+    Bot mentions all tracked members with the message.
+    /cancel stops it.
+    """
+    chat = update.effective_chat
+    msg  = update.effective_message
+    user = update.effective_user
+    if not chat or not msg or not user: return
+    if chat.type not in {"group","supergroup"}: return
+
+    # Check admin
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        is_admin = member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
+    except Exception:
+        is_admin = False
+    if not is_admin and not is_super_admin(user.id):
+        return
+
+    text = msg.text or ""
+    # Must contain @all (case insensitive)
+    import re as _re_all
+    if not _re_all.search(r'@all\b', text, _re_all.IGNORECASE):
+        return
+
+    # Get the actual message (remove @all from it)
+    clean_msg = _re_all.sub(r'@all\b', '', text, flags=_re_all.IGNORECASE).strip()
+
+    # Fetch all tracked members from DB
+    with db_connect() as conn:
+        rows = conn.execute(
+            "SELECT user_id, user_name FROM member_profiles WHERE chat_id=? LIMIT 50",
+            (chat.id,)
+        ).fetchall()
+
+    if not rows:
+        await msg.reply_text("❌ No members tracked yet. Members need to send at least 1 message first.")
+        return
+
+    # Delete original @all message
+    try:
+        await msg.delete()
+    except Exception:
+        pass
+
+    # Build mention string (Telegram allows ~5 mentions per message to avoid spam)
+    CHUNK_SIZE = 5
+    admin_name = html.escape(clean_name(user.full_name or user.first_name or "Admin"))
+
+    # Header message
+    header = (
+        f"📢 <b>{admin_name}</b>\n"
+        f"{'━'*18}\n"
+        f"{html.escape(clean_msg) if clean_msg else '📣 Attention everyone!'}"
+    )
+    try:
+        await context.bot.send_message(chat.id, header, parse_mode=ParseMode.HTML)
+    except Exception:
+        pass
+
+    await asyncio.sleep(0.5)
+
+    # Send mentions in chunks
+    for i in range(0, len(rows), CHUNK_SIZE):
+        chunk = rows[i:i+CHUNK_SIZE]
+        mentions = " ".join(
+            f'<a href="tg://user?id={r["user_id"]}">{html.escape(r["user_name"][:15] or "Member")}</a>'
+            for r in chunk
+        )
+        try:
+            await context.bot.send_message(
+                chat.id, mentions, parse_mode=ParseMode.HTML
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(0.4)   # Rate limit friendly
+
+
+async def on_cancel_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Placeholder — @all doesn't have a running loop so just acknowledge."""
+    if not await require_group_admin(update, context): return
+    await update.effective_message.reply_text(
+        "✅ Done. Use @all in your message to mention all members again."
+    )
+
+
 async def post_init(application):
     delete_webhook()
     commands = [
@@ -7088,6 +7682,7 @@ async def post_init(application):
         BotCommand("listreplies",        "📄 List auto-reply rules"),
         BotCommand("delreply",           "🗑 Delete auto-reply rule"),
         BotCommand("linkguard",          "🛡️ Link protection on/off"),
+        BotCommand("linkonly",            "🔗 Link-only mode on/off"),
         BotCommand("setforward",         "📢 Set forward button link"),
         BotCommand("forwardon",          "▶️ Start forward button"),
         BotCommand("forwardoff",         "⏹ Stop forward button"),
@@ -7125,6 +7720,10 @@ async def post_init(application):
         BotCommand("xo",                 "⭕ X-O / Tic-Tac-Toe"),
         BotCommand("luckybox",           "🎁 Lucky Box game"),
         BotCommand("tod",                "🎭 Truth or Dare"),
+        BotCommand("roast",              "🔥 Roast someone (reply)"),
+        BotCommand("vibe",               "🌡️ Group vibe check"),
+        BotCommand("predict",            "🔮 Daily prediction"),
+        BotCommand("mayashow",           "🎪 Today's highlights"),
         BotCommand("poll",               "📊 Create a group poll"),
         BotCommand("fact",               "💡 Fun fact"),
     ]
@@ -7187,6 +7786,8 @@ def build_app():
     application.add_handler(CommandHandler("listreplies",        on_listreplies))
     application.add_handler(CommandHandler("delreply",           on_delreply))
     application.add_handler(CommandHandler("linkguard",          on_linkguard))
+    application.add_handler(CommandHandler("linkonly",            on_linkonly))
+    application.add_handler(CommandHandler("cancel",              on_cancel_mention))
 
     # Forward button system
     application.add_handler(CommandHandler("setforward",         on_setforward))
@@ -7239,9 +7840,15 @@ def build_app():
     application.add_handler(CommandHandler("xo",                 on_xo))
     application.add_handler(CommandHandler("luckybox",           on_luckybox))
     application.add_handler(CommandHandler("tod",                on_tod))
+    application.add_handler(CommandHandler("vibe",               on_vibe))
+    application.add_handler(CommandHandler("predict",            on_predict))
+    application.add_handler(CommandHandler("roast",              on_roast))
+    application.add_handler(CommandHandler("mayashow",           on_mayashow))
 
     # Callbacks
     application.add_handler(CallbackQueryHandler(on_groupbrowser_callback, pattern=r"^gb\|"))
+    application.add_handler(CallbackQueryHandler(on_start_help_callback,     pattern=r"^start_help$"))
+    application.add_handler(CallbackQueryHandler(on_start_back_callback,     pattern=r"^start_back$"))
     application.add_handler(CallbackQueryHandler(on_xo_callback,           pattern=r"^xo\|"))
     application.add_handler(CallbackQueryHandler(on_rps_callback,          pattern=r"^rps\|"))
     application.add_handler(CallbackQueryHandler(on_luckybox_callback,     pattern=r"^lb\|"))
