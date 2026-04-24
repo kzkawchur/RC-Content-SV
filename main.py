@@ -2844,6 +2844,10 @@ async def on_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row2.append(InlineKeyboardButton("📋 Commands", callback_data="start_help"))
         if row2:
             buttons.append(row2)
+        buttons.append([
+            InlineKeyboardButton("🇧🇩 বাংলা", callback_data="start_lang_bn"),
+            InlineKeyboardButton("🇬🇧 English", callback_data="start_lang_en"),
+        ])
         markup = InlineKeyboardMarkup(buttons) if buttons else None
         await update.effective_message.reply_text(
             text, parse_mode=ParseMode.HTML, reply_markup=markup
@@ -5634,12 +5638,18 @@ def init_forward_db():
             group_link TEXT NOT NULL DEFAULT '',
             group_title TEXT NOT NULL DEFAULT '',
             fwd_text TEXT NOT NULL DEFAULT '',
+            btn_text TEXT NOT NULL DEFAULT '',
             fwd_interval INTEGER NOT NULL DEFAULT 300,
             enabled INTEGER NOT NULL DEFAULT 0,
             last_msg_id INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL
         )""")
+        # Migrate: add btn_text if missing
+        try:
+            conn.execute("ALTER TABLE forward_settings ADD COLUMN btn_text TEXT NOT NULL DEFAULT ''")
+        except Exception:
+            pass
         conn.commit()
 
 def get_forward_settings(chat_id: int):
@@ -5649,19 +5659,21 @@ def get_forward_settings(chat_id: int):
         ).fetchone()
 
 def save_forward_settings(chat_id: int, group_link: str, group_title: str,
-                           fwd_text: str, interval: int, enabled: int):
+                           fwd_text: str, interval: int, enabled: int,
+                           btn_text: str = ""):
     now = int(time.time())
     with db_connect() as conn:
         conn.execute(
             """INSERT INTO forward_settings
-               (chat_id,group_link,group_title,fwd_text,fwd_interval,enabled,last_msg_id,created_at,updated_at)
-               VALUES (?,?,?,?,?,?,0,?,?)
+               (chat_id,group_link,group_title,fwd_text,btn_text,fwd_interval,enabled,last_msg_id,created_at,updated_at)
+               VALUES (?,?,?,?,?,?,?,0,?,?)
                ON CONFLICT(chat_id) DO UPDATE SET
                group_link=excluded.group_link,group_title=excluded.group_title,
-               fwd_text=excluded.fwd_text,fwd_interval=excluded.fwd_interval,
+               fwd_text=excluded.fwd_text,btn_text=excluded.btn_text,
+               fwd_interval=excluded.fwd_interval,
                enabled=excluded.enabled,updated_at=excluded.updated_at""",
             (chat_id, group_link[:200], group_title[:80], fwd_text[:500],
-             interval, enabled, now, now)
+             btn_text[:50], interval, enabled, now, now)
         )
         conn.commit()
 
@@ -5681,9 +5693,10 @@ def set_forward_last_msg_id(chat_id: int, msg_id: int):
         )
         conn.commit()
 
-def _fwd_markup(link: str, count_str: str) -> InlineKeyboardMarkup:
+def _fwd_markup(link: str, count_str: str, btn_text: str = "") -> InlineKeyboardMarkup:
+    label = btn_text.strip() if btn_text.strip() else f"📢 Forward ({count_str})"
     return InlineKeyboardMarkup([[
-        InlineKeyboardButton(f"📢 Forward ({count_str})", url=link)
+        InlineKeyboardButton(label, url=link)
     ]])
 
 async def _run_forward_loop(bot, chat_id: int):
@@ -6938,6 +6951,56 @@ async def start_caption_loop(bot):
     task = asyncio.create_task(_caption_channel_loop(bot))
     _caption_task_ref[0] = task
 
+
+async def on_setforwardbtn(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /setforwardbtn <text>
+    Set custom button label for the forward message.
+    Examples: Join | Subscribe | Unlock 🔓 | Follow | Hot Group 🔥
+    """
+    if not await require_group_admin(update, context):
+        return
+    chat = update.effective_chat
+    msg  = update.effective_message
+    row  = get_forward_settings(chat.id)
+    if not row:
+        await msg.reply_text("❌ Set a link first with /setforward.")
+        return
+
+    if not context.args:
+        current = row.get("btn_text","") or "📢 Forward (0/1)"
+        await msg.reply_text(
+            f"🔘 <b>Forward Button Label</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"Current: <b>{html.escape(current)}</b>\n\n"
+            f"<b>Usage:</b>\n"
+            f"<code>/setforwardbtn Join Now 👋</code>\n"
+            f"<code>/setforwardbtn Subscribe 🔔</code>\n"
+            f"<code>/setforwardbtn Unlock 🔓</code>\n"
+            f"<code>/setforwardbtn Follow ❤️</code>\n"
+            f"<code>/setforwardbtn Hot Group 🔥</code>\n"
+            f"<code>/setforwardbtn Like 👍</code>\n\n"
+            f"<i>Max 50 characters. Leave empty to use default.</i>",
+            parse_mode=ParseMode.HTML
+        )
+        return
+
+    btn_label = " ".join(context.args).strip()[:50]
+    save_forward_settings(
+        chat.id, row["group_link"], row["group_title"],
+        row["fwd_text"], int(row["fwd_interval"] or 300),
+        int(row["enabled"] or 0), btn_text=btn_label
+    )
+    # Restart loop to apply immediately
+    if int(row["enabled"] or 0):
+        _start_forward_task(context.bot, chat.id)
+    await msg.reply_text(
+        f"✅ <b>Button label updated!</b>\n"
+        f"🔘 Label: <b>{html.escape(btn_label)}</b>\n\n"
+        f"<i>The next forward message will use this label.</i>",
+        parse_mode=ParseMode.HTML
+    )
+
 async def on_captionon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     user = update.effective_user
@@ -7360,7 +7423,16 @@ async def on_roast(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         tname = clean_name(target.full_name or target.first_name or "them")
     pool = _ROAST_POOL_BN if lang=="bn" else _ROAST_POOL_EN
-    roast = random.choice(pool).replace("{name}", html.escape(tname))
+    # Track sent roasts per chat to avoid repeats
+    sent_key = f"roast_{chat.id}"
+    sent_roasts = _fact_sent_set.get(sent_key, set())
+    available = [r for r in pool if r not in sent_roasts]
+    if not available:
+        _fact_sent_set[sent_key] = set()
+        available = pool[:]
+    picked = random.choice(available)
+    _fact_sent_set.setdefault(sent_key, set()).add(picked)
+    roast = picked.replace("{name}", html.escape(tname))
     intros_bn = ["😂 হুমম...", "🎭 সত্যি বলতে...", "🔥 না বললেই নয়..."]
     intros_en = ["😂 Hmm...", "🎭 Let's be honest...", "🔥 Had to say it..."]
     intro = random.choice(intros_bn if lang=="bn" else intros_en)
@@ -7445,19 +7517,33 @@ async def on_start_help_callback(update: Update, context: ContextTypes.DEFAULT_T
     await query.answer()
     lang = "en"  # private chat — default English
     text = (
-        f"📋 <b>All Commands</b>\n\n"
+        f"📋 <b>Commands Guide</b>\n\n"
         f"<b>🎮 Games</b>\n"
-        f"/rps · /xo · /luckybox · /tod · /poll\n\n"
-        f"<b>✨ Unique</b>\n"
-        f"/vibe · /predict · /roast · /mayashow\n\n"
-        f"<b>🧠 AI</b>\n"
-        f"/ask · /tr · /fact · /weather\n\n"
-        f"<b>👤 Profile</b>\n"
-        f"/profile · /top · /leaderboard · /groupstats\n\n"
-        f"<b>🛡 Moderation</b>\n"
-        f"/warn · /ban · /setmsglimit · /linkguard\n\n"
-        f"<b>⚙️ Settings</b>\n"
-        f"/status · /setwelcome · /hourly · /setforward"
+        f"<code>/rps</code> — Rock Paper Scissors\n"
+        f"<code>/xo</code> — Tic-Tac-Toe vs Bot\n"
+        f"<code>/luckybox</code> — Open a lucky box\n"
+        f"<code>/tod</code> — Truth or Dare\n"
+        f"<code>/poll Q | A | B | C</code> — Create poll\n\n"
+        f"<b>🔥 Unique to Maya</b>\n"
+        f"<code>/vibe</code> — Group mood check\n"
+        f"<code>/predict</code> — Your daily prediction\n"
+        f"<code>/roast</code> — Reply + roast someone\n"
+        f"<code>/mayashow</code> — Today's highlights\n\n"
+        f"<b>🧠 AI & Utilities</b>\n"
+        f"<code>/ask what is AI?</code> — AI answer\n"
+        f"<code>/tr hello</code> — Translate BN↔EN\n"
+        f"<code>/fact</code> — Random fun fact\n"
+        f"<code>/weather Dhaka</code> — Weather info\n\n"
+        f"<b>👤 Profile & Stats</b>\n"
+        f"<code>/profile</code> — Your group profile\n"
+        f"<code>/top</code> — Most active members\n"
+        f"<code>/leaderboard</code> — Game rankings\n\n"
+        f"<b>🛡 Moderation (Admin)</b>\n"
+        f"<code>/warn</code> — Reply to warn a user\n"
+        f"<code>/ban</code> — Reply to ban a user\n"
+        f"<code>/linkguard on</code> — Block spam links\n"
+        f"<code>/setmsglimit 5 500</code> — Msg length limit\n"
+        f"<code>/linkonly on</code> — Links-only mode"
     )
     back_btn = InlineKeyboardMarkup([[
         InlineKeyboardButton("◀️ Back", callback_data="start_back")
@@ -7469,10 +7555,48 @@ async def on_start_help_callback(update: Update, context: ContextTypes.DEFAULT_T
 
 async def on_start_back_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    if not query: return
+    user  = update.effective_user
+    if not query or not user: return
     await query.answer()
-    # Re-trigger start
-    await on_start(update, context)
+    phase_p   = phase_now()
+    ph_icon2  = {"morning":"🌅","day":"☀️","evening":"🌆","night":"🌙"}.get(phase_p,"✨")
+    uname     = html.escape(clean_name(user.first_name or "there"))
+    greet_phrases = {
+        "morning": f"Good morning, {uname}! ☀️",
+        "day":     f"Hello, {uname}! 👋",
+        "evening": f"Good evening, {uname}! 🌆",
+        "night":   f"Hey night owl, {uname}! 🌙",
+    }
+    greet = greet_phrases.get(phase_p, f"Hey {uname}!")
+    text = (
+        f"✦ <b>{greet}</b>\n"
+        f"I'm <b>{BOT_NAME}</b> — your premium group companion.\n\n"
+        f"<blockquote>"
+        f"🎮 <b>Games</b>  RPS · XO · LuckyBox · TOD · Poll\n"
+        f"🔥 <b>Unique</b>  Vibe · Predict · Roast · Maya Show\n"
+        f"🧠 <b>AI</b>      Ask · Translate · Facts · Weather\n"
+        f"🛡 <b>Mod</b>    Warn · Ban · LinkGuard · MsgLimit\n"
+        f"✨ <b>Smart</b>  Welcome Cards · Hourly · Keyword AI"
+        f"</blockquote>"
+        f"<i>Add me to your group and the magic begins! 🚀</i>"
+    )
+    buttons = []
+    if SUPPORT_GROUP_URL:
+        buttons.append([InlineKeyboardButton(f"💬 {SUPPORT_GROUP_NAME}", url=SUPPORT_GROUP_URL)])
+    try:
+        bot_username = (await context.bot.get_me()).username
+        add_url = f"https://t.me/{bot_username}?startgroup=true"
+        row2 = [InlineKeyboardButton("➕ Add to Group", url=add_url),
+                InlineKeyboardButton("📋 Commands", callback_data="start_help")]
+        buttons.append(row2)
+    except Exception:
+        buttons.append([InlineKeyboardButton("📋 Commands", callback_data="start_help")])
+    buttons.append([InlineKeyboardButton("🌐 Change Language", callback_data="start_lang")])
+    markup = InlineKeyboardMarkup(buttons)
+    try:
+        await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+    except Exception:
+        pass
 
 # ══════════════════════════════════════════════════════════════════════════════
 # LINK-ONLY MODE + @ALL MENTION SYSTEM
@@ -7598,15 +7722,19 @@ async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Get the actual message (remove @all from it)
     clean_msg = _re_all.sub(r'@all\b', '', text, flags=_re_all.IGNORECASE).strip()
 
-    # Fetch all tracked members from DB
+    # Fetch tracked members from DB
     with db_connect() as conn:
         rows = conn.execute(
-            "SELECT user_id, user_name FROM member_profiles WHERE chat_id=? LIMIT 50",
+            "SELECT user_id, user_name FROM member_profiles WHERE chat_id=? ORDER BY last_seen DESC LIMIT 50",
             (chat.id,)
         ).fetchall()
 
     if not rows:
-        await msg.reply_text("❌ No members tracked yet. Members need to send at least 1 message first.")
+        await msg.reply_text(
+            "❌ <b>No tracked members yet!</b>\n\n"
+            "<i>Members appear here after they send at least 1 message in the group.</i>",
+            parse_mode=ParseMode.HTML
+        )
         return
 
     # Delete original @all message
@@ -7656,6 +7784,27 @@ async def on_cancel_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+
+async def on_start_lang_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Language selection from /start."""
+    query = update.callback_query
+    if not query: return
+    lang_code = "bn" if query.data == "start_lang_bn" else "en"
+    lang_name = "বাংলা 🇧🇩" if lang_code == "bn" else "English 🇬🇧"
+    await query.answer(f"Language: {lang_name}", show_alert=False)
+    # If in a group context, set group language
+    chat = update.effective_chat
+    if chat and chat.type in {"group","supergroup"}:
+        set_group_value(chat.id, "language", lang_code)
+    await query.edit_message_text(
+        f"🌐 <b>Language set to {lang_name}</b>\n\n"
+        f"<i>Use /lang in any group to change language there.</i>",
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("◀️ Back", callback_data="start_back")
+        ]])
+    )
+
 async def post_init(application):
     delete_webhook()
     commands = [
@@ -7687,6 +7836,7 @@ async def post_init(application):
         BotCommand("forwardon",          "▶️ Start forward button"),
         BotCommand("forwardoff",         "⏹ Stop forward button"),
         BotCommand("setforwardinterval", "⏰ Set forward interval"),
+        BotCommand("setforwardbtn",      "🔘 Set forward button label"),
         BotCommand("lang",               "🌐 Language: bn or en"),
         BotCommand("voice",              "🎙 Welcome voice: on/off"),
         BotCommand("hourly",             "📨 Hourly messages: on/off/now"),
@@ -7794,6 +7944,7 @@ def build_app():
     application.add_handler(CommandHandler("forwardon",          on_forwardon))
     application.add_handler(CommandHandler("forwardoff",         on_forwardoff))
     application.add_handler(CommandHandler("setforwardinterval", on_setforwardinterval))
+    application.add_handler(CommandHandler("setforwardbtn",      on_setforwardbtn))
 
     # Group admin settings
     application.add_handler(CommandHandler("setvoice",           on_setvoice))
@@ -7849,6 +8000,7 @@ def build_app():
     application.add_handler(CallbackQueryHandler(on_groupbrowser_callback, pattern=r"^gb\|"))
     application.add_handler(CallbackQueryHandler(on_start_help_callback,     pattern=r"^start_help$"))
     application.add_handler(CallbackQueryHandler(on_start_back_callback,     pattern=r"^start_back$"))
+    application.add_handler(CallbackQueryHandler(on_start_lang_callback,     pattern=r"^start_lang"))
     application.add_handler(CallbackQueryHandler(on_xo_callback,           pattern=r"^xo\|"))
     application.add_handler(CallbackQueryHandler(on_rps_callback,          pattern=r"^rps\|"))
     application.add_handler(CallbackQueryHandler(on_luckybox_callback,     pattern=r"^lb\|"))
