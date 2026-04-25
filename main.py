@@ -5729,7 +5729,7 @@ async def _run_forward_loop(bot, chat_id: int):
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=_fwd_markup(link, count_str),
+                reply_markup=_fwd_markup(link, count_str, row.get("btn_text","") or ""),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
@@ -7424,14 +7424,17 @@ async def on_roast(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tname = clean_name(target.full_name or target.first_name or "them")
     pool = _ROAST_POOL_BN if lang=="bn" else _ROAST_POOL_EN
     # Track sent roasts per chat to avoid repeats
+    # Per-chat dedup so same roast won't repeat in a chat
     sent_key = f"roast_{chat.id}"
-    sent_roasts = _fact_sent_set.get(sent_key, set())
-    available = [r for r in pool if r not in sent_roasts]
+    if sent_key not in _fact_sent_set:
+        _fact_sent_set[sent_key] = set()
+    sent_set = _fact_sent_set[sent_key]
+    available = [r for r in pool if r not in sent_set]
     if not available:
         _fact_sent_set[sent_key] = set()
-        available = pool[:]
+        available = list(pool)
     picked = random.choice(available)
-    _fact_sent_set.setdefault(sent_key, set()).add(picked)
+    _fact_sent_set[sent_key].add(picked)
     roast = picked.replace("{name}", html.escape(tname))
     intros_bn = ["😂 হুমম...", "🎭 সত্যি বলতে...", "🔥 না বললেই নয়..."]
     intros_en = ["😂 Hmm...", "🎭 Let's be honest...", "🔥 Had to say it..."]
@@ -7747,33 +7750,62 @@ async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     CHUNK_SIZE = 5
     admin_name = html.escape(clean_name(user.full_name or user.first_name or "Admin"))
 
-    # Header message
-    header = (
-        f"📢 <b>{admin_name}</b>\n"
-        f"{'━'*18}\n"
-        f"{html.escape(clean_msg) if clean_msg else '📣 Attention everyone!'}"
+    # Build full mention string
+    all_mentions = " ".join(
+        f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "Member")[:20])}</a>'
+        for r in rows
     )
-    try:
-        await context.bot.send_message(chat.id, header, parse_mode=ParseMode.HTML)
-    except Exception:
-        pass
-
-    await asyncio.sleep(0.5)
-
-    # Send mentions in chunks
-    for i in range(0, len(rows), CHUNK_SIZE):
-        chunk = rows[i:i+CHUNK_SIZE]
-        mentions = " ".join(
-            f'<a href="tg://user?id={r["user_id"]}">{html.escape(r["user_name"][:15] or "Member")}</a>'
-            for r in chunk
-        )
+    # Send: message first, then all mentions below it in ONE combined message
+    msg_text = html.escape(clean_msg) if clean_msg else "📣 সবার দৃষ্টি আকর্ষণ করা হচ্ছে!"
+    combined = (
+        f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}\n\n{all_mentions}"
+    )
+    # Telegram has 4096 char limit — split if needed
+    if len(combined) <= 4000:
+        try:
+            await context.bot.send_message(chat.id, combined, parse_mode=ParseMode.HTML)
+        except Exception as e:
+            # Fallback: send header then mentions in chunks
+            try:
+                await context.bot.send_message(
+                    chat.id,
+                    f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception:
+                pass
+            for i in range(0, len(rows), CHUNK_SIZE):
+                chunk = rows[i:i+CHUNK_SIZE]
+                chunk_mentions = " ".join(
+                    f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "M")[:15])}</a>'
+                    for r in chunk
+                )
+                try:
+                    await context.bot.send_message(chat.id, chunk_mentions, parse_mode=ParseMode.HTML)
+                    await asyncio.sleep(0.4)
+                except Exception:
+                    pass
+    else:
+        # Too long — send header + chunked mentions
         try:
             await context.bot.send_message(
-                chat.id, mentions, parse_mode=ParseMode.HTML
+                chat.id,
+                f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}",
+                parse_mode=ParseMode.HTML
             )
         except Exception:
             pass
-        await asyncio.sleep(0.4)   # Rate limit friendly
+        for i in range(0, len(rows), CHUNK_SIZE):
+            chunk = rows[i:i+CHUNK_SIZE]
+            chunk_txt = " ".join(
+                f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "M")[:15])}</a>'
+                for r in chunk
+            )
+            try:
+                await context.bot.send_message(chat.id, chunk_txt, parse_mode=ParseMode.HTML)
+                await asyncio.sleep(0.4)
+            except Exception:
+                pass
 
 
 async def on_cancel_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
