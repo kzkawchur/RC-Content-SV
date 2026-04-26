@@ -5729,7 +5729,7 @@ async def _run_forward_loop(bot, chat_id: int):
             sent = await bot.send_message(
                 chat_id=chat_id,
                 text=text,
-                reply_markup=_fwd_markup(link, count_str, row.get("btn_text","") or ""),
+                reply_markup=_fwd_markup(link, count_str, (dict(row).get("btn_text","") if hasattr(row,"keys") else "") or ""),
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
             )
@@ -5785,12 +5785,18 @@ async def on_setforward(update: Update, context: ContextTypes.DEFAULT_TYPE):
         link   = row["group_link"] if row else "—"
         itv    = int(row["fwd_interval"]) if row else 300
         txt    = row["fwd_text"] if row else "—"
+        btn_lbl_s = (row.get("btn_text","") if hasattr(row,"keys") else "") or "📢 Forward"
+        try:
+            _cur_btn = str(row["btn_text"] or "").strip() if row else ""
+        except Exception:
+            _cur_btn = ""
         await msg.reply_text(
             f"📢 <b>Forward Button System</b>\n"
             f"━━━━━━━━━━━━━━━━━━\n"
             f"Status:   <b>{status}</b>\n"
             f"Link:     <code>{html.escape(link)}</code>\n"
             f"Interval: <b>{itv}s ({itv//60}m)</b>\n"
+            f"Button:   <b>{html.escape(_cur_btn or '📢 Forward')}</b>\n"
             f"Text:     {html.escape(txt[:60])}\n\n"
             f"<b>Commands:</b>\n"
             f"<code>/setforward https://t.me/yourgroup</code>\n"
@@ -5814,19 +5820,22 @@ async def on_setforward(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     custom_text = " ".join(args[1:]).strip() if len(args) > 1 else ""
     fwd_text = custom_text if custom_text else (
-        f"📢 Join <b>{html.escape(chat.title or 'our group')}</b>!\n"
-        f"Click below to join and share with friends."
+        f"📢 {chat.title or 'our group'} — Join now!\n"
+        f"Click the button below to join and share."
     )
 
     row = get_forward_settings(chat.id)
     interval = int(row["fwd_interval"]) if row else 300
     save_forward_settings(chat.id, link, chat.title or "", fwd_text, interval, 0)
 
+    # Clean text for preview (strip HTML tags)
+    import re as _re_fwd
+    fwd_preview = _re_fwd.sub(r'<[^>]+>', '', fwd_text)[:60]
     await msg.reply_text(
         f"✅ <b>Forward link saved!</b>\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"🔗 Link: <code>{html.escape(link)}</code>\n"
-        f"📝 Text: {html.escape(fwd_text[:60])}\n\n"
+        f"📝 Text: {html.escape(fwd_preview)}\n\n"
         f"Use <code>/forwardon</code> to activate.",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
@@ -5851,10 +5860,12 @@ async def on_forwardon(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mins = itv // 60
     secs = itv % 60
     interval_str = f"{mins}m {secs}s" if secs else f"{mins}m"
+    btn_cur = (row.get("btn_text","") or "").strip() or "📢 Forward"
     await msg.reply_text(
         f"📢 <b>Forward Button</b>  🟢 Active\n"
         f"━━━━━━━━━━━━━━━━━━\n"
         f"⏰ Every <b>{interval_str}</b>\n"
+        f"🔘 Button: <b>{html.escape(btn_cur)}</b>\n"
         f"🔗 <code>{html.escape(row['group_link'])}</code>",
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True
