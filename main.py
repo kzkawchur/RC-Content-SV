@@ -1453,21 +1453,22 @@ def cleanup_old_temp_files(max_age_seconds=1800):
 
 def cleanup_loop():
     logger.info("Cleanup loop started")
+    import time as _t2
+    _t2.sleep(30)  # Startup delay
     _cycle = 0
     while True:
         try:
             cleanup_old_temp_files()
             _cycle += 1
-            # Every 6 cycles (1 hour) also clean DB tables
             if _cycle % 6 == 0:
                 try:
                     cleanup_daily_marks()
                     logger.info("DB cleanup done")
                 except Exception:
-                    logger.exception("DB cleanup failed")
+                    pass
         except Exception:
-            logger.exception("cleanup_loop failed")
-        time.sleep(600)
+            pass  # Never crash cleanup loop
+        _t2.sleep(600)
 
 async def require_group_admin(update,context):
     chat=update.effective_chat; user=update.effective_user
@@ -5705,8 +5706,13 @@ async def _run_forward_loop(bot, chat_id: int):
     forward_count = 0
     while True:
         try:
-            row = get_forward_settings(chat_id)
-            if not row or not int(row["enabled"]):
+            try:
+                row = get_forward_settings(chat_id)
+            except Exception as e:
+                logger.warning("Forward DB error for %s: %s", chat_id, e)
+                await asyncio.sleep(60)
+                continue
+            if not row or not int(row["enabled"] or 0):
                 logger.info("Forward loop stopped for chat %s (disabled)", chat_id)
                 break
             link     = row["group_link"]
@@ -6039,12 +6045,20 @@ async def _ultra_message_then_keyword(update: Update, context: ContextTypes.DEFA
         return
     if await check_link_only(update, context):
         return
-    # @all mention check
+    # @all mention — only process if user is admin
     txt = (update.effective_message.text or "") if update.effective_message else ""
     import re as _re_chk
     if _re_chk.search(r'@all\b', txt, _re_chk.IGNORECASE):
-        await on_all_mention(update, context)
-        return
+        if update.effective_user:
+            try:
+                _mbr = await context.bot.get_chat_member(
+                    update.effective_chat.id, update.effective_user.id)
+                if _mbr.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}                         or is_super_admin(update.effective_user.id):
+                    await on_all_mention(update, context)
+                    return
+            except Exception:
+                pass
+        return  # Non-admin: ignore @all silently
     try:
         if update.effective_user and update.effective_chat:
             u = update.effective_user
@@ -6716,6 +6730,7 @@ async def on_fact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg  = update.effective_message
     chat = update.effective_chat
     if not msg or not chat: return
+    if not update.effective_user: return
 
     lang   = get_group_lang(chat.id) if chat.type in {"group","supergroup"} else "en"
     chat_id = chat.id if chat else 0
@@ -7708,9 +7723,9 @@ _mention_active: dict[int, bool] = {}   # chat_id -> active
 
 async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Admin sends a message starting with @all (or containing @all).
-    Bot mentions all tracked members with the message.
-    /cancel stops it.
+    Admin sends message containing @all → bot tags all tracked members.
+    Message first, then 4-5 members per chunk below.
+    Only admins can use this.
     """
     chat = update.effective_chat
     msg  = update.effective_message
@@ -7718,38 +7733,40 @@ async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not chat or not msg or not user: return
     if chat.type not in {"group","supergroup"}: return
 
-    # Check admin
+    # Admin check
     try:
         member = await context.bot.get_chat_member(chat.id, user.id)
         is_admin = member.status in {ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER}
     except Exception:
         is_admin = False
     if not is_admin and not is_super_admin(user.id):
-        return
+        return  # Silently ignore non-admins
 
     text = msg.text or ""
-    # Must contain @all (case insensitive)
     import re as _re_all
     if not _re_all.search(r'@all\b', text, _re_all.IGNORECASE):
         return
 
-    # Get the actual message (remove @all from it)
+    # Extract message (remove @all)
     clean_msg = _re_all.sub(r'@all\b', '', text, flags=_re_all.IGNORECASE).strip()
 
-    # Fetch tracked members from DB
+    # Get all tracked members from DB
     with db_connect() as conn:
         rows = conn.execute(
-            "SELECT user_id, user_name FROM member_profiles WHERE chat_id=? ORDER BY last_seen DESC LIMIT 50",
+            "SELECT user_id, user_name FROM member_profiles "
+            "WHERE chat_id=? ORDER BY last_seen DESC LIMIT 200",
             (chat.id,)
         ).fetchall()
 
     if not rows:
         await msg.reply_text(
-            "❌ <b>No tracked members yet!</b>\n\n"
-            "<i>Members appear here after they send at least 1 message in the group.</i>",
+            "❌ <b>No members to tag!</b>\n"
+            "<i>Members appear here after sending at least 1 message.</i>",
             parse_mode=ParseMode.HTML
         )
         return
+
+    admin_name = html.escape(clean_name(user.full_name or user.first_name or "Admin"))
 
     # Delete original @all message
     try:
@@ -7757,73 +7774,47 @@ async def on_all_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    # Build mention string (Telegram allows ~5 mentions per message to avoid spam)
-    CHUNK_SIZE = 5
-    admin_name = html.escape(clean_name(user.full_name or user.first_name or "Admin"))
+    # Step 1: Send the admin's message
+    msg_body = html.escape(clean_msg) if clean_msg else "📣 Attention everyone!"
+    try:
+        await context.bot.send_message(
+            chat.id,
+            f"📢 <b>{admin_name}</b>\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{msg_body}",
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.warning("@all header send failed: %s", e)
 
-    # Build full mention string
-    all_mentions = " ".join(
-        f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "Member")[:20])}</a>'
-        for r in rows
-    )
-    # Send: message first, then all mentions below it in ONE combined message
-    msg_text = html.escape(clean_msg) if clean_msg else "📣 সবার দৃষ্টি আকর্ষণ করা হচ্ছে!"
-    combined = (
-        f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}\n\n{all_mentions}"
-    )
-    # Telegram has 4096 char limit — split if needed
-    if len(combined) <= 4000:
-        try:
-            await context.bot.send_message(chat.id, combined, parse_mode=ParseMode.HTML)
-        except Exception as e:
-            # Fallback: send header then mentions in chunks
-            try:
-                await context.bot.send_message(
-                    chat.id,
-                    f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}",
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception:
-                pass
-            for i in range(0, len(rows), CHUNK_SIZE):
-                chunk = rows[i:i+CHUNK_SIZE]
-                chunk_mentions = " ".join(
-                    f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "M")[:15])}</a>'
-                    for r in chunk
-                )
-                try:
-                    await context.bot.send_message(chat.id, chunk_mentions, parse_mode=ParseMode.HTML)
-                    await asyncio.sleep(0.4)
-                except Exception:
-                    pass
-    else:
-        # Too long — send header + chunked mentions
+    await asyncio.sleep(0.5)
+
+    # Step 2: Send members in chunks of 5
+    CHUNK = 5
+    for i in range(0, len(rows), CHUNK):
+        chunk = rows[i:i+CHUNK]
+        mentions = " ".join(
+            f'<a href="tg://user?id={r["user_id"]}">'
+            f'{html.escape((r["user_name"] or "Member")[:20])}'
+            f'</a>'
+            for r in chunk
+        )
         try:
             await context.bot.send_message(
-                chat.id,
-                f"📢 <b>{admin_name}</b>\n━━━━━━━━━━━━━━━━━━\n{msg_text}",
-                parse_mode=ParseMode.HTML
+                chat.id, mentions, parse_mode=ParseMode.HTML
             )
-        except Exception:
-            pass
-        for i in range(0, len(rows), CHUNK_SIZE):
-            chunk = rows[i:i+CHUNK_SIZE]
-            chunk_txt = " ".join(
-                f'<a href="tg://user?id={r["user_id"]}">{html.escape((r["user_name"] or "M")[:15])}</a>'
-                for r in chunk
-            )
-            try:
-                await context.bot.send_message(chat.id, chunk_txt, parse_mode=ParseMode.HTML)
-                await asyncio.sleep(0.4)
-            except Exception:
-                pass
+        except Exception as e:
+            logger.warning("@all chunk send failed: %s", e)
+        await asyncio.sleep(0.4)
 
 
 async def on_cancel_mention(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Placeholder — @all doesn't have a running loop so just acknowledge."""
+    """Admin cancels any ongoing @all operation."""
     if not await require_group_admin(update, context): return
     await update.effective_message.reply_text(
-        "✅ Done. Use @all in your message to mention all members again."
+        "✅ <b>Done!</b>\n"
+        "<i>Use @all in your next message to mention all members.</i>",
+        parse_mode=ParseMode.HTML
     )
 
 
